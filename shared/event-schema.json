@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HoneypotTelemetryEvent",
+  "type": "object",
+  "required": ["timestamp", "node_id", "event_type", "source_ip", "protocol"],
+  "properties": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "node_id": { "type": "string" },
+    "event_type": { 
+      "type": "string", 
+      "enum": ["login_attempt", "command_exec", "file_download", "http_request", "port_scan"] 
+    },
+    "source_ip": { "type": "string" },
+    "source_port": { "type": "integer" },
+    "target_port": { "type": "integer" },
+    "protocol": { 
+      "type": "string", 
+      "enum": ["SSH", "HTTP", "FTP", "TELNET", "TCP_RAW"] 
+    },
+    "session_id": { "type": "string" },
+    "credentials": {
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "success": { "type": "boolean" }
+      }
+    },
+    "payload_details": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string" },
+        "extracted_url": { "type": "string" },
+        "http_method": { "type": "string" },
+        "http_path": { "type": "string" },
+        "http_user_agent": { "type": "string" },
+        "raw_data": { "type": "string" }
+      }
+    }
+  }
+}
