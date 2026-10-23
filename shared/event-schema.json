@@ -8,7 +8,7 @@
     "node_id": { "type": "string" },
     "event_type": { 
       "type": "string", 
-      "enum": ["login_attempt", "command_exec", "file_download", "http_request", "port_scan"] 
+      "enum": ["session_start", "session_end", "login_attempt", "command_exec", "file_download", "http_request", "port_scan"] 
     },
     "source_ip": { "type": "string" },
     "source_port": { "type": "integer" },
