@@ -2,19 +2,17 @@ package services
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"honeypot-agent/internal/models"
 	"honeypot-agent/internal/shipper"
+	"honeypot-agent/internal/vfs"
 )
 
 // Bytes speciali din protocolul Telnet (RFC 854).
@@ -35,21 +33,7 @@ const (
 	telnetMaxLine       = 1024
 	telnetMaxLoginTries = 3
 	telnetMaxCommands   = 50
-	telnetPrompt        = "root@gateway:~# "
 )
-
-// Combinatii user:parola cu care "intra" atacatorul, ca sa-i vedem comenzile.
-var weakCredentials = map[string]bool{
-	"root:root":      true,
-	"root:admin":     true,
-	"root:123456":    true,
-	"root:12345":     true,
-	"admin:admin":    true,
-	"admin:password": true,
-	"user:user":      true,
-}
-
-var telnetURLRegex = regexp.MustCompile(`(?:https?|ftp|tftp)://[^\s'";|&<>()]+`)
 
 func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
@@ -146,31 +130,27 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	}
 
 	// ---------- Faza 2: shell fals ----------
-	fmt.Fprint(conn, "\r\nBusyBox v1.30.1 built-in shell (ash)\r\n\r\n")
+	// fiecare conexiune primeste shell-ul ei (cu directorul curent si fisierele ei)
+	sh := vfs.NewShell()
+	fmt.Fprint(conn, toCRLF(vfs.Banner))
 	for i := 0; i < telnetMaxCommands; i++ {
-		fmt.Fprint(conn, telnetPrompt)
+		fmt.Fprint(conn, sh.Prompt())
 		line, err := readTelnetLine(conn, reader)
 		if err != nil {
 			return
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
 
-		event := newEvent("command_exec")
-		event.PayloadDetails = &models.PayloadDetails{
-			Command:      line,
-			ExtractedURL: telnetURLRegex.FindString(line),
-		}
-		shipper.EmitEvent(event)
-
-		output, exit := fakeShellOutput(line)
-		fmt.Fprint(conn, output)
+		output, exit := runShellLine(sh, line, newEvent, shipper)
+		fmt.Fprint(conn, toCRLF(output))
 		if exit {
 			return
 		}
 	}
+}
+
+// toCRLF: shell-ul scrie randurile cu \n, dar Telnet vrea \r\n la capat de rand.
+func toCRLF(text string) string {
+	return strings.ReplaceAll(text, "\n", "\r\n")
 }
 
 // readTelnetLine citeste o linie de la client si arunca comenzile Telnet (IAC ...).
@@ -243,42 +223,4 @@ func skipTelnetCommand(reader *bufio.Reader) error {
 		}
 	}
 	return nil
-}
-
-// fakeShellOutput intoarce ce "afiseaza" shell-ul si daca sesiunea trebuie inchisa.
-func fakeShellOutput(line string) (string, bool) {
-	fields := strings.Fields(line)
-	cmd := fields[0]
-
-	switch cmd {
-	case "exit", "logout", "quit":
-		return "", true
-	case "whoami":
-		return "root\r\n", false
-	case "id":
-		return "uid=0(root) gid=0(root) groups=0(root)\r\n", false
-	case "uname":
-		return "Linux gateway 4.14.180 #1 SMP armv7l GNU/Linux\r\n", false
-	case "pwd":
-		return "/root\r\n", false
-	case "ls":
-		return "bin  dev  etc  lib  proc  sbin  tmp  usr  var\r\n", false
-	case "enable", "system", "shell", "sh", "cd":
-		return "", false
-	case "busybox", "/bin/busybox":
-		if len(fields) > 1 {
-			return fields[1] + ": applet not found\r\n", false
-		}
-		return "BusyBox v1.30.1 multi-call binary.\r\n", false
-	case "wget", "curl", "tftp":
-		return cmd + ": can't connect to remote host: Connection timed out\r\n", false
-	default:
-		return fmt.Sprintf("-sh: %s: not found\r\n", cmd), false
-	}
-}
-
-func newSessionID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
 }

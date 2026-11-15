@@ -6,12 +6,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -19,6 +17,7 @@ import (
 
 	"honeypot-agent/internal/models"
 	"honeypot-agent/internal/shipper"
+	"honeypot-agent/internal/vfs"
 )
 
 const (
@@ -101,7 +100,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 
 			user := meta.User()
 			pass := string(password)
-			success := weakCredentials[user+":"+pass] // aceeasi lista ca la telnet
+			success := weakCredentials[user+":"+pass] // lista comuna, din common.go
 
 			event := newEvent("login_attempt")
 			event.Credentials = &models.Credentials{
@@ -169,7 +168,9 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			runSSHCommand(payload.Command, channel, newEvent, shipper)
+			// fara terminal: raspunsul merge direct pe canal, cu \n simplu (ca la un server real)
+			output, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
+			fmt.Fprint(channel, output)
 			sendExitStatus(channel)
 			return
 
@@ -193,46 +194,30 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 func runSSHShell(conn net.Conn, channel ssh.Channel,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
 
-	fmt.Fprint(channel, "\r\nBusyBox v1.30.1 built-in shell (ash)\r\n\r\n")
+	// fiecare conexiune primeste shell-ul ei (cu directorul curent si fisierele ei)
+	sh := vfs.NewShell()
 
 	// term.Terminal face pentru noi echo-ul, backspace-ul si sagetile.
 	// Cu pty, clientul NU mai afiseaza singur ce tasteaza - serverul trebuie sa i-o trimita inapoi.
-	terminal := term.NewTerminal(channel, telnetPrompt)
+	// Bonus: cand scriem in el, transforma singur \n in \r\n.
+	terminal := term.NewTerminal(channel, sh.Prompt())
+	fmt.Fprint(terminal, vfs.Banner)
 
 	for i := 0; i < sshMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
+		terminal.SetPrompt(sh.Prompt()) // promptul se schimba dupa cd
 		line, err := terminal.ReadLine()
 		if err != nil {
 			return
 		}
-		if runSSHCommand(line, terminal, newEvent, shipper) {
+
+		output, exit := runShellLine(sh, line, newEvent, shipper)
+		fmt.Fprint(terminal, output)
+		if exit {
 			return
 		}
 	}
-}
-
-// runSSHCommand logheaza comanda si scrie raspunsul fals. Intoarce true daca sesiunea se inchide.
-func runSSHCommand(line string, out io.Writer,
-	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) bool {
-
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return false // fakeShellOutput ar crapa pe linie goala (fields[0])
-	}
-
-	event := newEvent("command_exec")
-	event.PayloadDetails = &models.PayloadDetails{
-		Command:      line,
-		ExtractedURL: telnetURLRegex.FindString(line),
-	}
-	shipper.EmitEvent(event)
-
-	output, exit := fakeShellOutput(line) // refolosit din telnet.go
-	// fakeShellOutput e scris pt telnet (\r\n). In SSH, terminalul pune singur \r-ul,
-	// iar la exec (fara pty) un server real trimite doar \n -> scoatem \r-ul.
-	fmt.Fprint(out, strings.ReplaceAll(output, "\r\n", "\n"))
-	return exit
 }
 
 // sendExitStatus ii spune clientului "comanda s-a terminat cu codul 0", ca un server real.

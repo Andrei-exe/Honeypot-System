@@ -2,14 +2,11 @@ package services
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,17 +21,6 @@ const (
 	ftpMaxCommands   = 50
 	ftpMaxLoginTries = 3
 )
-
-var ftpCredentials = map[string]bool{
-	"root:root":      true,
-	"root:admin":     true,
-	"root:123456":    true,
-	"admin:admin":    true,
-	"admin:password": true,
-	"user:user":      true,
-}
-
-var ftpURLRegex = regexp.MustCompile(`(?:https?|ftp|tftp)://[^\s'";|&<>()]+`)
 
 func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
@@ -65,7 +51,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 		ip = conn.RemoteAddr().String()
 	}
 	port, _ := strconv.Atoi(portText)
-	sessionID := ftpSessionID()
+	sessionID := newSessionID()
 
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
@@ -153,7 +139,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			event := newEvent("command_exec")
 			event.PayloadDetails = &models.PayloadDetails{
 				Command:      line,
-				ExtractedURL: ftpURLRegex.FindString(line),
+				ExtractedURL: urlRegex.FindString(line),
 			}
 			shipper.EmitEvent(event)
 
@@ -170,7 +156,7 @@ func ftpLoginOK(user, pass string) bool {
 	if strings.ToLower(user) == "anonymous" {
 		return true
 	}
-	return ftpCredentials[user+":"+pass]
+	return weakCredentials[user+":"+pass]
 }
 
 func ftpAnswer(cmd, arg string, cwd *string) string {
@@ -208,10 +194,4 @@ func ftpAnswer(cmd, arg string, cwd *string) string {
 		return "550 Permission denied."
 	}
 	return "500 Unknown command."
-}
-
-func ftpSessionID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
 }
