@@ -44,17 +44,16 @@ func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
 	if err != nil {
 		return err
 	}
+	// limite de conexiuni + pauza la erori de accept (vezi limit.go).
+	// La SSH conteaza dublu: fiecare handshake inseamna criptografie, adica procesor.
+	listener = limitConnections(listener, "SSH")
 	defer listener.Close()
 
 	log.Println("SSH node running")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			log.Println("ssh accept error:", err)
-			continue
+			return err // limitListener reincearca singur erorile trecatoare; aici ajung doar cele fatale
 		}
 		// fiecare atacator primeste goroutine-ul lui, exact ca la telnet
 		go handleSSH(conn, hostKey, nodeID, shipper)

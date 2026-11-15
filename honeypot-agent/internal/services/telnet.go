@@ -2,7 +2,6 @@ package services
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -40,17 +39,15 @@ func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
 	if err != nil {
 		return err
 	}
+	// limite de conexiuni + pauza la erori de accept (vezi limit.go)
+	listener = limitConnections(listener, "TELNET")
 	defer listener.Close()
 
 	log.Println("TELNET node running")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			log.Println("telnet accept error:", err)
-			continue
+			return err // limitListener reincearca singur erorile trecatoare; aici ajung doar cele fatale
 		}
 		// fiecare atacator primeste goroutine-ul lui
 		go handleTelnet(conn, nodeID, shipper)
@@ -86,14 +83,15 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	// func() ca timestamp-ul sa fie calculat la final, nu acum
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
-	reader := bufio.NewReader(conn)
+	// cititorul tine minte intre citiri daca ultimul Enter s-a terminat cu \r (vezi telnetReader)
+	reader := &telnetReader{conn: conn, r: bufio.NewReader(conn)}
 
 	// ---------- Faza 1: login ----------
 	fmt.Fprint(conn, "\r\nGateway Linux 4.14\r\n\r\n")
 	loggedIn := false
 	for try := 1; try <= telnetMaxLoginTries; try++ {
 		fmt.Fprint(conn, "gateway login: ")
-		user, err := readTelnetLine(conn, reader)
+		user, err := reader.readLine()
 		if err != nil {
 			return
 		}
@@ -101,7 +99,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 		// "WILL ECHO" = clientul nu mai afiseaza ce tasteaza -> parola ascunsa
 		conn.Write([]byte{telnetIAC, telnetWILL, telnetOptEcho})
 		fmt.Fprint(conn, "Password: ")
-		pass, err := readTelnetLine(conn, reader)
+		pass, err := reader.readLine()
 		conn.Write([]byte{telnetIAC, telnetWONT, telnetOptEcho})
 		fmt.Fprint(conn, "\r\n")
 		if err != nil {
@@ -135,7 +133,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	fmt.Fprint(conn, toCRLF(vfs.Banner))
 	for i := 0; i < telnetMaxCommands; i++ {
 		fmt.Fprint(conn, sh.Prompt())
-		line, err := readTelnetLine(conn, reader)
+		line, err := reader.readLine()
 		if err != nil {
 			return
 		}
@@ -153,32 +151,47 @@ func toCRLF(text string) string {
 	return strings.ReplaceAll(text, "\n", "\r\n")
 }
 
-// readTelnetLine citeste o linie de la client si arunca comenzile Telnet (IAC ...).
-func readTelnetLine(conn net.Conn, reader *bufio.Reader) (string, error) {
+// telnetReader citeste linii de la clientul Telnet si arunca comenzile Telnet (IAC ...).
+// E un struct (si nu o simpla functie) pentru ca trebuie sa tina minte ceva INTRE linii: lastCR.
+type telnetReader struct {
+	conn net.Conn
+	r    *bufio.Reader
+
+	// Enter in Telnet = "\r\n" sau "\r\0". De obicei vin impreuna, dar pot veni si in pachete separate:
+	// "\r" acum, "\n" abia la citirea urmatoare. lastCR = "linia trecuta s-a terminat cu \r",
+	// deci un \n sau \0 care vine imediat dupa e tot din Enter-ul ala si il aruncam.
+	lastCR bool
+}
+
+// readLine citeste o linie (fara Enter la final).
+func (t *telnetReader) readLine() (string, error) {
 	var line []byte
 	for {
 		// daca atacatorul tace 60s (sau nu citeste ce-i trimitem), il dam afara
-		conn.SetDeadline(time.Now().Add(telnetIdleTimeout))
+		t.conn.SetDeadline(time.Now().Add(telnetIdleTimeout))
 
-		b, err := reader.ReadByte()
+		b, err := t.r.ReadByte()
 		if err != nil {
 			return "", err
 		}
 
+		if t.lastCR {
+			t.lastCR = false
+			if b == '\n' || b == 0 {
+				continue // a doua jumatate din Enter-ul de data trecuta
+			}
+		}
+
 		switch {
 		case b == telnetIAC:
-			if err := skipTelnetCommand(reader); err != nil {
+			if err := skipTelnetCommand(t.r); err != nil {
 				return "", err
 			}
-		case b == '\r' || b == '\n':
-			// Enter in Telnet = "\r\n" sau "\r\0"; inghitim si al doilea byte
-			if b == '\r' && reader.Buffered() > 0 {
-				next, _ := reader.Peek(1)
-				if next[0] == '\n' || next[0] == 0 {
-					reader.ReadByte()
-				}
-			}
+		case b == '\r':
+			t.lastCR = true
 			return string(line), nil
+		case b == '\n':
+			return string(line), nil // unii clienti (ex: nc pe Linux) trimit doar \n
 		case b == 8 || b == 127: // backspace / delete
 			if len(line) > 0 {
 				line = line[:len(line)-1]

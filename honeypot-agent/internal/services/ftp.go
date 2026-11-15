@@ -2,7 +2,6 @@ package services
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,17 +26,14 @@ func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	if err != nil {
 		return err
 	}
+	listener = limitConnections(listener, "FTP")
 	defer listener.Close()
 
 	log.Println("FTP node running")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			log.Println("ftp accept error:", err)
-			continue
+			return err
 		}
 		go handleFTP(conn, nodeID, shipper)
 	}

@@ -67,15 +67,19 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	}
 
 	server := &http.Server{
-		Addr:              address,
 		Handler:           http.HandlerFunc(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
 	log.Println("HTTP node running")
-	return server.ListenAndServe()
+	return server.Serve(limitConnections(listener, "HTTP"))
 }
 
 func formValue(v url.Values, names ...string) string {
