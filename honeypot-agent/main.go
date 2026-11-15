@@ -9,7 +9,10 @@ import (
 )
 
 func main() {
-	s := shipper.NewShipper(os.Stdout)
+	shipperURL := os.Getenv("SHIPPER_URL")
+	shipperToken := os.Getenv("SHIPPER_TOKEN") // parola comuna cu receptorul (optional)
+
+	s := shipper.NewShipper(os.Stdout, shipperURL, shipperToken)
 
 	go func() { log.Fatal("HTTP: ", services.RunHTTP(":8080", "http-01", s)) }()
 	go func() { log.Fatal("FTP: ", services.RunFTP(":2121", "ftp-01", s)) }()
