@@ -50,3 +50,8 @@ captured_payloads/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Unrelated, personal use
+CLAUDE.md
+NOTES.md
+.claude/
