@@ -1,8 +1,0 @@
-# cheia privata a serverului SSH (se genereaza singura la primul RunSSH)
-ssh_host_ed25519_key
-
-# evenimentele din teste/demo (contin parole)
-events.jsonl
-
-/honeypot-agent
-/honeypot-agent.exe
