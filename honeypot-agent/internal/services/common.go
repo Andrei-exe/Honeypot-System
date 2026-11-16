@@ -11,16 +11,11 @@ import (
 	"honeypot-agent/internal/vfs"
 )
 
-// Combinatii user:parola cu care "intra" atacatorul - aceeasi lista la Telnet, SSH si FTP.
-// (la FTP merge in plus "anonymous" cu orice parola, vezi ftpLoginOK)
-//
-// Cele mai multe sunt din lista publica a lui Mirai (codul lui a fost publicat in 2016):
-// parolele din fabrica ale unor camere, DVR-uri si routere. Daca bot-ul nu nimereste una
-// dintre ele, nu intra -> nu-i vedem comenzile si URL-ul malware-ului.
-// "root:" = parola goala (Enter direct la Password:).
-// Toti userii de aici exista si in /etc/passwd-ul fals (vfs/fs.go), cu uid 0.
+// weakCredentials are the user:password pairs that "log in" on Telnet, SSH and FTP (FTP also
+// accepts "anonymous"). Most are Mirai factory defaults; "root:" means an empty password.
+// Every user here must also exist in the fake /etc/passwd (vfs/fs.go) with uid 0.
 var weakCredentials = map[string]bool{
-	// clasice
+	// classic
 	"root:root":       true,
 	"root:admin":      true,
 	"root:password":   true,
@@ -36,7 +31,7 @@ var weakCredentials = map[string]bool{
 	"user:user":       true,
 	"support:support": true,
 
-	// din lista Mirai (parole de fabrica)
+	// from the Mirai list (factory defaults)
 	"root:xc3511":       true,
 	"root:vizxv":        true,
 	"root:888888":       true,
@@ -50,18 +45,18 @@ var weakCredentials = map[string]bool{
 	"admin:smcadmin":    true,
 }
 
-// Prinde URL-uri din comenzi (wget http://..., tftp://...) -> ajung in extracted_url.
+// urlRegex finds download URLs in commands (wget http://..., tftp://...) for extracted_url.
 var urlRegex = regexp.MustCompile(`(?:https?|ftp|tftp)://[^\s'";|&<>()]+`)
 
-// newSessionID = 8 bytes random -> 16 caractere hexa (ex: 9f3a1c0e7b2d4a55).
+// newSessionID returns 8 random bytes as 16 hex characters.
 func newSessionID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// runShellLine logheaza linia ca "command_exec" si o da shell-ului fals.
-// O folosesc si Telnet, si SSH. Intoarce ce afisam (cu \n) si daca sesiunea se inchide.
+// runShellLine logs the line as command_exec and runs it in the fake shell (Telnet and SSH).
+// Returns the output (lines end in \n) and whether the session should end.
 func runShellLine(sh *vfs.Shell, line string,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) (string, bool) {
 
@@ -70,7 +65,7 @@ func runShellLine(sh *vfs.Shell, line string,
 		return "", false
 	}
 
-	// logam linia INTREAGA, asa cum a trimis-o atacatorul (cu tot cu ; && |)
+	// log the whole line exactly as sent (including ; && |)
 	event := newEvent("command_exec")
 	event.PayloadDetails = &models.PayloadDetails{
 		Command:      line,

@@ -9,44 +9,42 @@ import (
 )
 
 const (
-	maxConnsPerService = 200              // cate conexiuni deodata accepta un serviciu, in total
-	maxConnsPerIP      = 10               // ...din care cate pot veni de la acelasi IP
-	maxAcceptDelay     = time.Second      // pauza maxima dupa erori repetate la Accept
-	limitLogEvery      = 10 * time.Second // cat de des avem voie sa scriem in log despre limite
+	maxConnsPerService = 200              // max open connections per service
+	maxConnsPerIP      = 10               // ...of which at most this many from one IP
+	maxAcceptDelay     = time.Second      // max pause after repeated Accept errors
+	limitLogEvery      = 10 * time.Second // log about limits at most this often
 )
 
-// limitListener "imbraca" un net.Listener obisnuit si ii schimba doar metoda Accept:
-//  1. limite: max maxConnsPerService conexiuni deodata, din care max maxConnsPerIP de la acelasi IP.
-//     Peste limita, conexiunea e inchisa imediat (asa face si un server real supraincarcat).
-//  2. pauza crescatoare cand Accept da eroare (ex: "too many open files"),
-//     ca sa nu ne invartim in gol cu procesorul la 100%.
+// limitListener wraps a net.Listener and only changes Accept: it enforces the connection
+// limits (extra connections are closed right away) and backs off on Accept errors
+// (e.g. "too many open files") instead of spinning the CPU at 100%.
 type limitListener struct {
-	net.Listener // "embedding": limitListener primeste automat Close() si Addr() de la listener-ul real
+	net.Listener // embedded: Close() and Addr() come from the real listener
 	name         string
 
-	mu    sync.Mutex     // protejeaza total si perIP (se schimba din mai multe goroutine-uri)
-	total int            // cate conexiuni sunt deschise acum
-	perIP map[string]int // cate conexiuni are deschise fiecare IP
+	mu    sync.Mutex     // guards total and perIP (changed from many goroutines)
+	total int            // open connections right now
+	perIP map[string]int // open connections per IP
 
-	lastLog time.Time // folosit doar din goroutine-ul care face Accept -> nu are nevoie de mutex
+	lastLog time.Time // only used by the Accept goroutine -> no mutex needed
 }
 
-// limitConnections pune limitele peste un listener. Ce primeste inapoi se foloseste exact ca inainte.
+// limitConnections wraps l with the limits. The result is used exactly like l.
 func limitConnections(l net.Listener, name string) net.Listener {
 	return &limitListener{Listener: l, name: name, perIP: map[string]int{}}
 }
 
-// Accept intoarce urmatoarea conexiune care incape in limite.
-// Erorile trecatoare le reincearca singur; intoarce eroare doar daca listener-ul a fost inchis.
+// Accept returns the next connection that fits the limits.
+// Transient errors are retried; it only returns an error once the listener is closed.
 func (l *limitListener) Accept() (net.Conn, error) {
 	var delay time.Duration
 	for {
 		conn, err := l.Listener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				return nil, err // listener-ul a fost inchis: gata, nu mai are rost sa reincercam
+				return nil, err // listener closed: no point retrying
 			}
-			// eroare trecatoare -> asteptam 5ms, 10ms, 20ms... maxim 1s, apoi incercam iar
+			// transient error -> wait 5ms, 10ms, 20ms... up to 1s, then retry
 			if delay == 0 {
 				delay = 5 * time.Millisecond
 			} else {
@@ -69,7 +67,7 @@ func (l *limitListener) Accept() (net.Conn, error) {
 	}
 }
 
-// acquire ocupa un loc pentru ip, daca mai e loc. Intoarce false daca s-a atins o limita.
+// acquire takes a slot for ip. Returns false if a limit has been reached.
 func (l *limitListener) acquire(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -81,19 +79,19 @@ func (l *limitListener) acquire(ip string) bool {
 	return true
 }
 
-// release elibereaza locul cand se inchide conexiunea.
+// release frees the slot when the connection closes.
 func (l *limitListener) release(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.total--
 	l.perIP[ip]--
 	if l.perIP[ip] == 0 {
-		delete(l.perIP, ip) // altfel map-ul ar creste la infinit cu IP-uri care au plecat
+		delete(l.perIP, ip) // otherwise the map grows forever with IPs that left
 	}
 }
 
-// logRarely scrie in log cel mult o data la 10 secunde.
-// La un atac, fara asta am avea mii de linii pe secunda (exact bug-ul pe care il reparam).
+// logRarely logs at most once every limitLogEvery, so a flood of connections
+// doesn't turn into thousands of log lines per second.
 func (l *limitListener) logRarely(format string, args ...any) {
 	if time.Since(l.lastLog) < limitLogEvery {
 		return
@@ -102,22 +100,21 @@ func (l *limitListener) logRarely(format string, args ...any) {
 	log.Printf(l.name+": "+format, args...)
 }
 
-// limitedConn = o conexiune obisnuita care, cand e inchisa, elibereaza locul din limita.
+// limitedConn is a net.Conn that frees its limit slot when closed.
 type limitedConn struct {
 	net.Conn
 	once    sync.Once
 	release func()
 }
 
-// Close poate fi chemat de mai multe ori pe aceeasi conexiune (ex: la SSH o inchide si biblioteca,
-// si defer-ul nostru). sync.Once face ca locul sa fie eliberat O SINGURA data -
-// altfel numaratoarea ar scadea de doua ori si ar ajunge pe minus.
+// Close may be called more than once (on SSH both the library and our defer close the conn).
+// sync.Once releases the slot exactly once, otherwise the counters would go negative.
 func (c *limitedConn) Close() error {
 	c.once.Do(c.release)
 	return c.Conn.Close()
 }
 
-// remoteIP = IP-ul de la care vine conexiunea, fara port.
+// remoteIP returns the connection's IP, without the port.
 func remoteIP(conn net.Conn) string {
 	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {

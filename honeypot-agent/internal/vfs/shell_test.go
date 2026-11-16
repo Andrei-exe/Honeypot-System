@@ -2,8 +2,7 @@ package vfs
 
 import "testing"
 
-// Fiecare rand = o linie trimisa de atacator + ce trebuie sa apara pe ecran.
-// Rulezi cu: go test ./...
+// Each row = a line sent by the attacker + what must appear on screen.
 func TestRun(t *testing.T) {
 	tests := []struct {
 		line string
@@ -15,7 +14,7 @@ func TestRun(t *testing.T) {
 		{"cd /tmp/../etc && pwd", "/etc\n"},
 		{"cd /nu-exista || cd /var/run; pwd", "-sh: cd: can't cd to /nu-exista: No such file or directory\n/var/run\n"},
 		{"cd /nu-exista 2>/dev/null || cd /var/run; pwd", "/var/run\n"},
-		{"cat /etc/passwd | grep admin", "admin:x:0:0:admin:/root:/bin/ash\n"}, // admin are uid 0 (tot root)
+		{"cat /etc/passwd | grep admin", "admin:x:0:0:admin:/root:/bin/ash\n"}, // admin has uid 0 (still root)
 		{"cat /proc/cpuinfo | grep 'model name'", "model name\t: ARMv7 Processor rev 5 (v7l)\n"},
 		{`echo -e '\x6b\x61\x6d\x69'`, "kami\n"},
 		{`echo "a; b" && echo c`, "a; b\nc\n"},
@@ -46,6 +45,7 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// exit ends the session: nothing after it runs.
 func TestExit(t *testing.T) {
 	out, exit := NewShell().Run("echo pa; exit; echo asta-nu-se-mai-vede")
 	if out != "pa\n" || !exit {
@@ -53,6 +53,7 @@ func TestExit(t *testing.T) {
 	}
 }
 
+// The prompt follows the current directory.
 func TestPrompt(t *testing.T) {
 	sh := NewShell()
 	if p := sh.Prompt(); p != "root@gateway:~# " {
@@ -64,7 +65,7 @@ func TestPrompt(t *testing.T) {
 	}
 }
 
-// Doi atacatori nu trebuie sa-si vada unul altuia fisierele sau directorul curent.
+// Two attackers must not see each other's files or current directory.
 func TestSessionsAreSeparate(t *testing.T) {
 	a := NewShell()
 	b := NewShell()

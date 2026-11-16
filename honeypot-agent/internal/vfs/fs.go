@@ -6,17 +6,16 @@ import (
 	"strings"
 )
 
-// maxSize = cat text tinem intr-un fisier creat de atacator si cat afisam dintr-o data.
-// Fara limita, "cat a a > b; cat b b > a; ..." ar dubla fisierul la fiecare comanda -> RAM plin.
+// maxSize caps an attacker-created file and the output of one command. Without it,
+// "cat a a > b; cat b b > a; ..." would double the file on every command until RAM runs out.
 const maxSize = 16 * 1024
 
-// elfHeader = inceputul unui program compilat pentru ARM pe 32 de biti.
-// Botii de tip Mirai dau "cat /bin/echo" si se uita la bytes-ii astia ca sa afle
-// arhitectura (0x28 = ARM), apoi descarca binarul potrivit pentru ea.
+// elfHeader is the start of a 32-bit ARM ELF binary. Mirai-style bots "cat /bin/echo" and read
+// these bytes to learn the architecture (0x28 = ARM), then download the matching binary.
 const elfHeader = "\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00\x01\x00\x00\x00"
 
-// Directoarele care exista din start. Botii fac des cd in /tmp, /var/run, /mnt, /dev/shm
-// ca sa-si puna acolo binarul -> toate trebuie sa existe.
+// fakeDirs exist from the start (read-only, shared by all sessions). Bots often cd into
+// /tmp, /var/run, /mnt or /dev/shm to drop their binary, so all of these must exist.
 var fakeDirs = map[string]bool{
 	"/": true, "/bin": true, "/dev": true, "/dev/shm": true, "/etc": true,
 	"/lib": true, "/mnt": true, "/proc": true, "/root": true, "/sbin": true,
@@ -24,9 +23,9 @@ var fakeDirs = map[string]bool{
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 }
 
-// Fisierele care exista din start: cale -> continut.
+// fakeFiles exist from the start: path -> content (read-only, shared by all sessions).
 var fakeFiles = map[string]string{
-	// pe routere, toate comenzile din /bin sunt de fapt acelasi program (busybox)
+	// on routers every command in /bin is the same program (busybox)
 	"/bin/busybox": elfHeader,
 	"/bin/ash":     elfHeader,
 	"/bin/sh":      elfHeader,
@@ -37,7 +36,7 @@ var fakeFiles = map[string]string{
 	"/bin/wget":    elfHeader,
 	"/sbin/init":   elfHeader,
 
-	// serviciile "noastre", ca sa se potriveasca cu ce arata ps
+	// "our" services, matching what ps shows
 	"/usr/sbin/dropbear": elfHeader,
 	"/usr/sbin/telnetd":  elfHeader,
 	"/usr/sbin/vsftpd":   elfHeader,
@@ -47,8 +46,8 @@ var fakeFiles = map[string]string{
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
 	"/etc/resolv.conf": "nameserver 192.168.1.1\n",
-	// admin, support si user au uid 0 (adica sunt tot root) - des intalnit pe dispozitive IoT.
-	// Asa "whoami" = root e realist pentru oricine intra: whoami cauta PRIMUL nume cu uid-ul tau.
+	// admin, support and user have uid 0 (common on IoT), so whoami says root for any login.
+	// Every user in weakCredentials must be here and in /etc/shadow.
 	"/etc/passwd": "root:x:0:0:root:/root:/bin/ash\n" +
 		"daemon:*:1:1:daemon:/var:/bin/false\n" +
 		"admin:x:0:0:admin:/root:/bin/ash\n" +
@@ -76,7 +75,7 @@ var fakeFiles = map[string]string{
 		"Hardware\t: Generic DT based system\n" +
 		"Revision\t: 0000\n" +
 		"Serial\t\t: 0000000000000000\n",
-	// Mirai citeste /proc/mounts ca sa gaseasca directoare in care poate scrie (rw)
+	// Mirai reads /proc/mounts to find writable (rw) directories
 	"/proc/mounts": "rootfs / rootfs rw 0 0\n" +
 		"proc /proc proc rw,nosuid,nodev,noexec,noatime 0 0\n" +
 		"sysfs /sys sysfs rw,nosuid,nodev,noexec,noatime 0 0\n" +
@@ -84,8 +83,8 @@ var fakeFiles = map[string]string{
 		"tmpfs /dev tmpfs rw,nosuid,relatime,size=512k,mode=755 0 0\n",
 }
 
-// resolve face dintr-o cale scrisa de atacator (relativa, cu .., cu ~) o cale absoluta curata.
-// Ex: cwd "/tmp" + "../etc/passwd" -> "/etc/passwd"
+// resolve turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path.
+// E.g. cwd "/tmp" + "../etc/passwd" -> "/etc/passwd"
 func resolve(cwd, p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		p = "/root" + p[1:]
@@ -96,8 +95,8 @@ func resolve(cwd, p string) string {
 	return path.Clean(p)
 }
 
-// readFile cauta intai in fisierele create de atacator, apoi in cele din start.
-// Asa, "echo x > /etc/passwd" il "suprascrie" doar pentru atacatorul asta.
+// readFile checks the session's files first, then the built-in ones,
+// so "echo x > /etc/passwd" overwrites it only for this attacker.
 func (s *Shell) readFile(p string) (string, bool) {
 	if content, ok := s.files[p]; ok {
 		return content, true
@@ -106,11 +105,12 @@ func (s *Shell) readFile(p string) (string, bool) {
 	return content, ok
 }
 
+// isDir reports whether p is a built-in or a session-created directory.
 func (s *Shell) isDir(p string) bool {
 	return fakeDirs[p] || s.dirs[p]
 }
 
-// list intoarce ce e in directorul dir (numele simple), sortat alfabetic ca la ls.
+// list returns the names inside dir, sorted alphabetically like ls.
 func (s *Shell) list(dir string) []string {
 	seen := map[string]bool{}
 	add := func(p string) {
@@ -139,13 +139,13 @@ func (s *Shell) list(dir string) []string {
 	return names
 }
 
-// writeFile scrie (sau adauga la final, la >>) intr-un fisier al sesiunii.
-// Intoarce mesajul de eroare, sau "" daca a mers.
+// writeFile writes (or appends, for >>) to a session file.
+// Returns the error message, or "" on success.
 func (s *Shell) writeFile(name, content string, appendTo bool) string {
 	p := resolve(s.cwd, name)
 	switch {
 	case p == "/dev/null":
-		return "" // tot ce intra aici dispare, ca pe un sistem real
+		return "" // anything written here disappears, like on a real system
 	case s.isDir(p):
 		return "-sh: can't create " + name + ": Is a directory\n"
 	case !s.isDir(path.Dir(p)):

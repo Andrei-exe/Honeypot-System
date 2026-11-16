@@ -23,17 +23,16 @@ import (
 const (
 	sshIdleTimeout = 60 * time.Second
 	sshMaxCommands = 50
-	sshMaxAuth     = 6 // cate parole are voie sa incerce pe o conexiune (ca OpenSSH)
+	sshMaxAuth     = 6 // password attempts allowed per connection
 
-	// Banner-ul pe care il vede atacatorul inainte de orice.
-	// Telnet-ul nostru se da drept router cu BusyBox, iar routerele de genul
-	// folosesc Dropbear, nu OpenSSH -> povestea trebuie sa fie aceeasi peste tot.
+	// BusyBox routers run Dropbear, not OpenSSH -> same persona as Telnet.
 	sshServerVersion = "SSH-2.0-dropbear_2019.78"
 
-	// Cheia serverului e salvata pe disc ca sa NU se schimbe la fiecare restart.
+	// Kept on disk so the key (and its fingerprint) doesn't change on restart.
 	sshHostKeyFile = "ssh_host_ed25519_key"
 )
 
+// RunSSH serves a fake Dropbear SSH server on address. Returns only on a fatal error.
 func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
 	hostKey, err := loadOrCreateHostKey(sshHostKeyFile)
 	if err != nil {
@@ -44,8 +43,7 @@ func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
 	if err != nil {
 		return err
 	}
-	// limite de conexiuni + pauza la erori de accept (vezi limit.go).
-	// La SSH conteaza dublu: fiecare handshake inseamna criptografie, adica procesor.
+	// limits matter even more for SSH: every handshake costs CPU (crypto)
 	listener = limitConnections(listener, "SSH")
 	defer listener.Close()
 
@@ -53,13 +51,13 @@ func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			return err // limitListener reincearca singur erorile trecatoare; aici ajung doar cele fatale
+			return err // transient errors are already retried inside limitListener
 		}
-		// fiecare atacator primeste goroutine-ul lui, exact ca la telnet
-		go handleSSH(conn, hostKey, nodeID, shipper)
+		go handleSSH(conn, hostKey, nodeID, shipper) // one goroutine per attacker
 	}
 }
 
+// handleSSH runs one SSH connection: handshake + login, then a single session channel.
 func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shipper.Shipper) {
 	defer conn.Close()
 
@@ -71,7 +69,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 
 	sessionID := newSessionID()
 
-	// campurile comune, la fel ca in http.go / telnet.go
+	// newEvent fills in the fields shared by every event of this session
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
 			Timestamp:  models.Now(),
@@ -88,18 +86,18 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	shipper.EmitEvent(newEvent("session_start"))
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
-	// ---------- Faza 1: handshake + login ----------
-	// Biblioteca face criptografia; noi doar decidem ce parole "merg".
+	// ---------- Phase 1: handshake + login ----------
+	// The library does the crypto; we only decide which passwords work.
 	config := &ssh.ServerConfig{
 		ServerVersion: sshServerVersion,
 		MaxAuthTries:  sshMaxAuth,
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-			// cat timp atacatorul tot incearca parole, nu-l dam afara
+			// keep the attacker connected while they keep trying passwords
 			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
 			user := meta.User()
 			pass := string(password)
-			success := weakCredentials[user+":"+pass] // lista comuna, din common.go
+			success := weakCredentials[user+":"+pass]
 
 			event := newEvent("login_attempt")
 			event.Credentials = &models.Credentials{
@@ -110,14 +108,13 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 			shipper.EmitEvent(event)
 
 			if success {
-				return nil, nil // nil error = "intra, boss"
+				return nil, nil // nil error = login accepted
 			}
-			time.Sleep(time.Second) // si SSH-ul real are delay la parola gresita
+			time.Sleep(time.Second) // real servers also delay after a wrong password
 			return nil, errors.New("password rejected")
 		},
-		// Dropbear ofera exact 2 metode de login: "publickey" si "password" (fara keyboard-interactive,
-		// pe care il are OpenSSH). Ca sa aratam la fel, acceptam sa ni se propuna chei, dar le refuzam
-		// pe toate -> clientul trece pe parola. Fara callback-ul asta am oferi doar "password".
+		// Dropbear offers exactly "publickey" and "password" (no keyboard-interactive).
+		// We offer publickey too but reject every key, so clients fall back to password.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 			return nil, errors.New("public key rejected")
@@ -125,21 +122,20 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	}
 	config.AddHostKey(hostKey)
 
-	// daca nici nu termina handshake-ul in 60s, pa
+	// drop the connection if the handshake isn't done within 60s
 	conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
-		return // handshake picat sau toate parolele gresite
+		return // handshake failed or all passwords were wrong
 	}
 	defer sshConn.Close()
 
-	// cereri "globale" (ex: port forwarding) -> le refuzam pe toate
+	// global requests (e.g. port forwarding) -> all rejected
 	go ssh.DiscardRequests(reqs)
 
-	// ---------- Faza 2: canalul de sesiune ----------
-	// Un client SSH poate deschide mai multe "canale" pe aceeasi conexiune.
-	// Noi servim doar primul canal de tip "session" (shell sau exec).
+	// ---------- Phase 2: session channel ----------
+	// A client can open several channels on one connection; we serve only the first "session".
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
@@ -155,7 +151,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	}
 }
 
-// handleSSHSession asteapta sa vada ce vrea clientul: shell interactiv sau o singura comanda (exec).
+// handleSSHSession waits for the client to ask for an interactive shell or a single command (exec).
 func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.Request,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
 
@@ -164,24 +160,24 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 	for req := range requests {
 		switch req.Type {
 		case "pty-req", "env", "window-change":
-			// "da, sigur, ai terminal" - nu ne pasa de detalii
+			// accept terminal setup; the details don't matter to us
 			req.Reply(true, nil)
 
 		case "exec":
-			// ssh root@host "uname -a" -> comanda vine direct aici, fara prompt
+			// ssh root@host "uname -a" -> one command, no prompt
 			var payload struct{ Command string }
 			ssh.Unmarshal(req.Payload, &payload)
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			// fara terminal: raspunsul merge direct pe canal, cu \n simplu (ca la un server real)
+			// no terminal: output goes straight to the channel with plain \n
 			output, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
 			fmt.Fprint(channel, output)
 			sendExitStatus(channel)
 			return
 
 		case "shell":
-			// ssh root@host -> vrea prompt interactiv
+			// ssh root@host -> interactive prompt
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
@@ -190,29 +186,27 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			return
 
 		default:
-			// sftp, x11 si alte figuri -> refuzat
+			// sftp, x11 and the like -> rejected
 			req.Reply(false, nil)
 		}
 	}
 }
 
-// runSSHShell e bucla de shell fals, aproape identica cu Faza 2 din telnet.go.
+// runSSHShell is the fake shell loop, almost the same as Phase 2 in telnet.go.
 func runSSHShell(conn net.Conn, channel ssh.Channel,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
 
-	// fiecare conexiune primeste shell-ul ei (cu directorul curent si fisierele ei)
-	sh := vfs.NewShell()
+	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
 
-	// term.Terminal face pentru noi echo-ul, backspace-ul si sagetile.
-	// Cu pty, clientul NU mai afiseaza singur ce tasteaza - serverul trebuie sa i-o trimita inapoi.
-	// Bonus: cand scriem in el, transforma singur \n in \r\n.
+	// term.Terminal handles echo, backspace and arrow keys (with a pty the client doesn't
+	// echo what it types, the server must send it back). It also turns \n into \r\n.
 	terminal := term.NewTerminal(channel, sh.Prompt())
 	fmt.Fprint(terminal, vfs.Banner)
 
 	for i := 0; i < sshMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
-		terminal.SetPrompt(sh.Prompt()) // promptul se schimba dupa cd
+		terminal.SetPrompt(sh.Prompt()) // the prompt changes after cd
 		line, err := terminal.ReadLine()
 		if err != nil {
 			return
@@ -226,13 +220,13 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 	}
 }
 
-// sendExitStatus ii spune clientului "comanda s-a terminat cu codul 0", ca un server real.
+// sendExitStatus tells the client the command finished with exit code 0, like a real server.
 func sendExitStatus(channel ssh.Channel) {
 	status := struct{ Status uint32 }{0}
 	channel.SendRequest("exit-status", false, ssh.Marshal(&status))
 }
 
-// loadOrCreateHostKey citeste cheia serverului de pe disc sau o genereaza prima data.
+// loadOrCreateHostKey reads the host key from disk, or generates and saves it the first time.
 func loadOrCreateHostKey(path string) (ssh.Signer, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {

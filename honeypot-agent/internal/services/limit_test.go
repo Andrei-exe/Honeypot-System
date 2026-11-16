@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// Un IP nu poate tine mai mult de maxConnsPerIP conexiuni deodata; cand inchide una, se elibereaza locul.
+// One IP can't hold more than maxConnsPerIP connections at once; closing one frees a slot.
 func TestPerIPLimit(t *testing.T) {
-	raw, err := net.Listen("tcp", "127.0.0.1:0") // :0 = orice port liber
+	raw, err := net.Listen("tcp", "127.0.0.1:0") // :0 = any free port
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestPerIPLimit(t *testing.T) {
 		}
 	}()
 
-	// deschidem maxConnsPerIP + 1 conexiuni de pe 127.0.0.1
+	// open maxConnsPerIP + 1 connections from 127.0.0.1
 	var clients []net.Conn
 	for i := 0; i < maxConnsPerIP+1; i++ {
 		c, err := net.Dial("tcp", raw.Addr().String())
@@ -51,7 +51,7 @@ func TestPerIPLimit(t *testing.T) {
 		}
 	}
 
-	// ultima conexiune trebuie inchisa de server: citirea da EOF
+	// the last connection must be closed by the server: reading gives EOF
 	last := clients[len(clients)-1]
 	last.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := last.Read(make([]byte, 1)); err != io.EOF {
@@ -63,7 +63,7 @@ func TestPerIPLimit(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// inchidem una -> o conexiune noua trebuie sa intre
+	// close one -> a new connection must get in
 	serverSide[0].Close()
 	c, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {
@@ -77,7 +77,7 @@ func TestPerIPLimit(t *testing.T) {
 	}
 }
 
-// Limita totala: IP-uri diferite, dar tot nu trec de maxConnsPerService.
+// Total limit: different IPs still can't go past maxConnsPerService.
 func TestTotalLimit(t *testing.T) {
 	l := limitConnections(nil, "TEST").(*limitListener)
 	for i := 0; i < maxConnsPerService; i++ {
@@ -94,7 +94,7 @@ func TestTotalLimit(t *testing.T) {
 	}
 }
 
-// Close chemat de 2 ori (se intampla la SSH) elibereaza locul O SINGURA data.
+// Calling Close twice (happens on SSH) releases the slot only once.
 func TestDoubleCloseReleasesOnce(t *testing.T) {
 	l := limitConnections(nil, "TEST").(*limitListener)
 	l.acquire("1.2.3.4")
@@ -109,8 +109,8 @@ func TestDoubleCloseReleasesOnce(t *testing.T) {
 	}
 }
 
-// flakyListener = un listener fals care da eroare la primele failUntil apeluri,
-// apoi intoarce o conexiune, apoi se "inchide".
+// flakyListener is a fake listener that fails the first failUntil calls,
+// then returns one connection, then behaves as closed.
 type flakyListener struct {
 	calls     atomic.Int64
 	failUntil int64
@@ -132,7 +132,7 @@ func (f *flakyListener) Accept() (net.Conn, error) {
 func (f *flakyListener) Close() error   { return nil }
 func (f *flakyListener) Addr() net.Addr { return &net.TCPAddr{} }
 
-// La erori de Accept, asteapta (5ms, 10ms, 20ms...) in loc sa se invarta in gol.
+// On Accept errors it waits (5ms, 10ms, 20ms...) instead of spinning.
 func TestAcceptBacksOffOnErrors(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
@@ -149,12 +149,12 @@ func TestAcceptBacksOffOnErrors(t *testing.T) {
 	if calls := fake.calls.Load(); calls != 6 {
 		t.Fatalf("Accept a fost chemat de %d ori (trebuia 6: 5 erori + conexiunea)", calls)
 	}
-	// 5+10+20+40+80 = 155ms de pauza in total
+	// 5+10+20+40+80 = 155ms of pauses in total
 	if elapsed < 150*time.Millisecond {
 		t.Fatalf("n-a facut pauza intre erori (a durat doar %v)", elapsed)
 	}
 
-	// listener inchis -> Accept trebuie sa se opreasca, nu sa reincerce
+	// closed listener -> Accept must stop, not retry
 	if _, err := listener.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("listener inchis: trebuia net.ErrClosed, am primit %v", err)
 	}

@@ -21,6 +21,7 @@ const (
 	ftpMaxLoginTries = 3
 )
 
+// RunFTP serves a fake vsftpd on address. Returns only on a fatal error.
 func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -39,6 +40,8 @@ func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	}
 }
 
+// handleFTP runs one FTP session: login, then commands.
+// It never opens a data connection, so nothing is ever transferred.
 func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	defer conn.Close()
 
@@ -49,6 +52,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	port, _ := strconv.Atoi(portText)
 	sessionID := newSessionID()
 
+	// newEvent fills in the fields shared by every event of this session
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
 			Timestamp:  models.Now(),
@@ -132,6 +136,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			return
 
 		default:
+			// every other command is logged; before login only OPTS works (like vsftpd)
 			event := newEvent("command_exec")
 			event.PayloadDetails = &models.PayloadDetails{
 				Command:      line,
@@ -148,6 +153,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	}
 }
 
+// ftpLoginOK accepts "anonymous" with any password, plus the shared weakCredentials.
 func ftpLoginOK(user, pass string) bool {
 	if strings.ToLower(user) == "anonymous" {
 		return true
@@ -155,6 +161,7 @@ func ftpLoginOK(user, pass string) bool {
 	return weakCredentials[user+":"+pass]
 }
 
+// ftpAnswer returns the vsftpd reply to a command sent after login. CWD updates *cwd.
 func ftpAnswer(cmd, arg string, cwd *string) string {
 	switch cmd {
 	case "SYST":
@@ -179,6 +186,7 @@ func ftpAnswer(cmd, arg string, cwd *string) string {
 	case "OPTS":
 		return "200 Always in UTF8 mode."
 
+	// Data connections are never opened (internal Docker IP + FTP bounce risk).
 	case "PASV", "EPSV":
 		return "550 Permission denied."
 	case "PORT", "EPRT":

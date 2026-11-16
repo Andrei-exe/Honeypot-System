@@ -2,18 +2,18 @@ package vfs
 
 import "strings"
 
-// Banner = ce vede atacatorul imediat dupa login (si la Telnet, si la SSH).
+// Banner is shown right after login (both Telnet and SSH).
 const Banner = "\nBusyBox v1.30.1 built-in shell (ash)\n\n"
 
-// Shell = shell-ul fals al UNEI conexiuni.
-// Fiecare atacator primeste unul nou (NewShell): directorul curent si fisierele
-// create de el sunt doar ale lui, alt atacator nu le vede.
+// Shell is the fake shell of ONE connection. Every attacker gets a new one (NewShell),
+// so their current directory and files are invisible to other attackers.
 type Shell struct {
-	cwd   string            // directorul curent
-	files map[string]string // fisiere create de atacator (echo > x, touch, cp)
-	dirs  map[string]bool   // directoare create de atacator (mkdir)
+	cwd   string            // current directory
+	files map[string]string // files created by the attacker (echo > x, touch, cp)
+	dirs  map[string]bool   // directories created by the attacker (mkdir)
 }
 
+// NewShell returns a fresh shell that starts in /root.
 func NewShell() *Shell {
 	return &Shell{
 		cwd:   "/root",
@@ -22,7 +22,7 @@ func NewShell() *Shell {
 	}
 }
 
-// Prompt = "root@gateway:~# ", cu directorul curent in el (/root se scrie ~, ca la shell-urile reale).
+// Prompt returns "root@gateway:~# " with the current directory (/root is shown as ~).
 func (s *Shell) Prompt() string {
 	dir := s.cwd
 	if dir == "/root" || strings.HasPrefix(dir, "/root/") {
@@ -31,24 +31,24 @@ func (s *Shell) Prompt() string {
 	return "root@gateway:" + dir + "# "
 }
 
-// step = o comanda din linie + felul in care e legata de comanda dinainte.
+// step is one command in a line, plus how it is linked to the previous one.
 type step struct {
-	op   string   // ";" = oricum, "&&" = doar daca aia a mers, "||" = doar daca aia a picat, "|" = primeste output-ul ei
-	args []string // comanda si argumentele, fara ghilimele
+	op   string   // ";" = always, "&&" = if the previous succeeded, "||" = if it failed, "|" = gets its output
+	args []string // command and arguments, quotes removed
 }
 
-// Run executa o linie intreaga, ex: "cd /tmp && wget http://x/bot; chmod +x bot".
-// Intoarce ce apare pe ecran (cu \n la capat de rand) si daca atacatorul a dat exit.
+// Run executes a whole line, e.g. "cd /tmp && wget http://x/bot; chmod +x bot".
+// Returns what appears on screen (lines end in \n) and whether the attacker typed exit.
 func (s *Shell) Run(line string) (string, bool) {
 	var screen strings.Builder
-	code := 0        // codul ultimei comenzi rulate: 0 = a mers, altceva = eroare
-	piped := ""      // output-ul pastrat pentru comanda urmatoare, daca e legata cu |
-	skipped := false // daca am sarit peste comanda dinainte (din cauza lui && sau ||)
+	code := 0        // exit code of the last command run: 0 = ok
+	piped := ""      // output kept for the next command if it is linked with |
+	skipped := false // whether the previous command was skipped (because of && or ||)
 
 	steps := parse(line)
 	for i, st := range steps {
 		if len(st.args) == 0 {
-			continue // ex: ";;" sau un "&" la final
+			continue // e.g. ";;" or a trailing "&"
 		}
 		if (st.op == "&&" && code != 0) || (st.op == "||" && code == 0) || (st.op == "|" && skipped) {
 			skipped = true
@@ -67,7 +67,7 @@ func (s *Shell) Run(line string) (string, bool) {
 			return screen.String(), true
 		}
 
-		// daca urmatoarea comanda e legata cu |, output-ul nu ajunge pe ecran, ci la ea
+		// if the next command is linked with |, the output goes to it, not to the screen
 		if i+1 < len(steps) && steps[i+1].op == "|" {
 			piped = out
 		} else if screen.Len() < maxSize {
@@ -77,13 +77,13 @@ func (s *Shell) Run(line string) (string, bool) {
 	return screen.String(), false
 }
 
-// parse imparte linia in comenzi dupa ; && || | (dar nu si intre ghilimele),
-// iar fiecare comanda in cuvinte (dupa spatii). Ghilimelele dispar, ca in shell-ul real.
+// parse splits the line into commands on ; && || | (but not inside quotes), and each command
+// into words on whitespace. Quotes are removed, like in a real shell.
 func parse(line string) []step {
 	steps := []step{{op: ";"}}
 	var word strings.Builder
 	inWord := false
-	var quote byte // ' sau " cand suntem intre ghilimele, 0 altfel
+	var quote byte // ' or " while inside quotes, 0 otherwise
 
 	endWord := func() {
 		if inWord {
@@ -101,7 +101,7 @@ func parse(line string) []step {
 	for i := 0; i < len(line); i++ {
 		c := line[i]
 		switch {
-		case quote != 0: // intre ghilimele totul e text, pana la ghilimeaua de inchidere
+		case quote != 0: // inside quotes everything is text, up to the closing quote
 			if c == quote {
 				quote = 0
 			} else {
@@ -109,21 +109,21 @@ func parse(line string) []step {
 			}
 		case c == '\'' || c == '"':
 			quote = c
-			inWord = true // "" e tot un cuvant (gol)
+			inWord = true // "" is still a word (an empty one)
 		case c == ' ' || c == '\t' || c == '\r':
 			endWord()
 		case c == ';' || c == '\n':
 			newStep(";")
 		case c == '&' && strings.HasSuffix(word.String(), ">"):
-			word.WriteByte(c) // 2>&1 e redirectare, nu operator
+			word.WriteByte(c) // 2>&1 is a redirect, not an operator
 		case c == '&' || c == '|':
 			if i+1 < len(line) && line[i+1] == c {
-				newStep(line[i : i+2]) // && sau ||
+				newStep(line[i : i+2]) // && or ||
 				i++
 			} else if c == '|' {
 				newStep("|")
 			} else {
-				newStep(";") // un singur & = "ruleaza in fundal" -> pentru noi e ca ;
+				newStep(";") // a single & = "run in background" -> same as ; for us
 			}
 		default:
 			word.WriteByte(c)
@@ -134,14 +134,14 @@ func parse(line string) []step {
 	return steps
 }
 
-// redirect = unde trebuie sa ajunga output-ul unei comenzi.
+// redirect is where a command's output should go.
 type redirect struct {
-	file       string // > fisier: output-ul se scrie aici, nu pe ecran
-	append     bool   // >> fisier: adauga la final, nu suprascrie
-	hideErrors bool   // 2>/dev/null: nu afisam erorile
+	file       string // > file: output goes here, not to the screen
+	append     bool   // >> file: append instead of overwrite
+	hideErrors bool   // 2>/dev/null: don't show errors
 }
 
-// parseRedirects scoate redirectarile din argumente:
+// parseRedirects removes the redirects from the arguments:
 // ["echo", "hi", ">", "a.txt"] -> ["echo", "hi"] + redirect{file: "a.txt"}
 func parseRedirects(args []string) ([]string, redirect) {
 	var clean []string
@@ -149,26 +149,26 @@ func parseRedirects(args []string) ([]string, redirect) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "1>") {
-			a = a[1:] // 1> e acelasi lucru cu >
+			a = a[1:] // 1> is the same as >
 		}
 
 		switch {
 		case a == "2>&1":
-			// "erorile merg unde merge si output-ul" - la noi oricum sunt impreuna
+			// "errors go where the output goes" - for us they are already together
 		case strings.HasPrefix(a, "2>"):
 			r.hideErrors = true
 			if a == "2>" {
-				i++ // "2> fisier": sarim si peste numele fisierului
+				i++ // "2> file": skip the file name too
 			}
 		case strings.HasPrefix(a, ">"):
 			r.append = strings.HasPrefix(a, ">>")
 			r.file = strings.TrimLeft(a, ">")
 			if r.file == "" && i+1 < len(args) {
-				i++ // "> fisier", cu spatiu intre ele
+				i++ // "> file", with a space in between
 				r.file = args[i]
 			}
 			if strings.HasPrefix(r.file, "&") {
-				r.file = "" // >&2 = "trimite la erori" -> tot pe ecran ajunge
+				r.file = "" // >&2 = "send to stderr" -> still ends up on screen
 			}
 		default:
 			clean = append(clean, a)
@@ -177,33 +177,32 @@ func parseRedirects(args []string) ([]string, redirect) {
 	return clean, r
 }
 
-// exec ruleaza o singura comanda (fara ; && || |), cu tot cu redirectari.
-// Intoarce ce afiseaza, codul de iesire si daca e exit.
+// exec runs a single command (no ; && || |), including its redirects.
+// Returns the output, the exit code and whether it was exit.
 func (s *Shell) exec(args []string, input string) (string, int, bool) {
 	args, r := parseRedirects(args)
 
 	out, code, exit := "", 0, false
-	if len(args) > 0 { // "> fisier" singur e valid: doar creeaza fisierul gol
+	if len(args) > 0 { // "> file" alone is valid: it just creates an empty file
 		out, code, exit = s.command(args, input)
 	}
 
-	// Pe un sistem real, erorile merg pe alt "canal" (stderr) decat output-ul normal (stdout).
-	// La noi sunt in acelasi text, asa ca folosim o regula simpla:
-	// daca comanda a picat (cod != 0), tot ce a scris e mesajul de eroare.
+	// We have no separate stderr, so the rule is simple:
+	// if the command failed (code != 0), everything it printed is the error message.
 	failed := code != 0
 	if failed && r.hideErrors {
-		out = "" // 2>/dev/null: eroarea dispare
+		out = "" // 2>/dev/null: the error disappears
 	}
 	if r.file != "" {
 		content := out
 		if failed {
-			content = "" // eroarea ramane pe ecran, in fisier nu ajunge nimic (dar fisierul se creeaza)
+			content = "" // the error stays on screen, the file is still created (empty)
 		}
 		if msg := s.writeFile(r.file, content, r.append); msg != "" {
 			return msg, 1, exit
 		}
 		if !failed {
-			out = "" // a ajuns in fisier, nu pe ecran
+			out = "" // it went to the file, not to the screen
 		}
 	}
 	return out, code, exit

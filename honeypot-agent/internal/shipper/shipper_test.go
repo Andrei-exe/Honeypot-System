@@ -15,8 +15,8 @@ import (
 	"honeypot-agent/internal/models"
 )
 
-// fakeReceiver = un server HTTP de test care se preface ca e receptorul de Python.
-// status(n) zice ce raspunde la a n-a cerere (1, 2, 3...).
+// fakeReceiver is a test HTTP server that pretends to be the Python receiver.
+// status(n) is the response code for the n-th request (1, 2, 3...).
 type fakeReceiver struct {
 	mu       sync.Mutex
 	requests int
@@ -50,7 +50,7 @@ func event(i int) models.HoneypotEvent {
 	return models.HoneypotEvent{EventType: "command_exec", NodeID: fmt.Sprint("test-", i), SourceIP: "1.2.3.4"}
 }
 
-// waitFor asteapta pana cand cond() e adevarat, dar nu mai mult de max.
+// waitFor waits until cond() is true, but no longer than max.
 func waitFor(max time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(max)
 	for time.Now().Before(deadline) {
@@ -62,7 +62,7 @@ func waitFor(max time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-// Toate evenimentele ajung, in ordine, cu token-ul in header.
+// All events arrive, in order, with the token in the header.
 func TestDeliversAllEventsInOrder(t *testing.T) {
 	t.Parallel()
 	rcv := &fakeReceiver{status: func(int) int { return http.StatusOK }}
@@ -70,7 +70,7 @@ func TestDeliversAllEventsInOrder(t *testing.T) {
 	defer srv.Close()
 
 	s := NewShipper(io.Discard, srv.URL, "secret")
-	for i := 0; i < 120; i++ { // 2 grupuri pline de 50 pleaca imediat, restul de 20 la urmatorul tick
+	for i := 0; i < 120; i++ { // 2 full batches of 50 go right away, the last 20 on the next tick
 		s.EmitEvent(event(i))
 	}
 
@@ -88,12 +88,12 @@ func TestDeliversAllEventsInOrder(t *testing.T) {
 	}
 }
 
-// Daca Python-ul raspunde cu eroare (5xx), shipper-ul reincearca si nu pierde nimic.
+// If the receiver answers with an error (5xx), the shipper retries and loses nothing.
 func TestRetriesAfterServerError(t *testing.T) {
 	t.Parallel()
 	rcv := &fakeReceiver{status: func(n int) int {
 		if n == 1 {
-			return http.StatusInternalServerError // prima data "crapa"
+			return http.StatusInternalServerError // the first request "crashes"
 		}
 		return http.StatusOK
 	}}
@@ -111,7 +111,7 @@ func TestRetriesAfterServerError(t *testing.T) {
 	}
 }
 
-// La 4xx (ex: token gresit) NU retrimitem acelasi grup la infinit.
+// On 4xx (e.g. wrong token) the same batch is NOT resent forever.
 func TestGivesUpOnClientError(t *testing.T) {
 	t.Parallel()
 	rcv := &fakeReceiver{status: func(int) int { return http.StatusUnauthorized }}
@@ -124,13 +124,13 @@ func TestGivesUpOnClientError(t *testing.T) {
 	}
 
 	waitFor(4*time.Second, func() bool { req, _ := rcv.counts(); return req >= 1 })
-	time.Sleep(3 * time.Second) // inca un tick: daca ar reincerca, am vedea a doua cerere
+	time.Sleep(3 * time.Second) // one more tick: a retry would show up as a second request
 	if req, _ := rcv.counts(); req != 1 {
 		t.Fatalf("a trimis de %d ori acelasi grup refuzat (trebuia o singura data)", req)
 	}
 }
 
-// Fara URL: totul merge doar in JSONL, ca inainte.
+// Without a URL, everything goes to JSONL only.
 func TestWithoutURLOnlyWritesJSONL(t *testing.T) {
 	var out bytes.Buffer
 	s := NewShipper(&out, "", "")

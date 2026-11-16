@@ -14,17 +14,16 @@ import (
 	"honeypot-agent/internal/vfs"
 )
 
-// Bytes speciali din protocolul Telnet (RFC 854).
-// Orice comanda Telnet incepe cu IAC (255), urmat de comanda si eventual o optiune.
+// Telnet protocol bytes (RFC 854). Every Telnet command starts with IAC (255).
 const (
 	telnetIAC     = 255 // "Interpret As Command"
 	telnetDONT    = 254
 	telnetDO      = 253
 	telnetWONT    = 252
 	telnetWILL    = 251
-	telnetSB      = 250 // inceput subnegociere
-	telnetSE      = 240 // sfarsit subnegociere
-	telnetOptEcho = 1   // optiunea ECHO
+	telnetSB      = 250 // subnegotiation begin
+	telnetSE      = 240 // subnegotiation end
+	telnetOptEcho = 1   // ECHO option
 )
 
 const (
@@ -34,12 +33,12 @@ const (
 	telnetMaxCommands   = 50
 )
 
+// RunTelnet serves a fake BusyBox telnetd on address. Returns only on a fatal error.
 func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
-	// limite de conexiuni + pauza la erori de accept (vezi limit.go)
 	listener = limitConnections(listener, "TELNET")
 	defer listener.Close()
 
@@ -47,13 +46,13 @@ func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			return err // limitListener reincearca singur erorile trecatoare; aici ajung doar cele fatale
+			return err // transient errors are already retried inside limitListener
 		}
-		// fiecare atacator primeste goroutine-ul lui
-		go handleTelnet(conn, nodeID, shipper)
+		go handleTelnet(conn, nodeID, shipper) // one goroutine per attacker
 	}
 }
 
+// handleTelnet runs one Telnet session: login prompt, then the fake shell.
 func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	defer conn.Close()
 
@@ -65,7 +64,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 	sessionID := newSessionID()
 
-	// construieste campurile comune, la fel ca in http.go
+	// newEvent fills in the fields shared by every event of this session
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
 			Timestamp:  models.Now(),
@@ -80,13 +79,12 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	}
 
 	shipper.EmitEvent(newEvent("session_start"))
-	// func() ca timestamp-ul sa fie calculat la final, nu acum
+	// wrapped in func() so the timestamp is taken at the end, not now
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
-	// cititorul tine minte intre citiri daca ultimul Enter s-a terminat cu \r (vezi telnetReader)
 	reader := &telnetReader{conn: conn, r: bufio.NewReader(conn)}
 
-	// ---------- Faza 1: login ----------
+	// ---------- Phase 1: login ----------
 	fmt.Fprint(conn, "\r\nGateway Linux 4.14\r\n\r\n")
 	loggedIn := false
 	for try := 1; try <= telnetMaxLoginTries; try++ {
@@ -96,7 +94,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			return
 		}
 
-		// "WILL ECHO" = clientul nu mai afiseaza ce tasteaza -> parola ascunsa
+		// WILL ECHO = the client stops echoing what it types -> hidden password
 		conn.Write([]byte{telnetIAC, telnetWILL, telnetOptEcho})
 		fmt.Fprint(conn, "Password: ")
 		pass, err := reader.readLine()
@@ -120,16 +118,15 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			loggedIn = true
 			break
 		}
-		time.Sleep(time.Second) // login-urile reale au si ele un mic delay
+		time.Sleep(time.Second) // real logins also delay after a failure
 		fmt.Fprint(conn, "Login incorrect\r\n")
 	}
 	if !loggedIn {
 		return
 	}
 
-	// ---------- Faza 2: shell fals ----------
-	// fiecare conexiune primeste shell-ul ei (cu directorul curent si fisierele ei)
-	sh := vfs.NewShell()
+	// ---------- Phase 2: fake shell ----------
+	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
 	fmt.Fprint(conn, toCRLF(vfs.Banner))
 	for i := 0; i < telnetMaxCommands; i++ {
 		fmt.Fprint(conn, sh.Prompt())
@@ -146,28 +143,27 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	}
 }
 
-// toCRLF: shell-ul scrie randurile cu \n, dar Telnet vrea \r\n la capat de rand.
+// toCRLF converts the shell's \n line endings to the \r\n that Telnet expects.
 func toCRLF(text string) string {
 	return strings.ReplaceAll(text, "\n", "\r\n")
 }
 
-// telnetReader citeste linii de la clientul Telnet si arunca comenzile Telnet (IAC ...).
-// E un struct (si nu o simpla functie) pentru ca trebuie sa tina minte ceva INTRE linii: lastCR.
+// telnetReader reads lines from a Telnet client and drops Telnet commands (IAC ...).
+// It's a struct, not a plain function, because it must remember lastCR between lines.
 type telnetReader struct {
 	conn net.Conn
 	r    *bufio.Reader
 
-	// Enter in Telnet = "\r\n" sau "\r\0". De obicei vin impreuna, dar pot veni si in pachete separate:
-	// "\r" acum, "\n" abia la citirea urmatoare. lastCR = "linia trecuta s-a terminat cu \r",
-	// deci un \n sau \0 care vine imediat dupa e tot din Enter-ul ala si il aruncam.
+	// Enter is "\r\n" or "\r\0", and the two bytes may arrive in separate packets.
+	// lastCR = the previous line ended with \r, so a \n or \0 right after it is dropped.
 	lastCR bool
 }
 
-// readLine citeste o linie (fara Enter la final).
+// readLine reads one line, without the trailing Enter.
 func (t *telnetReader) readLine() (string, error) {
 	var line []byte
 	for {
-		// daca atacatorul tace 60s (sau nu citeste ce-i trimitem), il dam afara
+		// kick the attacker after 60s of silence (or if they stop reading our output)
 		t.conn.SetDeadline(time.Now().Add(telnetIdleTimeout))
 
 		b, err := t.r.ReadByte()
@@ -178,7 +174,7 @@ func (t *telnetReader) readLine() (string, error) {
 		if t.lastCR {
 			t.lastCR = false
 			if b == '\n' || b == 0 {
-				continue // a doua jumatate din Enter-ul de data trecuta
+				continue // second half of the previous Enter
 			}
 		}
 
@@ -191,22 +187,22 @@ func (t *telnetReader) readLine() (string, error) {
 			t.lastCR = true
 			return string(line), nil
 		case b == '\n':
-			return string(line), nil // unii clienti (ex: nc pe Linux) trimit doar \n
+			return string(line), nil // some clients (e.g. nc on Linux) send only \n
 		case b == 8 || b == 127: // backspace / delete
 			if len(line) > 0 {
 				line = line[:len(line)-1]
 			}
 		case b == 0:
-			// ignoram NUL
+			// ignore NUL
 		default:
-			if len(line) < telnetMaxLine {
+			if len(line) < telnetMaxLine { // bytes past the limit are dropped
 				line = append(line, b)
 			}
 		}
 	}
 }
 
-// skipTelnetCommand sare peste o comanda Telnet (IAC-ul a fost deja citit).
+// skipTelnetCommand skips one Telnet command (the IAC byte was already read).
 func skipTelnetCommand(reader *bufio.Reader) error {
 	cmd, err := reader.ReadByte()
 	if err != nil {
@@ -215,10 +211,10 @@ func skipTelnetCommand(reader *bufio.Reader) error {
 
 	switch cmd {
 	case telnetWILL, telnetWONT, telnetDO, telnetDONT:
-		_, err = reader.ReadByte() // byte-ul de optiune
+		_, err = reader.ReadByte() // option byte
 		return err
 	case telnetSB:
-		// subnegociere: sarim tot pana la IAC SE
+		// subnegotiation: skip everything up to IAC SE
 		for {
 			b, err := reader.ReadByte()
 			if err != nil {

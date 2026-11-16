@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Ce afiseaza "ps". Se potriveste cu povestea: router cu dropbear (SSH), telnetd si vsftpd.
+// fakePS is the output of ps. It matches the persona: a router running dropbear, telnetd and vsftpd.
 const fakePS = `  PID USER       VSZ STAT COMMAND
     1 root      1516 S    /sbin/init
   341 root      1124 S    /usr/sbin/dropbear -F -P /var/run/dropbear.pid -p 22
@@ -16,28 +16,28 @@ const fakePS = `  PID USER       VSZ STAT COMMAND
   530 root      1296 R    ps
 `
 
-// command ruleaza o comanda. Intoarce: ce afiseaza, codul de iesire
-// (0 = a mers, 127 = comanda nu exista, altceva = eroare) si daca sesiunea se inchide.
+// command runs one command. Returns the output, the exit code
+// (0 = ok, 127 = command not found, other = error) and whether the session should end.
 func (s *Shell) command(args []string, input string) (string, int, bool) {
 	name := args[0]
-	// "/bin/cat" = "cat", daca exista in /bin-ul nostru fals
+	// "/bin/cat" = "cat", if it exists in our fake /bin
 	if _, ok := fakeFiles[name]; ok && path.Dir(name) == "/bin" {
 		name = path.Base(name)
 	}
-	args = args[1:] // de aici, args = doar argumentele
+	args = args[1:] // from here on, args holds only the arguments
 
 	switch name {
 	case "exit", "logout", "quit":
 		return "", 0, true
 
 	case "busybox":
-		// "busybox wget ..." = "wget ..." (pe routere, toate comenzile sunt "applet-uri" din busybox)
+		// "busybox wget ..." = "wget ..." (on routers every command is a busybox applet)
 		if len(args) == 0 {
 			return "BusyBox v1.30.1 multi-call binary.\n", 0, false
 		}
 		out, code, exit := s.command(args, input)
 		if code == 127 {
-			// Mirai trimite "/bin/busybox ECCHI" si asteapta exact raspunsul asta
+			// Mirai sends "/bin/busybox ECCHI" and expects exactly this reply
 			return args[0] + ": applet not found\n", 127, false
 		}
 		return out, code, exit
@@ -75,18 +75,18 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 		return s.cp(args)
 
 	case "wget", "curl", "tftp", "ftpget":
-		// nu descarcam nimic: ii zicem ca "nu merge netul", dar URL-ul e deja logat
+		// nothing is downloaded: pretend the network is down (the URL is already logged)
 		return name + ": can't connect to remote host: Connection timed out\n", 1, false
 
 	case "sh", "ash", "enable", "system", "shell", "linuxshell", "chmod", "mv",
 		"kill", "killall", "export", "ulimit", "sleep", "true":
-		// comenzi care pe un sistem real nu afiseaza nimic cand merg
+		// commands that print nothing on success on a real system
 		return "", 0, false
 	case "false":
 		return "", 1, false
 	}
 
-	// ./bot sau /tmp/x: daca fisierul exista, "ruleaza" in liniste (ca un malware pornit in fundal)
+	// ./bot or /tmp/x: if the file exists it "runs" silently (like malware started in the background)
 	if strings.Contains(name, "/") {
 		if _, ok := s.readFile(resolve(s.cwd, name)); ok {
 			return "", 0, false
@@ -95,6 +95,7 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	return "-sh: " + name + ": not found\n", 127, false
 }
 
+// uname answers the flags bots usually ask for.
 func uname(args []string) string {
 	if len(args) == 0 {
 		return "Linux\n"
@@ -103,7 +104,7 @@ func uname(args []string) string {
 	case "-a":
 		return "Linux gateway 4.14.180 #1 SMP armv7l GNU/Linux\n"
 	case "-m":
-		return "armv7l\n" // botii intreaba asta ca sa stie ce binar sa descarce
+		return "armv7l\n" // bots ask this to pick which binary to download
 	case "-r":
 		return "4.14.180\n"
 	case "-n":
@@ -112,7 +113,7 @@ func uname(args []string) string {
 	return "Linux\n"
 }
 
-// echo [-n] [-e] text. -n = fara rand nou la final, -e = interpreteaza \n, \t, \xHH.
+// echo [-n] [-e] text. -n = no trailing newline, -e = interpret \n, \t, \xHH.
 func echo(args []string) string {
 	newline := true
 	escapes := false
@@ -136,13 +137,13 @@ func echo(args []string) string {
 	return text
 }
 
-// isEchoFlag: "-n", "-e", "-ne", "-en", "-E" -> da; "-x" sau "-" -> nu (se afiseaza ca text)
+// isEchoFlag: "-n", "-e", "-ne", "-en", "-E" -> yes; "-x" or "-" -> no (printed as text).
 func isEchoFlag(a string) bool {
 	return len(a) > 1 && a[0] == '-' && strings.Trim(a[1:], "neE") == ""
 }
 
-// unescape transforma \n, \t, \r, \\ si \xHH in caracterele reale.
-// Botii trimit des "echo -e '\x6b\x61\x6d\x69'" si verifica daca primesc "kami" -> asa stiu ca shell-ul e real.
+// unescape turns \n, \t, \r, \\ and \xHH into the real characters. Bots often send
+// "echo -e '\x6b\x61\x6d\x69'" and check for "kami" to tell if the shell is real.
 func unescape(s string) string {
 	var out strings.Builder
 	for i := 0; i < len(s); i++ {
@@ -161,7 +162,7 @@ func unescape(s string) string {
 		case '\\':
 			out.WriteByte('\\')
 		case 'x':
-			// \x6b -> 2 cifre hexa dupa x -> un byte
+			// \x6b -> two hex digits after x -> one byte
 			if i+2 < len(s) {
 				if b, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
 					out.WriteByte(byte(b))
@@ -180,7 +181,7 @@ func unescape(s string) string {
 
 func (s *Shell) cd(args []string) (string, int, bool) {
 	if len(args) == 0 {
-		s.cwd = "/root" // cd fara nimic = acasa
+		s.cwd = "/root" // cd with no argument = home
 		return "", 0, false
 	}
 	dir := resolve(s.cwd, args[0])
@@ -194,7 +195,7 @@ func (s *Shell) cd(args []string) (string, int, bool) {
 func (s *Shell) ls(args []string) (string, int, bool) {
 	target := "."
 	for _, a := range args {
-		if !strings.HasPrefix(a, "-") { // optiunile (-la, -l) le ignoram
+		if !strings.HasPrefix(a, "-") { // options (-la, -l) are ignored
 			target = a
 		}
 	}
@@ -202,7 +203,7 @@ func (s *Shell) ls(args []string) (string, int, bool) {
 	p := resolve(s.cwd, target)
 	if !s.isDir(p) {
 		if _, ok := s.readFile(p); ok {
-			return target + "\n", 0, false // ls pe un fisier = afiseaza numele lui
+			return target + "\n", 0, false // ls on a file prints its name
 		}
 		return "ls: " + target + ": No such file or directory\n", 1, false
 	}
@@ -216,7 +217,7 @@ func (s *Shell) ls(args []string) (string, int, bool) {
 
 func (s *Shell) cat(args []string, input string) (string, int, bool) {
 	if len(args) == 0 {
-		return input, 0, false // "... | cat" = da mai departe ce a primit
+		return input, 0, false // "... | cat" passes its input through
 	}
 
 	var out strings.Builder
@@ -235,13 +236,13 @@ func (s *Shell) cat(args []string, input string) (string, int, bool) {
 			code = 1
 		}
 		if out.Len() > maxSize {
-			break // "cat x x x x ..." nu ne umple RAM-ul
+			break // so "cat x x x x ..." can't fill the RAM
 		}
 	}
 	return out.String(), code, false
 }
 
-// grep TEXT [fisier] - pastreaza doar randurile care contin TEXT (fara regex, optiunile se ignora).
+// grep TEXT [file] keeps only the lines containing TEXT (no regex, options are ignored).
 func (s *Shell) grep(args []string, input string) (string, int, bool) {
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		args = args[1:]
@@ -250,7 +251,7 @@ func (s *Shell) grep(args []string, input string) (string, int, bool) {
 		return "Usage: grep [-HhnlLoqvsriwFE] PATTERN [FILE]...\n", 2, false
 	}
 
-	text := input // fara fisier, grep lucreaza pe ce vine prin |
+	text := input // without a file, grep works on what comes through |
 	if len(args) > 1 {
 		text, _, _ = s.cat(args[1:], "")
 	}
@@ -262,7 +263,7 @@ func (s *Shell) grep(args []string, input string) (string, int, bool) {
 		}
 	}
 	if out.Len() == 0 {
-		return "", 1, false // grep fara rezultat = cod 1 (conteaza la && si ||)
+		return "", 1, false // no match = exit code 1 (matters for && and ||)
 	}
 	return out.String(), 0, false
 }
@@ -271,7 +272,7 @@ func (s *Shell) touch(args []string) (string, int, bool) {
 	for _, a := range args {
 		p := resolve(s.cwd, a)
 		if _, ok := s.readFile(p); ok || s.isDir(p) {
-			continue // exista deja
+			continue // already exists
 		}
 		if msg := s.writeFile(a, "", false); msg != "" {
 			return "touch: " + a + ": No such file or directory\n", 1, false
@@ -294,7 +295,7 @@ func (s *Shell) mkdir(args []string) (string, int, bool) {
 	return "", 0, false
 }
 
-// rm sterge doar ce a creat atacatorul; fisierele "de sistem" raman (simplificare).
+// rm only deletes what the attacker created; built-in files stay (simplification).
 func (s *Shell) rm(args []string) (string, int, bool) {
 	for _, a := range args {
 		p := resolve(s.cwd, a)
@@ -304,7 +305,7 @@ func (s *Shell) rm(args []string) (string, int, bool) {
 	return "", 0, false
 }
 
-// cp sursa destinatie. Mirai face "cp /bin/echo x" ca sa aiba un fisier executabil pe care sa-l rescrie.
+// cp src dst. Mirai runs "cp /bin/echo x" to get an executable file it can overwrite.
 func (s *Shell) cp(args []string) (string, int, bool) {
 	var paths []string
 	for _, a := range args {

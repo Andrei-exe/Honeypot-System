@@ -15,25 +15,27 @@ import (
 )
 
 const (
-	queueSize  = 1000            // cate evenimente pot astepta in channel
-	batchSize  = 50              // trimitem imediat ce se strang atatea...
-	flushEvery = 2 * time.Second // ...sau la fiecare 2 secunde, cate s-au strans
-	retryAfter = 5 * time.Second // dupa un esec, asteptam atat pana reincercam
-	maxPending = 5000            // daca Python-ul e picat mult timp, nu tinem in RAM mai mult de atat
+	queueSize  = 1000            // events that can wait in the channel
+	batchSize  = 50              // send as soon as this many have gathered...
+	flushEvery = 2 * time.Second // ...or every 2 seconds, with whatever is there
+	retryAfter = 5 * time.Second // wait this long after a failed send
+	maxPending = 5000            // cap kept in RAM while the receiver is down
 )
 
+// Shipper writes every event as JSONL and, if a URL is set, POSTs it to the threat-engine
+// in batches. Services only call EmitEvent; one background goroutine (run) does the network work.
 type Shipper struct {
 	mu  sync.Mutex
-	enc *json.Encoder // copia de rezerva: JSONL pe stdout (merge mereu, si fara Python)
+	enc *json.Encoder // backup copy: JSONL on stdout (works even without the receiver)
 
 	url     string
 	token   string
 	client  *http.Client
-	queue   chan models.HoneypotEvent // "coada" dintre servicii si goroutine-ul care trimite
-	dropped atomic.Int64              // evenimente care n-au ajuns la Python (sunt doar in JSONL)
+	queue   chan models.HoneypotEvent // buffer between the services and the sender goroutine
+	dropped atomic.Int64              // events that never reached the receiver (only in JSONL)
 }
 
-// NewShipper: out = unde scriem JSONL-ul (stdout); url = unde trimitem prin HTTP ("" = nicaieri).
+// NewShipper writes JSONL to out; url is where batches are POSTed ("" = nowhere).
 func NewShipper(out io.Writer, url, token string) *Shipper {
 	s := &Shipper{enc: json.NewEncoder(out)}
 	if url == "" {
@@ -45,50 +47,50 @@ func NewShipper(out io.Writer, url, token string) *Shipper {
 	s.token = token
 	s.client = &http.Client{Timeout: 5 * time.Second}
 	s.queue = make(chan models.HoneypotEvent, queueSize)
-	go s.run() // goroutine-ul care trimite, separat de servicii
+	go s.run() // sender goroutine, separate from the services
 	log.Println("shipper: trimit evenimentele la", url)
 	return s
 }
 
-// EmitEvent e chemat de servicii. NU asteapta niciodata dupa retea:
-// scrie JSONL-ul si pune evenimentul in coada, apoi se intoarce imediat.
+// EmitEvent is called by the services and never waits on the network:
+// it writes the JSONL line, queues the event and returns immediately.
 func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
 	s.mu.Lock()
 	s.enc.Encode(e)
 	s.mu.Unlock()
 
 	if s.queue == nil {
-		return // fara URL: doar JSONL
+		return // no URL: JSONL only
 	}
 
 	select {
 	case s.queue <- e:
-		// a intrat in coada
+		// queued
 	default:
-		// coada e plina (Python-ul e picat de mult) -> nu blocam serviciul, il numaram si mergem mai departe
+		// queue full (receiver down for a long time) -> don't block the service, just count it
 		s.dropped.Add(1)
 	}
 }
 
-// run ruleaza la infinit in goroutine-ul lui: strange evenimente din coada si le trimite in grupuri.
+// run loops forever in its own goroutine: it collects queued events and sends them in batches.
 func (s *Shipper) run() {
 	ticker := time.NewTicker(flushEvery)
 	defer ticker.Stop()
 
 	var batch []models.HoneypotEvent
-	var retryAt time.Time // dupa un esec, nu mai incercam pana atunci
-	down := false         // ca sa nu scriem aceeasi eroare la fiecare incercare
+	var retryAt time.Time // after a failure, don't try again before this
+	down := false         // so the same error isn't logged on every attempt
 
 	for {
 		select {
 		case e := <-s.queue:
 			batch = append(batch, e)
 			if len(batch) > maxPending {
-				batch = batch[1:] // il aruncam pe cel mai vechi (e oricum in JSONL)
+				batch = batch[1:] // drop the oldest (it's still in JSONL)
 				s.dropped.Add(1)
 			}
 			if len(batch) < batchSize {
-				continue // mai asteptam, poate mai vin
+				continue // wait, more may come
 			}
 
 		case <-ticker.C:
@@ -117,8 +119,8 @@ func (s *Shipper) run() {
 	}
 }
 
-// send trimite un grup de evenimente ca array JSON.
-// Intoarce eroare DOAR daca merita reincercat (retea picata, 5xx).
+// send POSTs a batch as a JSON array.
+// It returns an error only when retrying makes sense (network down, 5xx).
 func (s *Shipper) send(batch []models.HoneypotEvent) error {
 	body, err := json.Marshal(batch)
 	if err != nil {
@@ -136,19 +138,19 @@ func (s *Shipper) send(batch []models.HoneypotEvent) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return err // Python-ul e picat sau nu raspunde in 5 secunde
+		return err // receiver is down or didn't answer within 5 seconds
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024)) // citim raspunsul ca sa se poata refolosi conexiunea
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024)) // drain the body so the connection can be reused
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		// 4xx = "nu-mi place ce mi-ai trimis" (token gresit, format gresit, cale gresita).
-		// Daca retrimitem acelasi lucru, primim acelasi raspuns -> renuntam la grupul asta.
+		// 4xx = the request itself is wrong (token, format, path).
+		// Resending would get the same answer -> drop this batch.
 		log.Printf("shipper: serverul a refuzat %d evenimente: %s", len(batch), resp.Status)
 		return nil
 	}
-	return fmt.Errorf("serverul a raspuns %s", resp.Status) // 5xx -> problema la ei, reincercam
+	return fmt.Errorf("serverul a raspuns %s", resp.Status) // 5xx -> their problem, retry
 }

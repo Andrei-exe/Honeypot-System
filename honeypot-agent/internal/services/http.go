@@ -15,6 +15,8 @@ import (
 	"honeypot-agent/internal/shipper"
 )
 
+// RunHTTP serves a fake router login page (lighttpd) and logs every request.
+// Submitted credentials are logged as login_attempt and always rejected.
 func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		ip, portText, err := net.SplitHostPort(r.RemoteAddr)
@@ -23,7 +25,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		}
 		port, _ := strconv.Atoi(portText)
 
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096)) // read at most 4KB of the body
 
 		event := models.HoneypotEvent{
 			Timestamp:  models.Now(),
@@ -41,6 +43,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 			},
 		}
 
+		// credentials from a login form (common field names) or from Basic Auth
 		values, _ := url.ParseQuery(string(body))
 		user := formValue(values, "username", "log", "user")
 		pass := formValue(values, "password", "pass", "pwd")
@@ -64,6 +67,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		w.Header().Set("Server", "lighttpd/1.4.55")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if isBasic {
+			// ask for Basic Auth only from clients that already sent it
 			w.Header().Set("WWW-Authenticate", `Basic realm="Gateway"`)
 		}
 		if event.EventType == "login_attempt" {
@@ -74,6 +78,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		fmt.Fprint(w, fakeLoginPage(false))
 	}
 
+	// timeouts so slow clients can't hold connections open forever
 	server := &http.Server{
 		Handler:           http.HandlerFunc(handler),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -90,6 +95,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	return server.Serve(limitConnections(listener, "HTTP"))
 }
 
+// formValue returns the first non-empty value among the given form field names.
 func formValue(v url.Values, names ...string) string {
 	for _, n := range names {
 		x := v.Get(n)
@@ -100,6 +106,7 @@ func formValue(v url.Values, names ...string) string {
 	return ""
 }
 
+// fakeLoginPage returns the router login HTML; showError adds the "Invalid username or password" line.
 func fakeLoginPage(showError bool) string {
 	errorHTML := ""
 	if showError {
