@@ -1,0 +1,80 @@
+# Pornire (din radacina repo-ului):  docker compose up -d --build
+# Dashboard-ul:                       http://127.0.0.1:8050
+# Evenimentele, live (doar JSON):     docker logs -f honeypot-agent 2>nul        (cmd; in PowerShell: 2>$null)
+# Ce primeste Python-ul + alertele:   docker logs -f threat-engine
+# Cererile dashboard-ului:            docker logs -f dashboard
+# Mesajele tuturor, amestecate:       docker compose logs -f
+# Oprire:                             docker compose down
+#
+# Setarile (porturi, token...) vin din fisierul .env, daca exista (vezi .env.example).
+# Fara .env merg valorile de dupa ":-" de mai jos.
+
+services:
+  honeypot-agent:
+    build: ./honeypot-agent
+    container_name: honeypot-agent
+    ports:
+      # "IP:port_pe_PC:port_in_container"
+      # Implicit: doar de pe PC-ul tau (127.0.0.1) si aceleasi porturi ca la `go run .`.
+      # Pe VPS, in .env: BIND_IP=0.0.0.0, FTP_PORT=21, SSH_PORT=22, TELNET_PORT=23, HTTP_PORT=80.
+      - "${BIND_IP:-127.0.0.1}:${FTP_PORT:-2121}:2121"
+      - "${BIND_IP:-127.0.0.1}:${SSH_PORT:-2222}:2222"
+      - "${BIND_IP:-127.0.0.1}:${TELNET_PORT:-2323}:2323"
+      - "${BIND_IP:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    environment:
+      # implicit: la threat-engine de mai jos (containerele se gasesc dupa numele serviciului)
+      SHIPPER_URL: ${SHIPPER_URL:-http://threat-engine:8000/api/events}
+      # aceeasi parola ca la threat-engine (AGENT_TOKEN din .env)
+      SHIPPER_TOKEN: ${AGENT_TOKEN:-}
+    extra_hosts:
+      # host.docker.internal = PC-ul tau, si pe Linux (pe Docker Desktop merge oricum).
+      # Doar daca vrei sa trimiti la un receiver.py pornit direct pe PC (vezi .env.example).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # cheia SSH sta aici -> acelasi fingerprint si dupa rebuild (altfel ne-am da de gol)
+      - agent-data:/data
+    networks:
+      - honeynet   # reteaua „din fata”, cu porturile publicate pentru atacatori
+      - backend    # ca sa ajunga la threat-engine
+    depends_on:
+      - threat-engine   # porneste intai threat-engine (shipper-ul oricum reincearca daca nu e gata)
+
+  threat-engine:
+    build: ./threat-engine
+    container_name: threat-engine
+    # Fara porturi publicate: la el ajung doar agentul (trimite evenimente)
+    # si dashboard-ul (cere alertele), prin reteaua backend.
+    environment:
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      INCLUDE_INTERNAL: ${INCLUDE_INTERNAL:-true}
+    volumes:
+      # received_events.jsonl + alerts.jsonl -> raman si dupa rebuild
+      - engine-data:/data
+    networks:
+      - backend    # DOAR backend: fara internet, atacatorii nu ajung la el direct
+
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    ports:
+      # DOAR pe 127.0.0.1, si pe VPS: acolo il vezi printr-un tunel SSH.
+      # Nu pune niciodata 0.0.0.0 aici: dashboard-ul n-are parola.
+      - "127.0.0.1:${DASHBOARD_PORT:-8050}:8050"
+    environment:
+      # de unde ia alertele: threat-engine, gasit dupa numele serviciului
+      THREAT_ENGINE_URL: http://threat-engine:8000
+    networks:
+      - backend    # ca sa ajunga la threat-engine
+      - frontend   # ca Docker sa-i poata publica portul (dintr-o retea internal: true nu poate)
+    depends_on:
+      - threat-engine
+
+networks:
+  honeynet:   # in fata: doar agentul, cu porturile pentru atacatori
+  backend:    # in spate: agent -> threat-engine <- dashboard
+    internal: true   # fara iesire la internet
+  frontend:   # doar dashboard-ul, ca sa-l poti deschide din browser (127.0.0.1:8050)
+
+volumes:
+  agent-data:
+  engine-data:

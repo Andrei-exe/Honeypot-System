@@ -8,7 +8,7 @@ from sessions import group_sessions, session_summary, kill_chain_funnel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "filtered_alerts.json")
-SESSIONS_FILE = os.path.join(BASE_DIR, "sessions.json")
+SESSIONS_FILE = os.environ.get("SESSIONS_FILE", os.path.join(BASE_DIR, "sessions.json"))
 
 
 def parse_args():

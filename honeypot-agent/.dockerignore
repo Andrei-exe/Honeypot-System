@@ -1,0 +1,16 @@
+# Ce NU trimitem la Docker cand construim imaginea (la fel ca .gitignore, dar pentru build).
+
+# cheia privata SSH de la `go run .` - in container se genereaza alta, pe volum
+ssh_host_ed25519_key
+
+# evenimente din teste/demo (contin parole)
+*.jsonl
+
+# binarele de la `go build`
+honeypot-agent
+honeypot-agent.exe
+
+# nu-i trebuie build-ului
+Dockerfile
+.dockerignore
+.gitignore
