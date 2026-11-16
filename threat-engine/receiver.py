@@ -4,21 +4,21 @@
 import json
 import os
 import threading
-from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template_string, request
-from filters import check_event, is_internal
+from filters import check_event, is_internal, build_alert, BruteForceTracker
 
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EVENTS_FILE = os.environ.get("EVENTS_FILE", "received_events.jsonl")
-ALERTS_FILE = os.environ.get("ALERTS_FILE", os.path.join(BASE_DIR, "filtered_alerts.json"))
+ALERTS_FILE = os.environ.get("ALERTS_FILE", os.path.join(BASE_DIR, "alerts.jsonl"))
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
 INCLUDE_INTERNAL = os.environ.get("INCLUDE_INTERNAL", "true").lower() == "true"
 
 write_lock = threading.Lock()
+tracker = BruteForceTracker()
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -840,15 +840,24 @@ DASHBOARD_HTML = """
 """
 
 
-def load_saved_alerts():
+def load_saved_alerts(limit=500):
     if not os.path.exists(ALERTS_FILE):
-        return []
-    try:
-        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, IOError):
-        return []
+        return 0, []
+    with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+        lines = [line for line in f if line.strip()]
+    alerts = []
+    for line in lines[-limit:]:
+        try:
+            alerts.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return len(lines), alerts
+
+
+def append_alerts(alerts):
+    with open(ALERTS_FILE, "a", encoding="utf-8") as f:
+        for alert in alerts:
+            f.write(json.dumps(alert, ensure_ascii=False) + "\n")
 
 
 @app.post("/api/events")
@@ -863,28 +872,21 @@ def receive_events():
     good = [ev for ev in events if isinstance(ev, dict)]
     new_alerts = []
 
-    for ev in good:
-        if is_internal(ev) and not INCLUDE_INTERNAL:
-            continue
-        is_threat, severity, reason = check_event(ev)
-        if is_threat:
-            alert = dict(ev)
-            alert["severity"] = severity
-            alert["alert_reason"] = reason
-            alert["processed_at"] = datetime.now(timezone.utc).isoformat()
-            new_alerts.append(alert)
-            print(f"[REALTIME-ALERT][{severity}] {ev.get('source_ip', '?')} -> {reason}")
-
     with write_lock:
+        for ev in good:
+            if is_internal(ev) and not INCLUDE_INTERNAL:
+                continue
+            is_threat, severity, reason = check_event(ev, tracker)
+            if is_threat:
+                new_alerts.append(build_alert(ev, severity, reason))
+                print(f"[REALTIME-ALERT][{severity}] {ev.get('source_ip', '?')} -> {reason}")
+
         with open(EVENTS_FILE, "a", encoding="utf-8") as f:
             for ev in good:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
 
         if new_alerts:
-            all_alerts = load_saved_alerts()
-            all_alerts.extend(new_alerts)
-            with open(ALERTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(all_alerts, f, indent=2, ensure_ascii=False)
+            append_alerts(new_alerts)
 
     print(f"[+] primit {len(good)} evenimente ({len(new_alerts)} alerte generate)")
     return jsonify(received=len(good), alerts_generated=len(new_alerts)), 200
@@ -892,14 +894,14 @@ def receive_events():
 
 @app.get("/api/alerts")
 def get_alerts():
-    alerts = load_saved_alerts()
-    return jsonify(total=len(alerts), alerts=alerts[-500:]), 200
+    total, alerts = load_saved_alerts()
+    return jsonify(total=total, alerts=alerts), 200
 
 
 @app.get("/")
 def dashboard():
-    alerts = load_saved_alerts()
-    return render_template_string(DASHBOARD_HTML, initial_alerts=alerts[-500:])
+    _, alerts = load_saved_alerts()
+    return render_template_string(DASHBOARD_HTML, initial_alerts=alerts)
 
 
 if __name__ == "__main__":
