@@ -15,7 +15,7 @@ func TestRun(t *testing.T) {
 		{"cd /tmp/../etc && pwd", "/etc\n"},
 		{"cd /nu-exista || cd /var/run; pwd", "-sh: cd: can't cd to /nu-exista: No such file or directory\n/var/run\n"},
 		{"cd /nu-exista 2>/dev/null || cd /var/run; pwd", "/var/run\n"},
-		{"cat /etc/passwd | grep root", "root:x:0:0:root:/root:/bin/ash\n"},
+		{"cat /etc/passwd | grep admin", "admin:x:0:0:admin:/root:/bin/ash\n"}, // admin are uid 0 (tot root)
 		{"cat /proc/cpuinfo | grep 'model name'", "model name\t: ARMv7 Processor rev 5 (v7l)\n"},
 		{`echo -e '\x6b\x61\x6d\x69'`, "kami\n"},
 		{`echo "a; b" && echo c`, "a; b\nc\n"},

@@ -47,11 +47,19 @@ var fakeFiles = map[string]string{
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
 	"/etc/resolv.conf": "nameserver 192.168.1.1\n",
+	// admin, support si user au uid 0 (adica sunt tot root) - des intalnit pe dispozitive IoT.
+	// Asa "whoami" = root e realist pentru oricine intra: whoami cauta PRIMUL nume cu uid-ul tau.
 	"/etc/passwd": "root:x:0:0:root:/root:/bin/ash\n" +
 		"daemon:*:1:1:daemon:/var:/bin/false\n" +
+		"admin:x:0:0:admin:/root:/bin/ash\n" +
+		"support:x:0:0:support:/root:/bin/ash\n" +
+		"user:x:0:0:user:/root:/bin/ash\n" +
 		"nobody:*:65534:65534:nobody:/var:/bin/false\n",
 	"/etc/shadow": "root:$1$Fz8sK2lQ$wE0bq3Yt1aRk9mVh7uXcN.:18417:0:99999:7:::\n" +
 		"daemon:*:0:0:99999:7:::\n" +
+		"admin:$1$Qw3rT9pZ$Lm2vX8cB1nK7dF4hJ6sA0.:18417:0:99999:7:::\n" +
+		"support:$1$Hy6uJ1kL$Pq9wE3rT5yU7iO2aS4dF6.:18417:0:99999:7:::\n" +
+		"user:$1$Zx8cV2bN$Mk1lO3pI5uY7tR9eW0qA2.:18417:0:99999:7:::\n" +
 		"nobody:*:0:0:99999:7:::\n",
 
 	"/proc/version": "Linux version 4.14.180 (builder@buildhost) (gcc version 8.4.0) #1 SMP Thu Jun 4 12:00:00 UTC 2020\n",

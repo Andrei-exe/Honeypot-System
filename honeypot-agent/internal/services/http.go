@@ -26,7 +26,7 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 
 		event := models.HoneypotEvent{
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Timestamp:  models.Now(),
 			NodeID:     nodeID,
 			EventType:  "http_request",
 			SourceIP:   ip,
@@ -45,6 +45,11 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		user := formValue(values, "username", "log", "user")
 		pass := formValue(values, "password", "pass", "pwd")
 
+		basicUser, basicPass, isBasic := r.BasicAuth()
+		if isBasic {
+			user, pass = basicUser, basicPass
+		}
+
 		if user != "" || pass != "" {
 			event.EventType = "login_attempt"
 			event.Credentials = &models.Credentials{
@@ -56,8 +61,11 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 
 		shipper.EmitEvent(event)
 
-		w.Header().Set("Server", "Apache/2.4.41 (Ubuntu)")
+		w.Header().Set("Server", "lighttpd/1.4.55")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if isBasic {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Gateway"`)
+		}
 		if event.EventType == "login_attempt" {
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprint(w, fakeLoginPage(true))
@@ -101,7 +109,7 @@ func fakeLoginPage(showError bool) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 		<html>
 		<head>
-			<title>Admin Login</title>
+			<title>Gateway - Login</title>
 			<style>
 				body { font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
 				.box { background: #2a2a2a; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 300px; }
@@ -113,7 +121,8 @@ func fakeLoginPage(showError bool) string {
 		</head>
 		<body>
 			<div class="box">
-				<h2>System Admin Panel</h2>
+				<h2>Gateway Router</h2>
+				<p style="color: #aaa; font-size: 13px; margin-top: 0;">Please log in to manage your router.</p>
 				%s
 				<form method="POST" action="/login">
 					<input type="text" name="username" placeholder="Username" required>

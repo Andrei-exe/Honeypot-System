@@ -68,7 +68,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	// construieste campurile comune, la fel ca in http.go
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Timestamp:  models.Now(),
 			NodeID:     nodeID,
 			EventType:  eventType,
 			SourceIP:   ip,

@@ -51,7 +51,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Timestamp:  models.Now(),
 			NodeID:     nodeID,
 			EventType:  eventType,
 			SourceIP:   ip,

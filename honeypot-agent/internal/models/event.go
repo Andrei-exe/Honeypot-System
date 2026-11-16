@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type HoneypotEvent struct {
 	Timestamp      string          `json:"timestamp"`
 	NodeID         string          `json:"node_id"`
@@ -26,4 +28,11 @@ type PayloadDetails struct {
 	HTTPPath      string `json:"http_path,omitempty"`
 	HTTPUserAgent string `json:"http_user_agent,omitempty"`
 	RawData       string `json:"raw_data,omitempty"`
+}
+
+// timestampLayout = RFC3339 cu milisecunde
+const timestampLayout = "2006-01-02T15:04:05.000Z07:00"
+
+func Now() string {
+	return time.Now().UTC().Format(timestampLayout)
 }

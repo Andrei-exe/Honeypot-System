@@ -74,7 +74,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	// campurile comune, la fel ca in http.go / telnet.go
 	newEvent := func(eventType string) models.HoneypotEvent {
 		return models.HoneypotEvent{
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Timestamp:  models.Now(),
 			NodeID:     nodeID,
 			EventType:  eventType,
 			SourceIP:   ip,
@@ -114,6 +114,13 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 			}
 			time.Sleep(time.Second) // si SSH-ul real are delay la parola gresita
 			return nil, errors.New("password rejected")
+		},
+		// Dropbear ofera exact 2 metode de login: "publickey" si "password" (fara keyboard-interactive,
+		// pe care il are OpenSSH). Ca sa aratam la fel, acceptam sa ni se propuna chei, dar le refuzam
+		// pe toate -> clientul trece pe parola. Fara callback-ul asta am oferi doar "password".
+		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
+			return nil, errors.New("public key rejected")
 		},
 	}
 	config.AddHostKey(hostKey)
