@@ -1,0 +1,14 @@
+# Ce NU trimitem la Docker cand construim imaginea.
+
+*.jsonl
+*.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+.env
+Dockerfile
+.dockerignore
+.gitignore
