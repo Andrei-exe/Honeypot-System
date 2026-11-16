@@ -1,5 +1,6 @@
-import ipaddress
+iimport ipaddress
 import re
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 BAD_COMMANDS = [
@@ -37,11 +38,50 @@ def command_words(cmd):
 
 
 def unquote_deep(text):
-    # Decodeaza de doua ori pentru a prinde incercarile de bypass cu double URL encoding
     return unquote(unquote(text)).lower()
 
 
-def check_event(event):
+def parse_time(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+class BruteForceTracker:
+    def __init__(self, threshold=5, window_seconds=600):
+        self.threshold = threshold
+        self.window = timedelta(seconds=window_seconds)
+        self.failures = {}
+        self.reported_until = {}
+
+    def add(self, ip, ts=None):
+        ts = ts or datetime.now(timezone.utc)
+        recent = [t for t in self.failures.get(ip, []) if abs(ts - t) <= self.window]
+        recent.append(ts)
+        self.failures[ip] = recent
+        if len(recent) < self.threshold:
+            return 0
+        if ip in self.reported_until and ts < self.reported_until[ip]:
+            return 0
+        self.reported_until[ip] = ts + self.window
+        return len(recent)
+
+
+def build_alert(event, severity, reason):
+    alert = dict(event)
+    alert["severity"] = severity
+    alert["alert_reason"] = reason
+    alert["processed_at"] = datetime.now(timezone.utc).isoformat()
+    return alert
+
+
+def check_event(event, tracker=None):
     """
     Analizeaza un eveniment si returneaza un tuplu: (is_threat, severity, reason)
     Niveluri de severitate: LOW, MEDIUM, HIGH, CRITICAL
@@ -68,6 +108,11 @@ def check_event(event):
         user = creds.get("username", "").strip().lower()
         if creds.get("success"):
             return True, "CRITICAL", f"login REUSIT cu {user}:{creds.get('password', '')}"
+        if tracker is not None:
+            count = tracker.add(event.get("source_ip", "?"), parse_time(event.get("timestamp")))
+            if count:
+                minutes = int(tracker.window.total_seconds() // 60)
+                return True, "HIGH", f"atac brute-force detectat ({count} parole gresite in {minutes} minute)"
         if user in TARGET_USERS:
             return True, "MEDIUM", f"login pe cont critic: {user}"
 
