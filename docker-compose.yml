@@ -44,6 +44,13 @@ services:
     # Tot sistemul de fisiere al containerului e doar-citire. Se poate scrie DOAR pe volume
     # (aici /data, cu cheia SSH). Cine ar prelua procesul n-are unde sa-si lase fisiere.
     read_only: true
+    # Fara nicio "bucata de root" (capabilities: porturi < 1024, pachete raw, chown, kill...).
+    # Nu ne trebuie niciuna: ascultam pe porturi > 1024, maparea pe 21/22/23/80 o face Docker.
+    cap_drop: [ALL]
+    # Niciun proces din container nu poate castiga drepturi in plus (ex. prin binare setuid
+    # ca su/passwd, care altfel pornesc ca root). La agent nu exista asa ceva, dar e regula pe toate.
+    security_opt:
+      - no-new-privileges:true
     # Ce scrie pe stdout/stderr pastreaza Docker intr-un fisier pe host. Fara limita,
     # pe un VPS cu atacuri reale umple discul. Aici: max 5 fisiere x 20MB, cele vechi se sterg.
     # Mai mult decat la celelalte: stdout-ul agentului e copia de rezerva a evenimentelor (JSONL).
@@ -69,6 +76,10 @@ services:
     restart: unless-stopped
     # doar-citire; scrie doar pe volumul /data (evenimente, alerte, rezultatele main.py)
     read_only: true
+    cap_drop: [ALL]   # fara capabilities (portul 8000 e > 1024)
+    # imaginea Debian are 11 binare setuid/setgid (su, passwd, mount...) -> raman fara efect
+    security_opt:
+      - no-new-privileges:true
     # max 3 x 10MB de log-uri (evenimentele si alertele sunt oricum pe volum, in /data)
     logging:
       driver: json-file
@@ -94,6 +105,10 @@ services:
     restart: unless-stopped
     # doar-citire; dashboard-ul nu scrie nimic pe disc
     read_only: true
+    cap_drop: [ALL]   # fara capabilities (portul 8050 e > 1024)
+    # imaginea Debian are 11 binare setuid/setgid (su, passwd, mount...) -> raman fara efect
+    security_opt:
+      - no-new-privileges:true
     # max 3 x 10MB de log-uri (aici sunt doar cererile HTTP ale dashboard-ului)
     logging:
       driver: json-file
