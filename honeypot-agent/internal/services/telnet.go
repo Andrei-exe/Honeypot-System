@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -33,8 +34,9 @@ const (
 	telnetMaxCommands   = 50
 )
 
-// RunTelnet serves a fake BusyBox telnetd on address. Returns only on a fatal error.
-func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
+// RunTelnet serves a fake BusyBox telnetd on address until ctx is cancelled.
+// Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
+func RunTelnet(ctx context.Context, address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -43,13 +45,7 @@ func RunTelnet(address string, nodeID string, shipper *shipper.Shipper) error {
 	defer listener.Close()
 
 	log.Println("TELNET node running")
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err // transient errors are already retried inside limitListener
-		}
-		go handleTelnet(conn, nodeID, shipper) // one goroutine per attacker
-	}
+	return serve(ctx, listener, func(conn net.Conn) { handleTelnet(conn, nodeID, shipper) })
 }
 
 // handleTelnet runs one Telnet session: login prompt, then the fake shell.

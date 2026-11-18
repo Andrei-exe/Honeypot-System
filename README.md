@@ -2,7 +2,7 @@
 
 > **Work in Progress:** Project is under development.
 
-A distributed honeypot that impersonates a cheap ARM-based home router on SSH, Telnet, FTP and HTTP. It lets attackers and bots log in, records everything they do, and turns the activity into real-time alerts on a web dashboard.
+A honeypot that impersonates a cheap ARM-based home router on SSH, Telnet, FTP and HTTP. It lets attackers and bots log in, records everything they do, and turns the activity into real-time alerts on a web dashboard.
 
 The system has three parts, all running in Docker:
 
@@ -24,6 +24,7 @@ flowchart LR
   - Four fake services with one consistent persona, a router called `gateway`: SSH (Dropbear), Telnet (BusyBox), FTP (vsFTPd) and HTTP (a lighttpd login page).
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
   - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout.
+  - On shutdown (`docker stop`, a server reboot, an update), it stops accepting connections, ends the open sessions and delivers its last events before it exits, usually within a second.
 - **threat-engine:**
   - Receives the events (`POST /api/events`, protected by a token) and evaluates each one in real time. It flags successful logins, brute force, download attempts, dangerous commands and malicious HTTP paths, with severities from LOW to CRITICAL.
   - `main.py` runs an offline analysis that produces per-session summaries and a kill-chain funnel.
@@ -200,7 +201,7 @@ deploy/           server setup: egress firewall script and its systemd unit
 
 ## Roadmap
 
-- Graceful shutdown and multiple sensors.
+- Multiple sensors: node IDs and ports from the environment.
 - CI with GitHub Actions.
 - Malware sample collection with SHA-256 hashing.
 - Tarpit.

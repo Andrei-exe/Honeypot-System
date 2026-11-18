@@ -1,6 +1,8 @@
 package services
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,9 +17,10 @@ import (
 	"honeypot-agent/internal/shipper"
 )
 
-// RunHTTP serves a fake router login page (lighttpd) and logs every request.
+// RunHTTP serves a fake router login page (lighttpd) and logs every request, until ctx is cancelled.
 // Submitted credentials are logged as login_attempt and always rejected.
-func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
+// Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
+func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shipper.Shipper) error {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		ip, portText, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
@@ -92,7 +95,24 @@ func RunHTTP(address string, nodeID string, shipper *shipper.Shipper) error {
 		return err
 	}
 	log.Println("HTTP node running")
-	return server.Serve(limitConnections(listener, "HTTP"))
+
+	// When ctx is cancelled: Shutdown stops accepting, closes idle keep-alive connections and
+	// waits for the requests in progress (at most shutdownWait).
+	shutdownDone := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		waitCtx, cancel := context.WithTimeout(context.Background(), shutdownWait)
+		defer cancel()
+		server.Shutdown(waitCtx)
+		close(shutdownDone)
+	})
+	defer stop()
+
+	err = server.Serve(limitConnections(listener, "HTTP"))
+	if errors.Is(err, http.ErrServerClosed) {
+		<-shutdownDone // Serve returns as soon as Shutdown starts; wait until it has finished
+		return nil
+	}
+	return err
 }
 
 // formValue returns the first non-empty value among the given form field names.

@@ -2,6 +2,7 @@ package shipper
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,9 @@ type Shipper struct {
 	client  *http.Client
 	queue   chan models.HoneypotEvent // buffer between the services and the sender goroutine
 	dropped atomic.Int64              // events that never reached the receiver (only in JSONL)
+
+	quit chan time.Time // Close sends here the deadline for the last send
+	done chan struct{}  // closed by run when it has finished
 }
 
 // NewShipper writes JSONL to out; url is where batches are POSTed ("" = nowhere).
@@ -47,6 +51,8 @@ func NewShipper(out io.Writer, url, token string) *Shipper {
 	s.token = token
 	s.client = &http.Client{Timeout: 5 * time.Second}
 	s.queue = make(chan models.HoneypotEvent, queueSize)
+	s.quit = make(chan time.Time)
+	s.done = make(chan struct{})
 	go s.run() // sender goroutine, separate from the services
 	log.Println("shipper: trimit evenimentele la", url)
 	return s
@@ -72,7 +78,19 @@ func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
 	}
 }
 
-// run loops forever in its own goroutine: it collects queued events and sends them in batches.
+// Close sends the events that are still waiting and stops the sender goroutine.
+// It gives up after timeout (the events that didn't make it are still in JSONL).
+// Call it only after the services have stopped, so their last events (session_end) are queued.
+// The queue itself is never closed: a late EmitEvent can't panic, its event only stays in JSONL.
+func (s *Shipper) Close(timeout time.Duration) {
+	if s.queue == nil {
+		return // no URL: there is nothing to send
+	}
+	s.quit <- time.Now().Add(timeout)
+	<-s.done
+}
+
+// run loops in its own goroutine until Close: it collects queued events and sends them in batches.
 func (s *Shipper) run() {
 	ticker := time.NewTicker(flushEvery)
 	defer ticker.Stop()
@@ -83,6 +101,11 @@ func (s *Shipper) run() {
 
 	for {
 		select {
+		case deadline := <-s.quit:
+			s.flush(batch, deadline)
+			close(s.done)
+			return
+
 		case e := <-s.queue:
 			batch = append(batch, e)
 			if len(batch) > maxPending {
@@ -103,7 +126,7 @@ func (s *Shipper) run() {
 			continue
 		}
 
-		if err := s.send(batch); err != nil {
+		if err := s.send(context.Background(), batch); err != nil {
 			if !down {
 				log.Printf("shipper: nu pot trimite (%v) - pastrez evenimentele si reincerc la fiecare %v", err, retryAfter)
 				down = true
@@ -119,15 +142,43 @@ func (s *Shipper) run() {
 	}
 }
 
-// send POSTs a batch as a JSON array.
+// flush is the last send, on shutdown: the batch plus everything still in the queue,
+// retried every half second until it works or the deadline passes.
+func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
+	for len(s.queue) > 0 { // the services have stopped, so nothing new comes in
+		batch = append(batch, <-s.queue)
+	}
+	if len(batch) == 0 {
+		return
+	}
+
+	// the request itself is cut off at the deadline too
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	for {
+		err := s.send(ctx, batch)
+		if err == nil {
+			log.Printf("shipper: la oprire am trimis ultimele %d evenimente", len(batch))
+			return
+		}
+		if time.Until(deadline) < 500*time.Millisecond {
+			log.Printf("shipper: la oprire %d evenimente n-au ajuns la Python (%v) - sunt doar in JSONL", len(batch), err)
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// send POSTs a batch as a JSON array; ctx can cut the request short.
 // It returns an error only when retrying makes sense (network down, 5xx).
-func (s *Shipper) send(batch []models.HoneypotEvent) error {
+func (s *Shipper) send(ctx context.Context, batch []models.HoneypotEvent) error {
 	body, err := json.Marshal(batch)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, s.url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

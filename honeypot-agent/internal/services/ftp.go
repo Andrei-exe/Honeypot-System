@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -21,8 +22,9 @@ const (
 	ftpMaxLoginTries = 3
 )
 
-// RunFTP serves a fake vsftpd on address. Returns only on a fatal error.
-func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
+// RunFTP serves a fake vsftpd on address until ctx is cancelled.
+// Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
+func RunFTP(ctx context.Context, address string, nodeID string, shipper *shipper.Shipper) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -31,13 +33,7 @@ func RunFTP(address string, nodeID string, shipper *shipper.Shipper) error {
 	defer listener.Close()
 
 	log.Println("FTP node running")
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-		go handleFTP(conn, nodeID, shipper)
-	}
+	return serve(ctx, listener, func(conn net.Conn) { handleFTP(conn, nodeID, shipper) })
 }
 
 // handleFTP runs one FTP session: login, then commands.

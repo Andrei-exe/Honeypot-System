@@ -130,6 +130,56 @@ func TestGivesUpOnClientError(t *testing.T) {
 	}
 }
 
+// Close sends right away what is still waiting (without it, the last events would wait for the
+// next 2s tick, and on docker stop they would be lost).
+func TestCloseSendsPendingEvents(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(int) int { return http.StatusOK }}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "")
+	for i := 0; i < 10; i++ { // fewer than batchSize: normally they would wait for the tick
+		s.EmitEvent(event(i))
+	}
+	start := time.Now()
+	s.Close(3 * time.Second)
+
+	if _, n := rcv.counts(); n != 10 {
+		t.Fatalf("dupa Close au ajuns %d evenimente din 10", n)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Close a durat %v (trebuia sa trimita imediat)", d)
+	}
+}
+
+// If the receiver is down, Close gives up at the deadline instead of hanging.
+func TestCloseGivesUpAtDeadline(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(int) int { return http.StatusServiceUnavailable }}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "")
+	s.EmitEvent(event(1))
+	start := time.Now()
+	s.Close(time.Second)
+
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Close a durat %v cu receiver-ul picat (limita era 1s)", d)
+	}
+	if req, _ := rcv.counts(); req < 1 {
+		t.Fatal("Close nici n-a incercat sa trimita")
+	}
+}
+
+// Without a URL there is no sender goroutine: Close returns at once and doesn't panic.
+func TestCloseWithoutURL(t *testing.T) {
+	s := NewShipper(io.Discard, "", "")
+	s.EmitEvent(event(1))
+	s.Close(time.Second)
+}
+
 // Without a URL, everything goes to JSONL only.
 func TestWithoutURLOnlyWritesJSONL(t *testing.T) {
 	var out bytes.Buffer

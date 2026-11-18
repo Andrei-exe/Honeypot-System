@@ -47,6 +47,10 @@ services:
       - backend    # ca sa ajunga la threat-engine
     depends_on:
       - threat-engine   # porneste intai threat-engine (shipper-ul oricum reincearca daca nu e gata)
+    # La `docker stop` agentul inchide sesiunile (max 3s) si trimite ultimele evenimente (max 5s).
+    # Docker trimite SIGKILL dupa termenul asta; implicitul difera (masurat ~3,7s pe Docker Desktop)
+    # -> il scriem explicit, cu loc de rezerva. In mod normal oprirea dureaza ~1s.
+    stop_grace_period: 15s
     # Daca procesul crapa sau serverul da reboot, Docker il porneste la loc.
     # Nu-l porneste doar daca l-ai oprit tu (docker stop / docker compose down).
     restart: unless-stopped

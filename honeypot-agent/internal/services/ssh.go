@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -32,8 +33,9 @@ const (
 	sshHostKeyFile = "ssh_host_ed25519_key"
 )
 
-// RunSSH serves a fake Dropbear SSH server on address. Returns only on a fatal error.
-func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
+// RunSSH serves a fake Dropbear SSH server on address until ctx is cancelled.
+// Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
+func RunSSH(ctx context.Context, address string, nodeID string, shipper *shipper.Shipper) error {
 	hostKey, err := loadOrCreateHostKey(sshHostKeyFile)
 	if err != nil {
 		return err
@@ -48,13 +50,7 @@ func RunSSH(address string, nodeID string, shipper *shipper.Shipper) error {
 	defer listener.Close()
 
 	log.Println("SSH node running")
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err // transient errors are already retried inside limitListener
-		}
-		go handleSSH(conn, hostKey, nodeID, shipper) // one goroutine per attacker
-	}
+	return serve(ctx, listener, func(conn net.Conn) { handleSSH(conn, hostKey, nodeID, shipper) })
 }
 
 // handleSSH runs one SSH connection: handshake + login, then a single session channel.
