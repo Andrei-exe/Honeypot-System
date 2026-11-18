@@ -113,11 +113,19 @@ func holdTCP(name, port string, d time.Duration, lines ...string) {
 	}
 
 	time.Sleep(d)
-	if read(200*time.Millisecond) != nil {
-		r.closed.Add(1)
-		return
+	// Output the server sent meanwhile may still be buffered: read all of it first, so a closed
+	// connection shows up as an error (EOF) and not as leftover data.
+	for {
+		c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		if _, err := c.Read(buf); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				r.ok.Add(1) // nothing more to read and no error: still open
+			} else {
+				r.closed.Add(1)
+			}
+			return
+		}
 	}
-	r.ok.Add(1)
 }
 
 // holdSSH logs in over SSH, starts a shell with a few commands, keeps the session for d,
