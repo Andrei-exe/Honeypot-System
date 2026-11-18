@@ -26,6 +26,9 @@ services:
       SHIPPER_URL: ${SHIPPER_URL:-http://threat-engine:8000/api/events}
       # aceeasi parola ca la threat-engine (AGENT_TOKEN din .env)
       SHIPPER_TOKEN: ${AGENT_TOKEN:-}
+      # Go nu stie singur de mem_limit. Cu asta, GC-ul strange mai des cand heap-ul se apropie
+      # de 200MiB (~80% din 256m), in loc sa-l lase sa creasca pana il omoara kernelul.
+      GOMEMLIMIT: 200MiB
     extra_hosts:
       # host.docker.internal = PC-ul tau, si pe Linux (pe Docker Desktop merge oricum).
       # Doar daca vrei sa trimiti la un receiver.py pornit direct pe PC (vezi .env.example).
@@ -51,6 +54,13 @@ services:
     # ca su/passwd, care altfel pornesc ca root). La agent nu exista asa ceva, dar e regula pe toate.
     security_opt:
       - no-new-privileges:true
+    # Limite de resurse, ca un atac sau un bug sa nu poata manca tot serverul.
+    # Masurat local: 800 de conexiuni tinute deodata = ~31MB si 14 thread-uri;
+    # 200 de logari SSH/s = ~0,33 dintr-un core. Restul e loc de rezerva (si pentru tarpit).
+    mem_limit: 256m
+    memswap_limit: 256m   # = mem_limit -> fara swap (altfel serverul doar se ingreuneaza in loc sa opreasca procesul)
+    cpus: 1.0             # maxim un core
+    pids_limit: 128       # procese + thread-uri de OS (goroutinele NU se numara, doar thread-urile)
     # Ce scrie pe stdout/stderr pastreaza Docker intr-un fisier pe host. Fara limita,
     # pe un VPS cu atacuri reale umple discul. Aici: max 5 fisiere x 20MB, cele vechi se sterg.
     # Mai mult decat la celelalte: stdout-ul agentului e copia de rezerva a evenimentelor (JSONL).
@@ -80,6 +90,12 @@ services:
     # imaginea Debian are 11 binare setuid/setgid (su, passwd, mount...) -> raman fara efect
     security_opt:
       - no-new-privileges:true
+    # receiver.py foloseste ~35MB, dar limita se aplica si la `docker compose run ... main.py`,
+    # care tine toate evenimentele in RAM (~6x marimea lui received_events.jsonl) -> 512m.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 64        # Flask porneste un thread per cerere; sunt putine cereri deodata
     # max 3 x 10MB de log-uri (evenimentele si alertele sunt oricum pe volum, in /data)
     logging:
       driver: json-file
@@ -109,6 +125,11 @@ services:
     # imaginea Debian are 11 binare setuid/setgid (su, passwd, mount...) -> raman fara efect
     security_opt:
       - no-new-privileges:true
+    # masurat: ~29MB; doar cere alertele si serveste pagina
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
     # max 3 x 10MB de log-uri (aici sunt doar cererile HTTP ale dashboard-ului)
     logging:
       driver: json-file

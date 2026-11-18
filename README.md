@@ -84,6 +84,13 @@ All settings live in `.env`; see `.env.example` for every option. Apply changes 
 | Live events from the agent | `docker logs -f honeypot-agent` |
 | Live alerts | `docker logs -f threat-engine` |
 | Offline analysis | `docker compose run --rm threat-engine python main.py --input /data/received_events.jsonl --include-internal` |
+| Resource usage | `docker stats --no-stream` |
+
+The offline analysis runs with the threat engine's 512 MB limit and needs about 6 times the size of `received_events.jsonl` in memory. If it gets killed (exit code 137) on a large file, run it with a higher limit:
+
+```bash
+docker run --rm -m 2g --read-only --cap-drop ALL --security-opt no-new-privileges -v honeypot-system_engine-data:/data honeypot-system-threat-engine python main.py --input /data/received_events.jsonl --output /data/filtered_alerts.json --include-internal
+```
 
 Avoid `docker compose down -v`. It deletes the SSH host key, which changes the server fingerprint.
 
@@ -103,6 +110,15 @@ Avoid `docker compose down -v`. It deletes the SSH host key, which changes the s
 - **Read-only containers:** every container's filesystem is read-only (`read_only: true`). The only writable places are the named volumes mounted at `/data` (the SSH host key, and the threat engine's events and alerts), so a compromised process cannot drop files or modify code.
 - **No Linux capabilities:** every container drops all capabilities (`cap_drop: [ALL]`). The services listen on ports above 1024 and Docker maps them to 21/22/23/80, so they need none. Even a process that became root inside a container could not open raw sockets, change file ownership or bypass file permissions.
 - **No privilege escalation:** every container runs with `no-new-privileges`, so setuid programs such as `su` or `passwd` (present in the Python images) start with the caller's user instead of root.
+- **Resource limits:** each container has a memory, CPU and process limit, so an attack or a bug cannot take down the whole server:
+
+  | Container | Memory | CPU | Processes/threads |
+  |---|---|---|---|
+  | honeypot-agent | 256 MB (Go heap soft limit 200 MiB) | 1 core | 128 |
+  | threat-engine | 512 MB | 1 core | 64 |
+  | dashboard | 128 MB | 0.5 core | 64 |
+
+  In a local load test, the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 200 SSH login attempts per second with a third of one core. A process that goes over its memory limit is killed and the container restarts.
 - **Automatic restart:** every container comes back after a crash or a server reboot (`restart: unless-stopped`). A container you stop yourself stays stopped.
 - **Log rotation:** Docker keeps at most 100 MB of logs for the agent (5 files of 20 MB) and 30 MB for each Python container (3 files of 10 MB), so a busy server cannot fill its disk. Older lines are deleted, which means `docker logs honeypot-agent` shows only recent events. The full history is kept by the threat engine in `received_events.jsonl`.
 
@@ -142,7 +158,7 @@ shared/           event-schema.json (event contract) and sample data
 
 ## Roadmap
 
-- Container hardening: read-only filesystems, dropped capabilities, resource limits.
+- Container hardening: blocking outbound internet access for the agent and the dashboard.
 - Graceful shutdown and multiple sensors.
 - CI with GitHub Actions.
 - Malware sample collection with SHA-256 hashing.
