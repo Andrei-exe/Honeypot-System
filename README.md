@@ -95,6 +95,8 @@ docker run --rm -m 2g --read-only --cap-drop ALL --security-opt no-new-privilege
 
 Avoid `docker compose down -v`. It deletes the SSH host key, which changes the server fingerprint.
 
+The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compose.yml`), so the volume and image names above (`honeypot-system_agent-data`, `honeypot-system_engine-data`, `honeypot-system-threat-engine`) are the same no matter which folder the repository is cloned into. Without it, Compose would name them after the folder, and a clone in a different folder would start with empty volumes and a new SSH host key.
+
 ## Security
 
 - **What attackers can reach:** only the agent. It runs as a non-root user in a distroless image that has no shell.

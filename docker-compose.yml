@@ -9,6 +9,11 @@
 # Setarile (porturi, token...) vin din fisierul .env, daca exista (vezi .env.example).
 # Fara .env merg valorile de dupa ":-" de mai jos.
 
+# Numele proiectului e fix. Altfel compose il ia din numele folderului in care e clonat
+# repo-ul, iar numele volumelor depinde de el (honeypot-system_agent-data = cheia SSH):
+# alt folder = volum nou = alta cheie SSH = alt fingerprint.
+name: honeypot-system
+
 services:
   honeypot-agent:
     build: ./honeypot-agent
