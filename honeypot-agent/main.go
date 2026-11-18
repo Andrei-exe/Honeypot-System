@@ -14,12 +14,11 @@ import (
 )
 
 // shipperCloseWait is how long the last events may take to reach the threat-engine on shutdown.
-// With the services' 3s, it stays under the 10s Docker waits before SIGKILL.
+// Plus the services' 3s, it stays under stop_grace_period (15s in docker-compose.yml).
 const shipperCloseWait = 5 * time.Second
 
-// main starts the four fake services and the event shipper, then runs until SIGTERM
-// (docker stop) or Ctrl+C, and shuts down cleanly: no new connections, the open sessions
-// are ended (each emits session_end), and the shipper sends what is left.
+// main starts the four fake services and the shipper, runs until SIGTERM (docker stop) or Ctrl+C,
+// then shuts down cleanly: open sessions end with session_end and the shipper sends what is left.
 // Ports are unprivileged; Docker maps them to 80/21/23/22 on the host.
 func main() {
 	shipperURL := os.Getenv("SHIPPER_URL")     // empty = events go to stdout only
@@ -50,9 +49,9 @@ func main() {
 
 	<-ctx.Done() // blocks until the signal arrives
 	stop()       // a second Ctrl+C now kills the program right away (default behaviour)
-	log.Println("oprire: nu mai accept conexiuni, inchid sesiunile deschise")
+	log.Println("shutdown: no longer accepting connections, closing the open sessions")
 
 	wg.Wait()                 // all four services have ended their sessions
 	s.Close(shipperCloseWait) // only now: the last session_end events are already queued
-	log.Println("oprit curat")
+	log.Println("shutdown complete")
 }

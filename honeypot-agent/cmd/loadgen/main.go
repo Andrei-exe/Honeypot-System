@@ -1,13 +1,6 @@
-// Command loadgen is a load generator for testing the honeypot agent. It is a test tool only:
-// it is not part of the agent image, and it must only be pointed at our own honeypot.
-//
-//	-mode hold   opens -n sessions on every service (SSH and Telnet logged in with a shell,
-//	             FTP logged in, HTTP keep-alive) and keeps them open for -seconds.
-//	-mode brute  runs -n parallel SSH brute-force loops (full handshake + wrong password)
-//	             for -seconds.
-//
-// The agent accepts at most 10 connections per IP, so -n defaults to 10. For more load, run
-// several copies in separate containers, each with its own IP (README, "Load testing").
+// Command loadgen is a load generator for the honeypot agent: a test tool only, not part of the
+// agent image, to be pointed only at our own honeypot. The agent allows 10 connections per IP,
+// so for more load run several copies, each in its own container/IP (README, "Load testing").
 package main
 
 import (
@@ -25,8 +18,9 @@ import (
 )
 
 var (
-	host    = flag.String("host", "honeypot-agent", "agent host name")
-	mode    = flag.String("mode", "hold", "hold or brute")
+	host = flag.String("host", "honeypot-agent", "agent host name")
+	mode = flag.String("mode", "hold", "hold = keep -n logged-in sessions open on every service; "+
+		"brute = -n parallel SSH brute-force loops (full handshake + wrong password)")
 	n       = flag.Int("n", 10, "sessions per service (hold) or parallel loops (brute)")
 	seconds = flag.Int("seconds", 25, "how long to hold the sessions or run the loops")
 )

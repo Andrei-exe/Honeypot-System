@@ -43,7 +43,7 @@ type Shipper struct {
 func NewShipper(out io.Writer, url, token string) *Shipper {
 	s := &Shipper{enc: json.NewEncoder(out)}
 	if url == "" {
-		log.Println("shipper: SHIPPER_URL nu e setat -> evenimentele merg doar pe stdout")
+		log.Println("shipper: SHIPPER_URL is not set -> events go to stdout only")
 		return s
 	}
 
@@ -54,7 +54,7 @@ func NewShipper(out io.Writer, url, token string) *Shipper {
 	s.quit = make(chan time.Time)
 	s.done = make(chan struct{})
 	go s.run() // sender goroutine, separate from the services
-	log.Println("shipper: trimit evenimentele la", url)
+	log.Println("shipper: sending events to", url)
 	return s
 }
 
@@ -78,10 +78,9 @@ func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
 	}
 }
 
-// Close sends the events that are still waiting and stops the sender goroutine.
-// It gives up after timeout (the events that didn't make it are still in JSONL).
+// Close sends the events still waiting and stops the sender goroutine, giving up after timeout.
 // Call it only after the services have stopped, so their last events (session_end) are queued.
-// The queue itself is never closed: a late EmitEvent can't panic, its event only stays in JSONL.
+// The queue is never closed: a late EmitEvent can't panic, its event only stays in JSONL.
 func (s *Shipper) Close(timeout time.Duration) {
 	if s.queue == nil {
 		return // no URL: there is nothing to send
@@ -118,7 +117,7 @@ func (s *Shipper) run() {
 
 		case <-ticker.C:
 			if n := s.dropped.Swap(0); n > 0 {
-				log.Printf("shipper: %d evenimente n-au ajuns la Python (sunt doar in JSONL)", n)
+				log.Printf("shipper: %d events did not reach the threat-engine (they are only in JSONL)", n)
 			}
 		}
 
@@ -128,14 +127,14 @@ func (s *Shipper) run() {
 
 		if err := s.send(context.Background(), batch); err != nil {
 			if !down {
-				log.Printf("shipper: nu pot trimite (%v) - pastrez evenimentele si reincerc la fiecare %v", err, retryAfter)
+				log.Printf("shipper: cannot send (%v) - keeping the events, retrying every %v", err, retryAfter)
 				down = true
 			}
 			retryAt = time.Now().Add(retryAfter)
 			continue
 		}
 		if down {
-			log.Printf("shipper: merge din nou, am trimis %d evenimente", len(batch))
+			log.Printf("shipper: working again, sent %d events", len(batch))
 			down = false
 		}
 		batch = nil
@@ -159,11 +158,11 @@ func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
 	for {
 		err := s.send(ctx, batch)
 		if err == nil {
-			log.Printf("shipper: la oprire am trimis ultimele %d evenimente", len(batch))
+			log.Printf("shipper: shutdown: sent the last %d events", len(batch))
 			return
 		}
 		if time.Until(deadline) < 500*time.Millisecond {
-			log.Printf("shipper: la oprire %d evenimente n-au ajuns la Python (%v) - sunt doar in JSONL", len(batch), err)
+			log.Printf("shipper: shutdown: %d events did not reach the threat-engine (%v) - they are only in JSONL", len(batch), err)
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -200,8 +199,8 @@ func (s *Shipper) send(ctx context.Context, batch []models.HoneypotEvent) error 
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// 4xx = the request itself is wrong (token, format, path).
 		// Resending would get the same answer -> drop this batch.
-		log.Printf("shipper: serverul a refuzat %d evenimente: %s", len(batch), resp.Status)
+		log.Printf("shipper: the server rejected %d events: %s", len(batch), resp.Status)
 		return nil
 	}
-	return fmt.Errorf("serverul a raspuns %s", resp.Status) // 5xx -> their problem, retry
+	return fmt.Errorf("the server answered %s", resp.Status) // 5xx -> their problem, retry
 }

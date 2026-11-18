@@ -1,4 +1,4 @@
-# Ce NU trimitem la Docker cand construim imaginea.
+# What we do NOT send to Docker when building the image.
 
 *.jsonl
 *.json

@@ -76,11 +76,11 @@ func TestDeliversAllEventsInOrder(t *testing.T) {
 
 	if !waitFor(5*time.Second, func() bool { _, n := rcv.counts(); return n == 120 }) {
 		_, n := rcv.counts()
-		t.Fatalf("au ajuns %d evenimente din 120", n)
+		t.Fatalf("%d of 120 events arrived", n)
 	}
 	for i, e := range rcv.events {
 		if e.NodeID != fmt.Sprint("test-", i) {
-			t.Fatalf("ordine gresita la pozitia %d: %s", i, e.NodeID)
+			t.Fatalf("wrong order at position %d: %s", i, e.NodeID)
 		}
 	}
 	if rcv.auth != "Bearer secret" {
@@ -107,7 +107,7 @@ func TestRetriesAfterServerError(t *testing.T) {
 
 	if !waitFor(12*time.Second, func() bool { _, n := rcv.counts(); return n == 10 }) {
 		req, n := rcv.counts()
-		t.Fatalf("dupa reincercare au ajuns %d evenimente din 10 (%d cereri)", n, req)
+		t.Fatalf("after the retry %d of 10 events arrived (%d requests)", n, req)
 	}
 }
 
@@ -118,7 +118,7 @@ func TestGivesUpOnClientError(t *testing.T) {
 	srv := httptest.NewServer(rcv)
 	defer srv.Close()
 
-	s := NewShipper(io.Discard, srv.URL, "parola-gresita")
+	s := NewShipper(io.Discard, srv.URL, "wrong-token")
 	for i := 0; i < 10; i++ {
 		s.EmitEvent(event(i))
 	}
@@ -126,7 +126,7 @@ func TestGivesUpOnClientError(t *testing.T) {
 	waitFor(4*time.Second, func() bool { req, _ := rcv.counts(); return req >= 1 })
 	time.Sleep(3 * time.Second) // one more tick: a retry would show up as a second request
 	if req, _ := rcv.counts(); req != 1 {
-		t.Fatalf("a trimis de %d ori acelasi grup refuzat (trebuia o singura data)", req)
+		t.Fatalf("sent the same rejected batch %d times (should be once)", req)
 	}
 }
 
@@ -146,10 +146,10 @@ func TestCloseSendsPendingEvents(t *testing.T) {
 	s.Close(3 * time.Second)
 
 	if _, n := rcv.counts(); n != 10 {
-		t.Fatalf("dupa Close au ajuns %d evenimente din 10", n)
+		t.Fatalf("after Close %d of 10 events arrived", n)
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Errorf("Close a durat %v (trebuia sa trimita imediat)", d)
+		t.Errorf("Close took %v (should send right away)", d)
 	}
 }
 
@@ -166,10 +166,10 @@ func TestCloseGivesUpAtDeadline(t *testing.T) {
 	s.Close(time.Second)
 
 	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("Close a durat %v cu receiver-ul picat (limita era 1s)", d)
+		t.Fatalf("Close took %v with the receiver down (the limit was 1s)", d)
 	}
 	if req, _ := rcv.counts(); req < 1 {
-		t.Fatal("Close nici n-a incercat sa trimita")
+		t.Fatal("Close did not even try to send")
 	}
 }
 
@@ -189,6 +189,6 @@ func TestWithoutURLOnlyWritesJSONL(t *testing.T) {
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 2 || !strings.Contains(lines[0], `"node_id":"test-1"`) {
-		t.Fatalf("JSONL gresit: %q", out.String())
+		t.Fatalf("wrong JSONL: %q", out.String())
 	}
 }

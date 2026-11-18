@@ -50,7 +50,7 @@ func (l *limitListener) Accept() (net.Conn, error) {
 			} else {
 				delay = min(delay*2, maxAcceptDelay)
 			}
-			l.logRarely("eroare la accept: %v (astept %v)", err, delay)
+			l.logRarely("accept error: %v (waiting %v)", err, delay)
 			time.Sleep(delay)
 			continue
 		}
@@ -58,7 +58,7 @@ func (l *limitListener) Accept() (net.Conn, error) {
 
 		ip := remoteIP(conn)
 		if !l.acquire(ip) {
-			l.logRarely("prea multe conexiuni (limita: %d in total, %d per IP) - o refuz pe cea de la %s",
+			l.logRarely("too many connections (limit: %d in total, %d per IP) - rejecting the one from %s",
 				maxConnsPerService, maxConnsPerIP, ip)
 			conn.Close()
 			continue

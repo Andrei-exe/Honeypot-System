@@ -1,21 +1,18 @@
 #!/bin/sh
-# Blocheaza conexiunile NOI pornite din containerele expuse: agentul (br-honeynet) si
-# dashboard-ul (br-frontend). Ei raspund in continuare celor care se conecteaza la ei,
-# dar nu pot deschide singuri conexiuni spre internet, spre alte retele sau spre host.
-# Un honeypot sanatos nu iese niciodata -> o incercare apare in log ca "honeypot-egress:".
-#
-# Pe server (Linux), ca root, DUPA ce porneste Docker. Se poate rula de oricate ori.
-#   sh egress-firewall.sh           pune regulile (le sare pe cele care exista deja)
-#   sh egress-firewall.sh remove    le scoate
-# Dupa reboot regulile dispar -> le repune unitatea systemd honeypot-egress.service.
+# Blocks NEW connections started by the exposed containers: agent (br-honeynet) and dashboard (br-frontend).
+# They still answer whoever connects to them, but can't reach the internet, other networks or the host.
+# A healthy honeypot never connects out, so every attempt is logged as "honeypot-egress:".
+
+# Usage (on the server, as root, after Docker starts; safe to rerun): sh egress-firewall.sh [remove]
+# The rules are gone after a reboot; the honeypot-egress.service systemd unit puts them back.
 set -eu
 
-BRIDGES="br-honeynet br-frontend"   # numele fixate in docker-compose.yml (driver_opts)
+BRIDGES="br-honeynet br-frontend"   # names fixed in docker-compose.yml (driver_opts)
 LOG="-m limit --limit 6/min -j LOG --log-prefix honeypot-egress:"
 ACTION="${1:-add}"
 
-# rule LANT REGULA... : pune regula PRIMA in lant, daca nu exista (-C = verifica),
-# sau o scoate, la "remove".
+# rule CHAIN RULE...: inserts the rule FIRST in the chain if it isn't there yet (-C = check),
+# or removes it, on "remove".
 rule() {
 	chain=$1
 	shift
@@ -28,29 +25,29 @@ rule() {
 	fi
 }
 
-# DOCKER-USER = lantul lasat de Docker pentru regulile noastre (Docker nu-l modifica).
-# Exista doar cat ruleaza Docker cu backend-ul iptables.
+# DOCKER-USER = the chain Docker leaves for our own rules (Docker never changes it).
+# It exists only while Docker runs with the iptables backend.
 if ! iptables -n -L DOCKER-USER >/dev/null 2>&1; then
-	echo "eroare: lantul DOCKER-USER nu exista (Docker nu ruleaza, sau foloseste nftables direct)" >&2
+	echo "error: the DOCKER-USER chain does not exist (Docker is not running, or it uses nftables directly)" >&2
 	exit 1
 fi
 
 for br in $BRIDGES; do
-	# Trafic care TRECE prin host (spre internet / alte retele). "! -o $br" lasa traficul
-	# din aceeasi retea (ex. loadgen -> agent). Doar starea NEW: raspunsurile sunt ESTABLISHED.
-	# -I pune regula in varf -> intai REJECT, apoi LOG deasupra lui (LOG nu opreste pachetul).
+	# Traffic routed THROUGH the host (internet / other networks). "! -o $br" allows traffic within
+	# the same network (e.g. loadgen -> agent). Only state NEW: replies to clients are ESTABLISHED.
+	# -I inserts at the top -> REJECT first, then LOG above it (LOG doesn't stop the packet).
 	rule DOCKER-USER -i "$br" ! -o "$br" -m conntrack --ctstate NEW -j REJECT
-	# shellcheck disable=SC2086 # $LOG trebuie sa se imparta in cuvinte
+	# shellcheck disable=SC2086 # $LOG must be split into words
 	rule DOCKER-USER -i "$br" ! -o "$br" -m conntrack --ctstate NEW $LOG
 
-	# Trafic catre host-ul insusi (ex. SSH-ul real al serverului).
+	# Traffic to the host itself (e.g. the server's real SSH).
 	rule INPUT -i "$br" -m conntrack --ctstate NEW -j REJECT
 	# shellcheck disable=SC2086
 	rule INPUT -i "$br" -m conntrack --ctstate NEW $LOG
 done
 
 if [ "$ACTION" = remove ]; then
-	echo "egress-firewall: reguli scoase"
+	echo "egress-firewall: rules removed"
 else
-	echo "egress-firewall: reguli active pentru $BRIDGES"
+	echo "egress-firewall: rules active for $BRIDGES"
 fi

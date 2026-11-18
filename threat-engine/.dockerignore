@@ -1,10 +1,10 @@
-# Ce NU trimitem la Docker cand construim imaginea.
+# What we do NOT send to Docker when building the image.
 
-# datele (evenimente, alerte) - au parole din atacuri; in container stau pe volum, in /data
+# data (events, alerts) - it contains passwords from attacks; in the container it lives on the volume, in /data
 *.jsonl
 *.json
 
-# fisiere Python generate / medii virtuale
+# generated Python files / virtual environments
 __pycache__/
 *.pyc
 .venv/

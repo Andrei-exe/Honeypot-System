@@ -1,36 +1,35 @@
-# ---------- Etapa 1: compilam ----------
-# Imaginea cu Go (~300MB) e folosita DOAR aici; nu ajunge in imaginea finala.
+# ---------- Stage 1: build ----------
+# The Go image (~300MB) is used only here; it does not end up in the final image.
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 
-# Intai doar go.mod + go.sum: Docker tine minte (cache) pasul cu bibliotecile descarcate
-# si nu-l mai repeta la fiecare build, cat timp nu schimbi dependentele.
+# go.mod + go.sum first: Docker caches the download step until the dependencies change.
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-# CGO_ENABLED=0 = binar static (nu are nevoie de nicio librarie C) -> merge pe o imagine goala.
-# -trimpath -ldflags="-s -w" = fara caile de pe PC-ul tau si fara info de debug -> binar mai mic.
+# CGO_ENABLED=0 = static binary (needs no C library) -> runs on an empty image.
+# -trimpath -ldflags="-s -w" = no local paths and no debug info -> smaller binary.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/honeypot-agent .
 
-# Folderul pentru date (cheia SSH). Il facem aici pentru ca in etapa 2 nu exista shell, deci nici mkdir.
+# Data folder (SSH key). Created here because stage 2 has no shell, so no mkdir either.
 RUN mkdir -p /out/data
 
-# ---------- Etapa 2: ce ruleaza efectiv ----------
-# distroless/static = aproape gol: fara shell, fara apt, fara curl. Doar binarul nostru.
+# ---------- Stage 2: what actually runs ----------
+# distroless/static = almost empty: no shell, no package manager, no curl. Just our binary.
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build /out/honeypot-agent /honeypot-agent
 
-# /data e al userului nonroot (65532), ca agentul sa poata scrie acolo cheia SSH.
-# In docker-compose.yml montam un volum peste el -> cheia ramane aceeasi si dupa rebuild.
+# /data belongs to the nonroot user (65532), so the agent can write the SSH key there.
+# docker-compose.yml mounts a volume over it -> the key stays the same after a rebuild.
 COPY --from=build --chown=65532:65532 /out/data /data
 
-# Agentul cauta/scrie cheia SSH in folderul curent -> folderul curent e /data.
+# The agent reads/writes the SSH key in the current directory -> the current directory is /data.
 WORKDIR /data
 USER 65532:65532
 
-# Porturile pe care asculta agentul IN container (vezi main.go).
+# Ports the agent listens on INSIDE the container (see main.go).
 EXPOSE 2121 2222 2323 8080
 
 ENTRYPOINT ["/honeypot-agent"]

@@ -47,7 +47,7 @@ func TestPerIPLimit(t *testing.T) {
 		case c := <-accepted:
 			serverSide = append(serverSide, c)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("au fost acceptate doar %d conexiuni din %d", i, maxConnsPerIP)
+			t.Fatalf("only %d of %d connections were accepted", i, maxConnsPerIP)
 		}
 	}
 
@@ -55,11 +55,11 @@ func TestPerIPLimit(t *testing.T) {
 	last := clients[len(clients)-1]
 	last.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := last.Read(make([]byte, 1)); err != io.EOF {
-		t.Fatalf("conexiunea in plus trebuia inchisa (EOF), am primit: %v", err)
+		t.Fatalf("the extra connection should have been closed (EOF), got: %v", err)
 	}
 	select {
 	case <-accepted:
-		t.Fatal("a fost acceptata o conexiune peste limita")
+		t.Fatal("a connection over the limit was accepted")
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -73,7 +73,7 @@ func TestPerIPLimit(t *testing.T) {
 	select {
 	case <-accepted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("dupa ce s-a inchis o conexiune, locul nu s-a eliberat")
+		t.Fatal("closing a connection did not free its slot")
 	}
 }
 
@@ -82,15 +82,15 @@ func TestTotalLimit(t *testing.T) {
 	l := limitConnections(nil, "TEST").(*limitListener)
 	for i := 0; i < maxConnsPerService; i++ {
 		if !l.acquire(fmt.Sprintf("10.0.%d.%d", i/250, i%250)) {
-			t.Fatalf("conexiunea %d trebuia acceptata", i)
+			t.Fatalf("connection %d should have been accepted", i)
 		}
 	}
 	if l.acquire("8.8.8.8") {
-		t.Fatal("a trecut de limita totala")
+		t.Fatal("went past the total limit")
 	}
 	l.release("10.0.0.0")
 	if !l.acquire("8.8.8.8") {
-		t.Fatal("dupa release trebuia sa fie loc")
+		t.Fatal("there should be a free slot after release")
 	}
 }
 
@@ -105,7 +105,7 @@ func TestDoubleCloseReleasesOnce(t *testing.T) {
 	conn.Close()
 	conn.Close()
 	if l.total != 0 || len(l.perIP) != 0 {
-		t.Fatalf("dupa 2x Close: total=%d, perIP=%v (trebuia 0 si gol)", l.total, l.perIP)
+		t.Fatalf("after 2x Close: total=%d, perIP=%v (should be 0 and empty)", l.total, l.perIP)
 	}
 }
 
@@ -144,18 +144,18 @@ func TestAcceptBacksOffOnErrors(t *testing.T) {
 	conn, err := listener.Accept()
 	elapsed := time.Since(start)
 	if err != nil || conn == nil {
-		t.Fatalf("dupa 5 erori trebuia sa primim conexiunea, am primit err=%v", err)
+		t.Fatalf("after 5 errors we should get the connection, got err=%v", err)
 	}
 	if calls := fake.calls.Load(); calls != 6 {
-		t.Fatalf("Accept a fost chemat de %d ori (trebuia 6: 5 erori + conexiunea)", calls)
+		t.Fatalf("Accept was called %d times (should be 6: 5 errors + the connection)", calls)
 	}
 	// 5+10+20+40+80 = 155ms of pauses in total
 	if elapsed < 150*time.Millisecond {
-		t.Fatalf("n-a facut pauza intre erori (a durat doar %v)", elapsed)
+		t.Fatalf("no pause between errors (it took only %v)", elapsed)
 	}
 
 	// closed listener -> Accept must stop, not retry
 	if _, err := listener.Accept(); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("listener inchis: trebuia net.ErrClosed, am primit %v", err)
+		t.Fatalf("closed listener: expected net.ErrClosed, got %v", err)
 	}
 }

@@ -9,13 +9,12 @@ import (
 )
 
 // shutdownWait is how long a service waits for its sessions to end when the agent stops.
-// Docker sends SIGKILL 10 seconds after SIGTERM; the shipper needs the rest of that time.
+// The shipper then gets 5s more, all within stop_grace_period (15s in docker-compose.yml).
 const shutdownWait = 3 * time.Second
 
-// serve is the accept loop shared by FTP, Telnet and SSH: each connection gets its own goroutine
-// running handle. When ctx is cancelled (the agent is stopping) it stops accepting, closes the
-// connections that are still open and waits for their handlers, so every session ends normally
-// and emits its session_end. Returns nil after a shutdown, or the error if Accept really failed.
+// serve is the accept loop for FTP, Telnet and SSH: one goroutine per connection, running handle.
+// When ctx is cancelled it stops accepting, closes the open connections and waits for their handlers,
+// so every session emits session_end. Returns nil after a shutdown, or the error if Accept failed.
 func serve(ctx context.Context, listener net.Listener, handle func(net.Conn)) error {
 	// When ctx is cancelled, close the listener: the Accept below then returns an error.
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -60,7 +59,7 @@ func serve(ctx context.Context, listener net.Listener, handle func(net.Conn)) er
 	mu.Unlock()
 
 	if !waitTimeout(&wg, shutdownWait) {
-		log.Printf("oprire: unele sesiuni nu s-au terminat in %v", shutdownWait)
+		log.Printf("shutdown: some sessions did not end within %v", shutdownWait)
 	}
 	return nil
 }

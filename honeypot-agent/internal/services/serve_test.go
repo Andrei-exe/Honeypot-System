@@ -42,7 +42,7 @@ func TestShutdownEndsOpenSessions(t *testing.T) {
 		for {
 			line, err := r.ReadString(' ')
 			if err != nil {
-				t.Fatalf("clientul %d n-a primit prompt-ul de login: %v", i, err)
+				t.Fatalf("client %d did not get the login prompt: %v", i, err)
 			}
 			if strings.Contains(line, "login:") {
 				break
@@ -55,26 +55,26 @@ func TestShutdownEndsOpenSessions(t *testing.T) {
 	select {
 	case err := <-result:
 		if err != nil {
-			t.Fatalf("la oprire serve trebuia sa intoarca nil, a intors %v", err)
+			t.Fatalf("on shutdown serve should return nil, it returned %v", err)
 		}
 	case <-time.After(shutdownWait + time.Second):
-		t.Fatal("serve nu s-a oprit")
+		t.Fatal("serve did not stop")
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Errorf("oprirea a durat %v (sesiunile trebuiau inchise imediat)", d)
+		t.Errorf("shutdown took %v (the sessions should be closed right away)", d)
 	}
 
 	// serve has returned = every handler has finished, so out is complete
 	jsonl := out.String()
 	if n := strings.Count(jsonl, `"session_start"`); n != 3 {
-		t.Errorf("session_start: %d (asteptat 3)", n)
+		t.Errorf("session_start: %d (expected 3)", n)
 	}
 	if n := strings.Count(jsonl, `"session_end"`); n != 3 {
-		t.Errorf("session_end: %d (asteptat 3) - sesiunile n-au fost incheiate la oprire", n)
+		t.Errorf("session_end: %d (expected 3) - the sessions were not ended on shutdown", n)
 	}
 
 	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 		c.Close()
-		t.Error("dupa oprire inca se accepta conexiuni")
+		t.Error("connections are still accepted after shutdown")
 	}
 }
