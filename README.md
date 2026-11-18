@@ -109,6 +109,7 @@ Avoid `docker compose down -v`. It deletes the SSH host key, which changes the s
   - attacker downloads are logged but never performed.
 - **Read-only containers:** every container's filesystem is read-only (`read_only: true`). The only writable places are the named volumes mounted at `/data` (the SSH host key, and the threat engine's events and alerts), so a compromised process cannot drop files or modify code.
 - **No Linux capabilities:** every container drops all capabilities (`cap_drop: [ALL]`). The services listen on ports above 1024 and Docker maps them to 21/22/23/80, so they need none. Even a process that became root inside a container could not open raw sockets, change file ownership or bypass file permissions.
+- **No outbound connections (on the server):** the agent and the dashboard answer whoever connects to them, but cannot open new connections themselves: not to the internet, not to other networks, not to the host. This is enforced by host firewall rules (`deploy/egress-firewall.sh`, see [Deploying to a server](#deploying-to-a-server)), because Docker can only cut a network off completely, which would also remove its published ports. They also get no DNS for internet names (`dns: 127.0.0.1`), which would otherwise be a hidden way out. A healthy honeypot never connects out, so every blocked attempt is logged by the kernel with the prefix `honeypot-egress:`.
 - **No privilege escalation:** every container runs with `no-new-privileges`, so setuid programs such as `su` or `passwd` (present in the Python images) start with the caller's user instead of root.
 - **Resource limits:** each container has a memory, CPU and process limit, so an attack or a bug cannot take down the whole server:
 
@@ -131,9 +132,19 @@ Avoid `docker compose down -v`. It deletes the SSH host key, which changes the s
    - `BIND_IP=0.0.0.0`;
    - `FTP_PORT=21`, `SSH_PORT=22`, `TELNET_PORT=23`, `HTTP_PORT=80`.
 4. Run `docker compose up -d --build`.
-5. Open the dashboard through an SSH tunnel: `ssh -p 52222 -L 8050:127.0.0.1:8050 user@server`, then browse to <http://127.0.0.1:8050>.
+5. Block outbound connections from the containers. The rules are applied now and again after every reboot or Docker restart:
 
-Docker's published ports bypass firewalls such as `ufw`, so keep the dashboard on `127.0.0.1`.
+   ```bash
+   sudo install -m 755 deploy/egress-firewall.sh /usr/local/sbin/honeypot-egress-firewall
+   sudo cp deploy/honeypot-egress.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now honeypot-egress
+   ```
+
+   Check that they are active: `sudo iptables -S DOCKER-USER | grep br-honeynet` should print two rules. Blocked attempts show up in `sudo journalctl -k | grep honeypot-egress`. To turn them off: `sudo systemctl stop honeypot-egress`.
+6. Open the dashboard through an SSH tunnel: `ssh -p 52222 -L 8050:127.0.0.1:8050 user@server`, then browse to <http://127.0.0.1:8050>.
+
+Docker's published ports bypass firewalls such as `ufw`, so keep the dashboard on `127.0.0.1`. The egress rules work alongside `ufw`; after enabling or reloading `ufw`, run the check from step 5 again. The rules cover IPv4 only, so leave IPv6 disabled on the Docker networks (the default).
 
 ## Development without Docker
 
@@ -184,11 +195,11 @@ honeypot-agent/   Go: fake services, fake shell, event shipper (cmd/loadgen: loa
 threat-engine/    Python: event API, detection rules, offline analysis
 dashboard/        Python: web dashboard
 shared/           event-schema.json (event contract) and sample data
+deploy/           server setup: egress firewall script and its systemd unit
 ```
 
 ## Roadmap
 
-- Container hardening: blocking outbound internet access for the agent and the dashboard.
 - Graceful shutdown and multiple sensors.
 - CI with GitHub Actions.
 - Malware sample collection with SHA-256 hashing.

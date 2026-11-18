@@ -1,0 +1,20 @@
+# Pune regulile din egress-firewall.sh la fiecare pornire a lui Docker (si dupa reboot).
+# Instalare pe server (vezi README, "Deploying to a server"):
+#   sudo install -m 755 deploy/egress-firewall.sh /usr/local/sbin/honeypot-egress-firewall
+#   sudo cp deploy/honeypot-egress.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now honeypot-egress
+[Unit]
+Description=Honeypot: block new outbound connections from exposed containers
+# dupa Docker (abia atunci exista lantul DOCKER-USER); repornit odata cu Docker
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/honeypot-egress-firewall
+ExecStop=/usr/local/sbin/honeypot-egress-firewall remove
+
+[Install]
+WantedBy=multi-user.target

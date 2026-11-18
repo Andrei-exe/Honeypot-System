@@ -32,7 +32,13 @@ services:
     extra_hosts:
       # host.docker.internal = PC-ul tau, si pe Linux (pe Docker Desktop merge oricum).
       # Doar daca vrei sa trimiti la un receiver.py pornit direct pe PC (vezi .env.example).
+      # Cu deploy/egress-firewall.sh activ (pe server) NU merge: host-ul e blocat intentionat.
       - "host.docker.internal:host-gateway"
+    # Server DNS inexistent -> agentul nu poate rezolva nume de pe internet (altfel DNS-ul ar fi
+    # un canal ascuns de iesire, pe care regulile de firewall nu-l prind: Docker trimite cererile
+    # din numele host-ului). Numele containerelor (threat-engine) le rezolva Docker direct, merg.
+    dns:
+      - 127.0.0.1
     volumes:
       # cheia SSH sta aici -> acelasi fingerprint si dupa rebuild (altfel ne-am da de gol)
       - agent-data:/data
@@ -113,6 +119,8 @@ services:
     environment:
       # de unde ia alertele: threat-engine, gasit dupa numele serviciului
       THREAT_ENGINE_URL: http://threat-engine:8000
+    dns:
+      - 127.0.0.1   # fara nume de pe internet, ca la agent (threat-engine se rezolva in continuare)
     networks:
       - backend    # ca sa ajunga la threat-engine
       - frontend   # ca Docker sa-i poata publica portul (dintr-o retea internal: true nu poate)
@@ -154,9 +162,16 @@ services:
 
 networks:
   honeynet:   # in fata: doar agentul, cu porturile pentru atacatori
+    driver_opts:
+      # Nume fix pentru switch-ul virtual de pe host (altfel Docker da unul aleator, br-3f551af689e8).
+      # Pe el se leaga regulile din deploy/egress-firewall.sh: din containerele de aici nu pleaca
+      # nicio conexiune NOUA spre internet sau spre host (raspunsurile catre atacatori trec).
+      com.docker.network.bridge.name: br-honeynet
   backend:    # in spate: agent -> threat-engine <- dashboard
     internal: true   # fara iesire la internet
   frontend:   # doar dashboard-ul, ca sa-l poti deschide din browser (127.0.0.1:8050)
+    driver_opts:
+      com.docker.network.bridge.name: br-frontend   # la fel, pentru dashboard
 
 volumes:
   agent-data:
