@@ -41,6 +41,9 @@ services:
     # Daca procesul crapa sau serverul da reboot, Docker il porneste la loc.
     # Nu-l porneste doar daca l-ai oprit tu (docker stop / docker compose down).
     restart: unless-stopped
+    # Tot sistemul de fisiere al containerului e doar-citire. Se poate scrie DOAR pe volume
+    # (aici /data, cu cheia SSH). Cine ar prelua procesul n-are unde sa-si lase fisiere.
+    read_only: true
     # Ce scrie pe stdout/stderr pastreaza Docker intr-un fisier pe host. Fara limita,
     # pe un VPS cu atacuri reale umple discul. Aici: max 5 fisiere x 20MB, cele vechi se sterg.
     # Mai mult decat la celelalte: stdout-ul agentului e copia de rezerva a evenimentelor (JSONL).
@@ -64,6 +67,8 @@ services:
     networks:
       - backend    # DOAR backend: fara internet, atacatorii nu ajung la el direct
     restart: unless-stopped
+    # doar-citire; scrie doar pe volumul /data (evenimente, alerte, rezultatele main.py)
+    read_only: true
     # max 3 x 10MB de log-uri (evenimentele si alertele sunt oricum pe volum, in /data)
     logging:
       driver: json-file
@@ -87,6 +92,8 @@ services:
     depends_on:
       - threat-engine
     restart: unless-stopped
+    # doar-citire; dashboard-ul nu scrie nimic pe disc
+    read_only: true
     # max 3 x 10MB de log-uri (aici sunt doar cererile HTTP ale dashboard-ului)
     logging:
       driver: json-file
