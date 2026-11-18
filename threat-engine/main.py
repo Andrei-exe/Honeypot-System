@@ -5,10 +5,16 @@ from collections import Counter
 from reader import read_events, DATA_FILE
 from filters import is_internal, check_event, build_alert, BruteForceTracker
 from sessions import group_sessions, session_summary, kill_chain_funnel
+from correlation import correlate
+from clustering import cluster
+from blocklist import build_blocklist
+from attack_techniques import navigator_layer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "filtered_alerts.json")
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", os.path.join(BASE_DIR, "sessions.json"))
+NAVIGATOR_FILE = os.path.join(BASE_DIR, "navigator_layer.json")
+BLOCKLIST_FILE = os.path.join(BASE_DIR, "blocklist.txt")
 
 
 def parse_args():
@@ -63,10 +69,12 @@ def main():
             if user or pwd:
                 cred_combos[f"{user}:{pwd}"] += 1
 
-        is_threat, severity, reason = check_event(ev, tracker)
+        is_threat, score, reason = check_event(ev, tracker)
 
         if is_threat:
-            alerts.append(build_alert(ev, severity, reason))
+            alert = build_alert(ev, score, reason)
+            alerts.append(alert)
+            severity = alert["severity"]
 
             proto = ev.get("protocol", "UNKNOWN").upper()
             threat_stats[proto] += 1
@@ -118,6 +126,31 @@ def main():
         first_count = funnel[0][1] or 1
         for stage, count in funnel:
             print(f"  {stage:<16} : {count:>4}  ({count * 100 // first_count}%)")
+
+    campaigns = correlate(summaries)
+    if campaigns:
+        print(f"\ncampanii detectate (atacatori legati intre ei): {len(campaigns)}")
+        for i, campaign in enumerate(campaigns, start=1):
+            print(f"  #{i}: {campaign['size']} IP-uri | {', '.join(campaign['reasons'])}")
+            if campaign["servers"]:
+                print(f"      servere: {', '.join(campaign['servers'])}")
+
+    families = cluster(summaries)
+    if families:
+        print(f"\nfamilii de atacatori (dupa comportament): {len(families)}")
+        for i, family in enumerate(families, start=1):
+            print(f"  #{i}: {family['label']} - {family['size']} IP-uri")
+
+    # fisiere pentru prezentare: harta ATT&CK si lista de blocare
+    try:
+        with open(NAVIGATOR_FILE, "w", encoding="utf-8") as f:
+            json.dump(navigator_layer(alerts), f, indent=2, ensure_ascii=False)
+        with open(BLOCKLIST_FILE, "w", encoding="utf-8") as f:
+            f.write(build_blocklist(alerts) + "\n")
+        print(f"\n[+] layer ATT&CK scris in: {NAVIGATOR_FILE}")
+        print(f"[+] lista de blocare scrisa in: {BLOCKLIST_FILE}")
+    except IOError as e:
+        print(f"[EROARE] nu am putut scrie fisierele extra: {e}")
     print("==============================================")
 
 

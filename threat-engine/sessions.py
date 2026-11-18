@@ -7,53 +7,113 @@ DOWNLOAD_COMMANDS = ["wget", "curl", "tftp", "ftpget"]
 PERSISTENCE_PATTERNS = ["crontab", "authorized_keys", "rc.local", "systemctl enable", "/etc/init.d"]
 
 
+def get_timestamp(event):
+    return event.get("timestamp", "")
+
+
 def group_sessions(events):
+    """Pune evenimentele in 'sertare' dupa session_id: {session_id: [evenimente]}."""
     sessions = {}
-    for ev in events:
-        session_id = ev.get("session_id")
-        if session_id:
-            sessions.setdefault(session_id, []).append(ev)
-    for session_events in sessions.values():
-        session_events.sort(key=lambda e: e.get("timestamp", ""))
+    for event in events:
+        session_id = event.get("session_id")
+        if not session_id:
+            continue
+        if session_id not in sessions:
+            sessions[session_id] = []
+        sessions[session_id].append(event)
+
+    for session_id in sessions:
+        sessions[session_id].sort(key=get_timestamp)
     return sessions
 
 
+def is_download(command, payload):
+    if payload.get("extracted_url"):
+        return True
+    for word in command_words(command):
+        if word in DOWNLOAD_COMMANDS:
+            return True
+    return False
+
+
+def is_persistence(command):
+    for pattern in PERSISTENCE_PATTERNS:
+        if pattern in command:
+            return True
+    return False
+
+
 def session_stages(session_events):
+    """Etapele atinse intr-o sesiune. Comenzile conteaza doar dupa un login reusit."""
     stages = {"conectare"}
-    for ev in session_events:
-        event_type = ev.get("event_type")
-        payload = ev.get("payload_details") or {}
+    logged_in = False
+
+    for event in session_events:
+        event_type = event.get("event_type")
+        payload = event.get("payload_details") or {}
+        creds = event.get("credentials") or {}
+
         if event_type == "login_attempt":
             stages.add("incercare login")
-            if (ev.get("credentials") or {}).get("success"):
+            if creds.get("success"):
                 stages.add("login reusit")
-        elif event_type == "command_exec":
+                logged_in = True
+
+        elif event_type == "command_exec" and logged_in:
             stages.add("comenzi")
-            cmd = payload.get("command", "").lower()
-            words = command_words(cmd)
-            if payload.get("extracted_url") or any(w in words for w in DOWNLOAD_COMMANDS):
+            command = payload.get("command", "").lower()
+            if is_download(command, payload):
                 stages.add("descarcare")
-            if any(p in cmd for p in PERSISTENCE_PATTERNS):
+            if is_persistence(command):
                 stages.add("persistenta")
+
         elif event_type == "file_download":
             stages.add("descarcare")
+
     return stages
 
 
 def session_summary(session_id, session_events):
+    """Fisa unei sesiuni: cine, cand, cat a durat, ce a incercat si ce a facut."""
     first = session_events[0]
     last = session_events[-1]
+
     start = parse_time(first.get("timestamp"))
     end = parse_time(last.get("timestamp"))
-    duration = round((end - start).total_seconds(), 1) if start and end else None
+    duration = None
+    if start and end:
+        duration = round((end - start).total_seconds(), 1)
 
-    logins = [ev.get("credentials") or {} for ev in session_events if ev.get("event_type") == "login_attempt"]
-    good_logins = [f"{c.get('username', '')}:{c.get('password', '')}" for c in logins if c.get("success")]
-    commands = [(ev.get("payload_details") or {}).get("command", "")
-                for ev in session_events if ev.get("event_type") == "command_exec"]
-    downloads = [(ev.get("payload_details") or {}).get("extracted_url")
-                 for ev in session_events if (ev.get("payload_details") or {}).get("extracted_url")]
-    stages = session_stages(session_events)
+    login_attempts = 0
+    successful_login = None
+    commands = []
+    downloads = []
+    passwords = []
+
+    for event in session_events:
+        event_type = event.get("event_type")
+        payload = event.get("payload_details") or {}
+        creds = event.get("credentials") or {}
+
+        if event_type == "login_attempt":
+            login_attempts += 1
+            password = creds.get("password", "")
+            if password and password not in passwords:
+                passwords.append(password)
+            if creds.get("success") and successful_login is None:
+                successful_login = f"{creds.get('username', '')}:{creds.get('password', '')}"
+
+        if event_type == "command_exec":
+            commands.append(payload.get("command", ""))
+
+        if payload.get("extracted_url"):
+            downloads.append(payload.get("extracted_url"))
+
+    reached = session_stages(session_events)
+    stages_in_order = []
+    for stage in STAGES:
+        if stage in reached:
+            stages_in_order.append(stage)
 
     return {
         "session_id": session_id,
@@ -63,13 +123,55 @@ def session_summary(session_id, session_events):
         "start": first.get("timestamp"),
         "end": last.get("timestamp"),
         "duration_seconds": duration,
-        "login_attempts": len(logins),
-        "successful_login": good_logins[0] if good_logins else None,
+        "login_attempts": login_attempts,
+        "successful_login": successful_login,
+        "passwords": passwords,
         "commands": commands,
         "downloads": downloads,
-        "stages": [s for s in STAGES if s in stages],
+        "stages": stages_in_order,
     }
 
 
+class SessionStore:
+    """Tine minte evenimentele ultimelor sesiuni (implicit 2000), ca sa le poata rezuma oricand."""
+
+    def __init__(self, max_sessions=2000):
+        self.max_sessions = max_sessions
+        self.sessions = {}
+
+    def add_event(self, event):
+        session_id = event.get("session_id")
+        if not session_id:
+            return
+        if session_id not in self.sessions:
+            self.sessions[session_id] = []
+            if len(self.sessions) > self.max_sessions:
+                self.forget_oldest()
+        self.sessions[session_id].append(event)
+
+    def forget_oldest(self):
+        for session_id in self.sessions:
+            del self.sessions[session_id]
+            return
+
+    def summaries(self, ip=None):
+        """Fisele sesiunilor; cu ip=..., doar ale acelui IP."""
+        result = []
+        for session_id, events in self.sessions.items():
+            ordered = sorted(events, key=get_timestamp)
+            summary = session_summary(session_id, ordered)
+            if ip is None or summary["source_ip"] == ip:
+                result.append(summary)
+        return result
+
+
 def kill_chain_funnel(summaries):
-    return [(stage, sum(1 for s in summaries if stage in s["stages"])) for stage in STAGES]
+    """Cate sesiuni au ajuns la fiecare etapa: [('conectare', 18), ...]."""
+    funnel = []
+    for stage in STAGES:
+        count = 0
+        for summary in summaries:
+            if stage in summary["stages"]:
+                count += 1
+        funnel.append((stage, count))
+    return funnel
