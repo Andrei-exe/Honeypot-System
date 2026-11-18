@@ -189,6 +189,36 @@ For example, `LOADGEN_MODE=brute docker compose up --scale loadgen=20 loadgen` o
 
 Watch the agent with `docker stats` in another terminal. The generated sessions are recorded like real attacks, from `172.x` addresses, so they show up on the dashboard. Do not run the generator on a production sensor.
 
+## GeoIP (optional: country/city on the map)
+
+The threat engine can tag each alert with the attacker's country and city, which
+powers the map on the dashboard. This needs a GeoIP database **file**
+(`GeoLite2-City.mmdb`). The file is **not** in the repository because its license
+forbids redistribution, so you download it yourself.
+
+Without it, everything still works — the engine just prints `fara GeoIP` at startup
+and alerts have no country (the map stays empty).
+
+To enable it:
+
+1. Create a free account at <https://www.maxmind.com> and download **GeoLite2 City**
+   (the `.mmdb` format, delivered inside a `.tar.gz`).
+2. Extract it and copy the file into `threat-engine/`, next to `receiver.py`:
+   ```bash
+   cp ~/Downloads/GeoLite2-City.mmdb threat-engine/
+   ```
+3. Restart `receiver.py`. If the `fara GeoIP` line is gone, it works.
+
+The filename must be exactly `GeoLite2-City.mmdb`, or set `GEOIP_DB=/path/to/file.mmdb`.
+In Docker, mount the file into the threat-engine container and point `GEOIP_DB` at it.
+
+**No-signup alternative:** DB-IP's [IP-to-City Lite](https://db-ip.com/db/download/ip-to-city-lite)
+is free, needs no account (only attribution), and is the same MaxMind-DB format, so
+`geo.py` reads it as-is. Download it, then either rename it to `GeoLite2-City.mmdb` or
+set `GEOIP_DB` to its path.
+
+**Never commit the `.mmdb` file** — it is licensed and large. Keep it in `.gitignore`.
+
 ## Repository layout
 
 ```
