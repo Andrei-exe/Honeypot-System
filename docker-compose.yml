@@ -137,6 +137,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Generator de incarcare, DOAR pentru teste. Are profil -> NU porneste la `docker compose up`
+  # normal (nici pe VPS), doar cand il ceri pe nume:
+  #   docker compose up --build --scale loadgen=20 loadgen
+  # 20 de copii, fiecare cu IP-ul ei (agentul accepta max 10 conexiuni per IP) -> 200 per serviciu.
+  # Evenimentele lui ajung la threat-engine ca orice atac (IP-uri 172.x).
+  loadgen:
+    profiles: [loadtest]
+    build:
+      context: ./honeypot-agent
+      dockerfile: cmd/loadgen/Dockerfile
+    # hold = tine sesiuni deschise; brute = logari SSH gresite in bucla (vezi README "Load testing")
+    command: ["-mode", "${LOADGEN_MODE:-hold}", "-seconds", "${LOADGEN_SECONDS:-25}"]
+    networks:
+      - honeynet   # langa agent, ca sa-l atace direct cu IP-uri diferite
+
 networks:
   honeynet:   # in fata: doar agentul, cu porturile pentru atacatori
   backend:    # in spate: agent -> threat-engine <- dashboard

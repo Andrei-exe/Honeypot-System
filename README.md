@@ -118,7 +118,7 @@ Avoid `docker compose down -v`. It deletes the SSH host key, which changes the s
   | threat-engine | 512 MB | 1 core | 64 |
   | dashboard | 128 MB | 0.5 core | 64 |
 
-  In a local load test, the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 200 SSH login attempts per second with a third of one core. A process that goes over its memory limit is killed and the container restarts.
+  In a local load test (see [Load testing](#load-testing)), the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 200 SSH login attempts per second with a third of one core. A process that goes over its memory limit is killed and the container restarts.
 - **Automatic restart:** every container comes back after a crash or a server reboot (`restart: unless-stopped`). A container you stop yourself stays stopped.
 - **Log rotation:** Docker keeps at most 100 MB of logs for the agent (5 files of 20 MB) and 30 MB for each Python container (3 files of 10 MB), so a busy server cannot fill its disk. Older lines are deleted, which means `docker logs honeypot-agent` shows only recent events. The full history is kept by the threat engine in `received_events.jsonl`.
 
@@ -147,10 +147,40 @@ cd dashboard && pip install -r requirements.txt && python app.py            # po
 
 Run the agent's tests with `go test ./...`. Run `python main.py` in `threat-engine/` to analyze the sample data in `shared/mock_events.jsonl`.
 
+## Load testing
+
+`honeypot-agent/cmd/loadgen` is a small load generator for the agent. Use it only against your own setup. It never starts with a normal `docker compose up`, only when you name it.
+
+The agent accepts at most 10 connections per IP, so the generator runs as several containers on the agent's network, each with its own IP. With the honeypot running:
+
+```bash
+docker compose up --build --scale loadgen=20 loadgen   # 20 x 10 = 200 sessions per service, the per-service maximum
+docker compose rm -f loadgen                            # always remove the finished containers afterwards
+```
+
+Always remove the containers after a run. On Docker Desktop, starting a run with a different mode on top of the old containers once left them stuck until Docker was restarted.
+
+Each copy prints one line, for example `hold 25s: ssh ok=10 closed=0 failed=0 | telnet ok=10 closed=0 failed=0 | ...`:
+
+- `ok`: the session stayed open until the end;
+- `closed`: the agent closed it early (a timeout);
+- `failed`: the generator could not connect or log in (for example, a connection limit was hit).
+
+Choose what it does with environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOADGEN_MODE` | `hold` | `hold` logs in on every service and keeps the sessions open; `brute` runs SSH logins with a wrong password in a loop |
+| `LOADGEN_SECONDS` | `25` | How long to hold the sessions or run the loops |
+
+For example, `LOADGEN_MODE=brute docker compose up --scale loadgen=20 loadgen` on Linux or macOS. On Windows, set the variable first: `set LOADGEN_MODE=brute` (cmd) or `$env:LOADGEN_MODE="brute"` (PowerShell).
+
+Watch the agent with `docker stats` in another terminal. The generated sessions are recorded like real attacks, from `172.x` addresses, so they show up on the dashboard. Do not run the generator on a production sensor.
+
 ## Repository layout
 
 ```
-honeypot-agent/   Go: fake services, fake shell, event shipper
+honeypot-agent/   Go: fake services, fake shell, event shipper (cmd/loadgen: load generator for testing)
 threat-engine/    Python: event API, detection rules, offline analysis
 dashboard/        Python: web dashboard
 shared/           event-schema.json (event contract) and sample data
