@@ -173,6 +173,39 @@ func TestCloseGivesUpAtDeadline(t *testing.T) {
 	}
 }
 
+// On shutdown a rejected batch (4xx) is not retried until the deadline: same answer every time.
+func TestCloseDoesNotRetryRejected(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(int) int { return http.StatusUnauthorized }}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "wrong-token")
+	s.EmitEvent(event(1))
+	start := time.Now()
+	s.Close(3 * time.Second)
+
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Close took %v (a rejected batch should be dropped at once)", d)
+	}
+	if req, _ := rcv.counts(); req != 1 {
+		t.Errorf("sent the rejected batch %d times (should be once)", req)
+	}
+}
+
+// Shell characters stay readable in JSONL (by default json.Encoder writes < > & as unicode escapes).
+func TestJSONLKeepsShellCharacters(t *testing.T) {
+	var out bytes.Buffer
+	s := NewShipper(&out, "", "")
+	e := event(1)
+	e.PayloadDetails = &models.PayloadDetails{Command: "cat /proc/cpuinfo > /tmp/x && echo <ok>"}
+	s.EmitEvent(e)
+
+	if !strings.Contains(out.String(), `"command":"cat /proc/cpuinfo > /tmp/x && echo <ok>"`) {
+		t.Fatalf("command escaped in JSONL: %s", out.String())
+	}
+}
+
 // Without a URL there is no sender goroutine: Close returns at once and doesn't panic.
 func TestCloseWithoutURL(t *testing.T) {
 	s := NewShipper(io.Discard, "", "")

@@ -33,6 +33,22 @@ func TestFormValue(t *testing.T) {
 	}
 }
 
+// The password fields are cut out of the body (it goes only in credentials), the rest stays as sent.
+func TestWithoutPasswords(t *testing.T) {
+	tests := []struct{ body, want string }{
+		{"username=admin&password=admin", "username=admin"},
+		{"user=a&pass=b&pwd=c&lang=en", "user=a&lang=en"},
+		{"pass%77ord=x&log=root", "log=root"}, // escaped name, decoded like url.ParseQuery does
+		{"password=x", ""},
+		{"a=1&b=%3Cscript%3E", "a=1&b=%3Cscript%3E"}, // nothing to cut: unchanged, not re-encoded
+	}
+	for _, tt := range tests {
+		if got := withoutPasswords(tt.body); got != tt.want {
+			t.Errorf("withoutPasswords(%q) = %q, want %q", tt.body, got, tt.want)
+		}
+	}
+}
+
 // The real RunHTTP on a local port: a scanner's GET, a login form and Basic Auth, then shutdown.
 // Checks the persona (lighttpd, "Gateway Router"), the status codes and the logged events.
 func TestHTTP(t *testing.T) {
@@ -67,7 +83,8 @@ func TestHTTP(t *testing.T) {
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// own Transport = own keep-alive connection: requests 1-3 reuse one TCP connection
+	client := &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
 	do := func(req *http.Request) (*http.Response, string) {
 		t.Helper()
 		resp, err := client.Do(req)
@@ -89,7 +106,7 @@ func TestHTTP(t *testing.T) {
 	}
 
 	// 2. the login form
-	req, _ = http.NewRequest("POST", "http://"+addr+"/login", strings.NewReader("username=admin&password=admin"))
+	req, _ = http.NewRequest("POST", "http://"+addr+"/login", strings.NewReader("username=admin&password=7ujMko0admin&lang=en"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, body = do(req)
 	if resp.StatusCode != 401 || !strings.Contains(body, "Invalid username or password") ||
@@ -105,6 +122,14 @@ func TestHTTP(t *testing.T) {
 		t.Errorf("Basic Auth: %d, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
 
+	// 4. another client = another TCP connection = another session
+	other := &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
+	resp, err = other.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
 	cancel() // like SIGTERM: RunHTTP must return nil
 	select {
 	case err := <-result:
@@ -117,13 +142,22 @@ func TestHTTP(t *testing.T) {
 
 	// RunHTTP has returned = every request handler has finished, so out is complete
 	events := parseEvents(t, out.String())
-	if len(events) != 3 {
-		t.Fatalf("%d events (expected 3): %+v", len(events), events)
+	if len(events) != 4 {
+		t.Fatalf("%d events (expected 4): %+v", len(events), events)
 	}
 	for _, e := range events {
 		if e.Protocol != "HTTP" || e.TargetPort != 80 || e.SourceIP != "127.0.0.1" {
 			t.Errorf("%s: %s/%d from %s", e.EventType, e.Protocol, e.TargetPort, e.SourceIP)
 		}
+	}
+
+	// one session_id per TCP connection (the Python SessionStore groups by it)
+	first := events[0].SessionID
+	if len(first) != 16 || events[1].SessionID != first || events[2].SessionID != first {
+		t.Errorf("same connection, session_ids %q %q %q (expected one, 16 hex)", first, events[1].SessionID, events[2].SessionID)
+	}
+	if id := events[3].SessionID; len(id) != 16 || id == first {
+		t.Errorf("new connection, session_id %q (expected a new one, not %q)", id, first)
 	}
 
 	if e := events[0]; e.EventType != "http_request" || e.Credentials != nil ||
@@ -132,8 +166,12 @@ func TestHTTP(t *testing.T) {
 		t.Errorf("GET event: %+v %+v", e, e.PayloadDetails)
 	}
 	if e := events[1]; e.EventType != "login_attempt" || e.PayloadDetails.HTTPMethod != "POST" ||
-		e.Credentials.Username != "admin" || e.Credentials.Password != "admin" || e.Credentials.Success {
+		e.Credentials.Username != "admin" || e.Credentials.Password != "7ujMko0admin" || e.Credentials.Success {
 		t.Errorf("form login event: %+v %+v", e, e.Credentials)
+	}
+	// the password only in credentials, never in raw_data
+	if raw := events[1].PayloadDetails.RawData; raw != "username=admin&lang=en" {
+		t.Errorf("form login raw_data = %q (expected the body without the password)", raw)
 	}
 	// even a weak password never "works" over HTTP
 	if e := events[2]; e.EventType != "login_attempt" ||

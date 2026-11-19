@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,10 @@ const (
 	retryAfter = 5 * time.Second // wait this long after a failed send
 	maxPending = 5000            // cap kept in RAM while the receiver is down
 )
+
+// errRejected means the receiver answered 4xx: the request itself is wrong (token, format, path),
+// so resending the same batch would get the same answer.
+var errRejected = errors.New("rejected by the threat-engine")
 
 // Shipper writes every event as JSONL and, if a URL is set, POSTs it to the threat-engine
 // in batches. Services only call EmitEvent; one background goroutine (run) does the network work.
@@ -42,6 +47,7 @@ type Shipper struct {
 // NewShipper writes JSONL to out; url is where batches are POSTed ("" = nowhere).
 func NewShipper(out io.Writer, url, token string) *Shipper {
 	s := &Shipper{enc: json.NewEncoder(out)}
+	s.enc.SetEscapeHTML(false) // keep < > & as they are (by default they become unicode escapes), shell commands stay readable
 	if url == "" {
 		log.Println("shipper: SHIPPER_URL is not set -> events go to stdout only")
 		return s
@@ -125,7 +131,14 @@ func (s *Shipper) run() {
 			continue
 		}
 
-		if err := s.send(context.Background(), batch); err != nil {
+		err := s.send(context.Background(), batch)
+		if errors.Is(err, errRejected) {
+			log.Printf("shipper: %d events %v - dropped, they are only in JSONL", len(batch), err)
+			batch = nil
+			down = false // it answered, so it is not down
+			continue
+		}
+		if err != nil {
 			if !down {
 				log.Printf("shipper: cannot send (%v) - keeping the events, retrying every %v", err, retryAfter)
 				down = true
@@ -161,7 +174,7 @@ func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
 			log.Printf("shipper: shutdown: sent the last %d events", len(batch))
 			return
 		}
-		if time.Until(deadline) < 500*time.Millisecond {
+		if errors.Is(err, errRejected) || time.Until(deadline) < 500*time.Millisecond {
 			log.Printf("shipper: shutdown: %d events did not reach the threat-engine (%v) - they are only in JSONL", len(batch), err)
 			return
 		}
@@ -170,7 +183,7 @@ func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
 }
 
 // send POSTs a batch as a JSON array; ctx can cut the request short.
-// It returns an error only when retrying makes sense (network down, 5xx).
+// Errors: errRejected (4xx, don't resend) or anything else (network down, 5xx: retry later).
 func (s *Shipper) send(ctx context.Context, batch []models.HoneypotEvent) error {
 	body, err := json.Marshal(batch)
 	if err != nil {
@@ -197,10 +210,7 @@ func (s *Shipper) send(ctx context.Context, batch []models.HoneypotEvent) error 
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		// 4xx = the request itself is wrong (token, format, path).
-		// Resending would get the same answer -> drop this batch.
-		log.Printf("shipper: the server rejected %d events: %s", len(batch), resp.Status)
-		return nil
+		return fmt.Errorf("%w (%s)", errRejected, resp.Status)
 	}
 	return fmt.Errorf("the server answered %s", resp.Status) // 5xx -> their problem, retry
 }

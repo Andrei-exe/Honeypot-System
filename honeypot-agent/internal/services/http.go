@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"net"
@@ -16,6 +18,12 @@ import (
 	"honeypot-agent/internal/models"
 	"honeypot-agent/internal/shipper"
 )
+
+// sessionKey is the context key under which ConnContext stores a connection's session_id.
+type sessionKey struct{}
+
+// passwordFields are the form fields read as the password; they are kept out of raw_data.
+var passwordFields = []string{"password", "pass", "pwd"}
 
 // RunHTTP serves a fake router login page (lighttpd) and logs every request, until ctx is cancelled.
 // Submitted credentials are logged as login_attempt and always rejected.
@@ -27,6 +35,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			ip = r.RemoteAddr
 		}
 		port, _ := strconv.Atoi(portText)
+		sessionID, _ := r.Context().Value(sessionKey{}).(string) // set by ConnContext below
 
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096)) // read at most 4KB of the body
 
@@ -38,6 +47,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			SourcePort: port,
 			TargetPort: 80,
 			Protocol:   "HTTP",
+			SessionID:  sessionID,
 			PayloadDetails: &models.PayloadDetails{
 				HTTPMethod:    r.Method,
 				HTTPPath:      r.URL.RequestURI(),
@@ -49,7 +59,10 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		// credentials from a login form (common field names) or from Basic Auth
 		values, _ := url.ParseQuery(string(body))
 		user := formValue(values, "username", "log", "user")
-		pass := formValue(values, "password", "pass", "pwd")
+		pass := formValue(values, passwordFields...)
+		if pass != "" {
+			event.PayloadDetails.RawData = withoutPasswords(string(body)) // the password goes only in credentials
+		}
 
 		basicUser, basicPass, isBasic := r.BasicAuth()
 		if isBasic {
@@ -88,6 +101,10 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		// called once per new TCP connection: keep-alive requests on it share one session_id
+		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+			return context.WithValue(ctx, sessionKey{}, newSessionID())
+		},
 	}
 
 	listener, err := net.Listen("tcp", address)
@@ -124,6 +141,19 @@ func formValue(v url.Values, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// withoutPasswords returns a form body without its password fields; the other fields stay as sent.
+func withoutPasswords(body string) string {
+	var kept []string
+	for _, field := range strings.Split(body, "&") {
+		name, _, _ := strings.Cut(field, "=")
+		name, _ = url.QueryUnescape(name) // "pass%77ord" is "password" too
+		if !slices.Contains(passwordFields, name) {
+			kept = append(kept, field)
+		}
+	}
+	return strings.Join(kept, "&")
 }
 
 // fakeLoginPage returns the router login HTML; showError adds the "Invalid username or password" line.
