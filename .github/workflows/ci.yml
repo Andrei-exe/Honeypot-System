@@ -4,6 +4,7 @@ name: CI
 
 on:
   push:
+    branches-ignore: ["dependabot/**"] # Dependabot's branches already get checked through their pull request
   pull_request:
   workflow_dispatch: # "Run workflow" button in the Actions tab
 
@@ -22,9 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # the newest 1.27.x patch, the same Go the Dockerfile builds with (golang:1.27-alpine).
+      # go.mod only sets the minimum (1.27.4); a newer patch with security fixes is picked up here by itself.
       - uses: actions/setup-go@v7
         with:
-          go-version-file: honeypot-agent/go.mod # the same Go version as in go.mod
+          go-version: "1.27"
+          check-latest: true
           cache-dependency-path: honeypot-agent/go.sum
 
       - name: gofmt
@@ -45,6 +49,12 @@ jobs:
       # -race: the race detector (needs Linux or Windows on x64, which is why it runs here)
       - name: go test -race
         run: go test -race ./...
+
+      # known vulnerabilities (Go's official database) in x/crypto, the other modules and the
+      # standard library, reported only if our code actually reaches the vulnerable function.
+      # Last step on purpose: a new advisory must not hide the test results.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   python:
     name: Python

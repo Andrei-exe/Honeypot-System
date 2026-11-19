@@ -1,0 +1,32 @@
+# Dependabot: once a month, opens ONE pull request per group below with the newer versions.
+# CI runs on that pull request; merge it if the checks are green.
+# Security fixes are separate (Dependabot security updates, turned on in Settings): they come
+# right away, for every dependency, whatever this file says.
+version: 2
+updates:
+  # x/crypto (our SSH server), x/term, x/sys
+  - package-ecosystem: gomod
+    directory: /honeypot-agent
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7 # only versions out for at least a week (a bad release is usually pulled by then)
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # actions/checkout, actions/setup-go, actions/setup-python in .github/workflows/
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+# Not here on purpose:
+# - Docker base images: the tags (golang:1.27-alpine, python:3.13-slim) already get security patches
+#   on every rebuild with --pull; Dependabot would only propose new Go/Python versions.
+# - pip (threat-engine/, dashboard/): the Python side's call; security fixes still come (see above).
