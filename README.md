@@ -154,7 +154,7 @@ Docker's published ports bypass firewalls such as `ufw`, so keep the dashboard o
 Stop the matching containers first, otherwise the ports clash.
 
 ```bash
-cd honeypot-agent && go run .                    # Go 1.27.2+, events printed to stdout
+cd honeypot-agent && go run .                    # Go 1.27.4+, events printed to stdout
 cd threat-engine && pip install -r requirements.txt && python receiver.py   # port 8000
 cd dashboard && pip install -r requirements.txt && python app.py            # port 8050
 ```
