@@ -159,7 +159,7 @@ cd threat-engine && pip install -r requirements.txt && python receiver.py   # po
 cd dashboard && pip install -r requirements.txt && python app.py            # port 8050
 ```
 
-Run the agent's tests with `go test ./...`. Run `python main.py` in `threat-engine/` to analyze the sample data in `shared/mock_events.jsonl`.
+Run the agent's tests with `go test ./...` in `honeypot-agent/` (about 10 seconds). Besides unit tests, they run real sessions against each fake service on a local port and check what an attacker sees, the safety rules (FTP never opens a data connection, SSH refuses port forwarding, `wget` downloads nothing) and that every logged event matches `shared/event-schema.json`. Run `python main.py` in `threat-engine/` to analyze the sample data in `shared/mock_events.jsonl`.
 
 ## Load testing
 
@@ -234,7 +234,6 @@ deploy/           server setup: egress firewall script and its systemd unit
 ## Roadmap
 
 - Multiple sensors: node IDs and ports from the environment.
-- CI with GitHub Actions.
 - Malware sample collection with SHA-256 hashing.
 - Tarpit.
 - Deployment on a public server.

@@ -1,0 +1,47 @@
+# CI: GitHub runs these checks on every push and pull request.
+# A red X next to the commit on GitHub = something below failed; click it to see the log.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: # "Run workflow" button in the Actions tab
+
+# the checks only need to read the code
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    name: Go agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: honeypot-agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: honeypot-agent/go.mod # the same Go version as in go.mod
+          cache-dependency-path: honeypot-agent/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted (run 'gofmt -w .' in honeypot-agent/):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # -race: the race detector (needs Linux or Windows on x64, which is why it runs here)
+      - name: go test -race
+        run: go test -race ./...
