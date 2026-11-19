@@ -45,3 +45,34 @@ jobs:
       # -race: the race detector (needs Linux or Windows on x64, which is why it runs here)
       - name: go test -race
         run: go test -race ./...
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13" # the same as the Docker images (python:3.13-slim)
+
+      # catches syntax errors (like "iimport") in every file, even ones no test imports
+      - name: py_compile
+        run: python -m py_compile threat-engine/*.py dashboard/app.py
+
+      # the tests use plain assert: a failed one raises AssertionError and the script exits with 1
+      - name: threat-engine tests
+        working-directory: threat-engine
+        run: python test_filters.py
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # builds all 4 images (--profile loadtest adds loadgen); no .env needed, every variable has a default
+      - name: docker compose build
+        run: docker compose --profile loadtest build
