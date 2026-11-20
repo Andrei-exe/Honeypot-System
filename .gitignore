@@ -46,6 +46,10 @@ captured_payloads/
 *.pcap
 *.log
 
+# Captured events (attackers' passwords and IPs), anywhere in the repo; the sample data stays tracked
+*.jsonl
+!shared/mock_events.jsonl
+
 .vscode/
 .idea/
 .DS_Store
