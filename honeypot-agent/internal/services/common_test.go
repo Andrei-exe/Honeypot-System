@@ -48,8 +48,8 @@ func TestNewSessionID(t *testing.T) {
 // Persona rule: every user that can log in must be in the fake /etc/passwd with uid 0 and in
 // /etc/shadow. Otherwise `cat /etc/passwd` right after a successful login gives us away.
 func TestLoginUsersExistInFakeSystem(t *testing.T) {
-	passwd, _ := vfs.NewShell().Run("cat /etc/passwd")
-	shadow, _ := vfs.NewShell().Run("cat /etc/shadow")
+	passwd, _, _ := vfs.NewShell().Run("cat /etc/passwd")
+	shadow, _, _ := vfs.NewShell().Run("cat /etc/shadow")
 
 	for credential := range weakCredentials {
 		user, _, _ := strings.Cut(credential, ":")

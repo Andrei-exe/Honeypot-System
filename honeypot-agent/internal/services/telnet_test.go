@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -118,6 +119,10 @@ func TestTelnetSession(t *testing.T) {
 	r := bufio.NewReader(conn)
 
 	readUntil(t, r, "gateway login: ")
+	fmt.Fprint(conn, "\r\n") // an empty name: BusyBox login only asks again, no "Password:"
+	if text := readUntil(t, r, "gateway login: "); strings.Contains(text, "Password") {
+		t.Errorf("after an empty name: %q", text)
+	}
 	fmt.Fprint(conn, "root\r\n")
 	readUntil(t, r, "Password: ")
 	fmt.Fprint(conn, "wrong\r\n")
@@ -125,7 +130,7 @@ func TestTelnetSession(t *testing.T) {
 		t.Errorf("after a wrong password: %q", text)
 	}
 
-	fmt.Fprint(conn, "root\r\n")
+	fmt.Fprint(conn, "  root extra\r\n") // like login: leading spaces skipped, the name ends at a space
 	readUntil(t, r, "Password: ")
 	fmt.Fprint(conn, "xc3511\r\n")
 	// Buildroot's BusyBox shell is "quiet": after the password only a new line, then the prompt
@@ -166,5 +171,36 @@ func TestTelnetSession(t *testing.T) {
 		if strings.Contains(c.PayloadDetails.Command, "xc3511") {
 			t.Errorf("the password ended up in a command: %q", c.PayloadDetails.Command)
 		}
+	}
+}
+
+// Empty user names only ask again (no "Password:", no login_attempt). The 10th ends the session,
+// like BusyBox login (EMPTY_USERNAME_COUNT), so a bot can't keep us busy with empty lines.
+func TestTelnetEmptyNames(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprint(conn, strings.Repeat("\r\n", telnetMaxEmptyNames))
+
+	all, err := io.ReadAll(conn) // everything until the server hangs up
+	if err != nil {
+		t.Fatalf("the server did not hang up: %v", err)
+	}
+	if n := strings.Count(string(all), "gateway login: "); n != telnetMaxEmptyNames || strings.Contains(string(all), "Password") {
+		t.Errorf("%d login prompts (expected %d, no Password): %q", n, telnetMaxEmptyNames, all)
+	}
+	waitDone(t, done)
+
+	events := parseEvents(t, out.String())
+	checkSession(t, events, "TELNET", 23)
+	if logins := ofType(events, "login_attempt"); len(logins) != 0 {
+		t.Errorf("empty names were logged as login attempts: %+v", logins)
 	}
 }

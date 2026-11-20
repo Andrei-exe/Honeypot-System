@@ -80,12 +80,12 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	case "cp":
 		return s.cp(args)
 
-	case "wget", "curl", "tftp", "ftpget":
-		// nothing is downloaded: pretend the network is down (the URL is already logged)
+	case "wget", "tftp", "ftpget":
+		// nothing is downloaded: pretend the network is down (the URL is already logged).
+		// No curl: BusyBox has none, so "curl" is "not found" below, like on a real router.
 		return name + ": can't connect to remote host: Connection timed out\n", 1, false
 
-	case "sh", "ash", "enable", "system", "shell", "linuxshell", "chmod", "mv",
-		"kill", "killall", "export", "ulimit", "sleep", "true", "syslogd", "klogd":
+	case "sh", "ash", "chmod", "mv", "kill", "killall", "export", "ulimit", "sleep", "true", "syslogd", "klogd":
 		// commands that print nothing on success on a real system (the daemons go to the background)
 		return "", 0, false
 	case "login":
@@ -97,6 +97,9 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	case "telnetd":
 		return "telnetd: bind: Address already in use\n", 1, false // it is already running (ps)
 	}
+
+	// Everything else is "not found", like on a real BusyBox: also curl and Mirai's probes for a
+	// vendor CLI (enable, system, shell, linuxshell), which Mirai sends without reading the answer.
 
 	// ./bot or /tmp/x: if the file exists it "runs" silently (like malware started in the background)
 	if strings.Contains(name, "/") {

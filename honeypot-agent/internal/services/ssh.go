@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -183,9 +184,9 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			go ssh.DiscardRequests(requests)
 
 			// no terminal: output goes straight to the channel with plain \n
-			output, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
+			output, code, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
 			fmt.Fprint(channel, output)
-			sendExitStatus(channel)
+			sendExitStatus(channel, code) // e.g. 127 for a command that doesn't exist
 			return
 
 		case "shell":
@@ -193,8 +194,7 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			runSSHShell(conn, channel, newEvent, shipper)
-			sendExitStatus(channel)
+			sendExitStatus(channel, runSSHShell(conn, channel, newEvent, shipper))
 			return
 
 		default:
@@ -205,8 +205,9 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 }
 
 // runSSHShell is the fake shell loop, almost the same as Phase 2 in telnet.go.
+// Returns the exit code of the last command, which a real shell also exits with.
 func runSSHShell(conn net.Conn, channel ssh.Channel,
-	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
+	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) int {
 
 	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
 
@@ -214,26 +215,31 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 	// echo what it types, the server must send it back). It also turns \n into \r\n.
 	terminal := term.NewTerminal(channel, sh.Prompt()) // no banner, like telnet.go
 
+	code := 0
 	for i := 0; i < sshMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
 		terminal.SetPrompt(sh.Prompt()) // the prompt changes after cd
 		line, err := terminal.ReadLine()
 		if err != nil {
-			return
+			return code
 		}
 
-		output, exit := runShellLine(sh, line, newEvent, shipper)
+		output, c, exit := runShellLine(sh, line, newEvent, shipper)
 		fmt.Fprint(terminal, output)
 		if exit {
-			return
+			return code // "exit" itself doesn't count: the shell exits with the previous command's code
+		}
+		if strings.TrimSpace(line) != "" {
+			code = c
 		}
 	}
+	return code
 }
 
-// sendExitStatus tells the client the command finished with exit code 0, like a real server.
-func sendExitStatus(channel ssh.Channel) {
-	status := struct{ Status uint32 }{0}
+// sendExitStatus tells the client the exit code of the command or shell, like a real server.
+func sendExitStatus(channel ssh.Channel, code int) {
+	status := struct{ Status uint32 }{uint32(code)}
 	channel.SendRequest("exit-status", false, ssh.Marshal(&status))
 }
 

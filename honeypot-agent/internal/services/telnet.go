@@ -32,6 +32,7 @@ const (
 	telnetMaxLine       = 1024
 	telnetMaxLoginTries = 3
 	telnetMaxCommands   = 50
+	telnetMaxEmptyNames = 10 // BusyBox login gives up after 10 empty user names (EMPTY_USERNAME_COUNT)
 )
 
 // RunTelnet serves a fake BusyBox telnetd on address until ctx is cancelled.
@@ -84,9 +85,8 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	fmt.Fprint(conn, "\r\nGateway Linux 4.14\r\n\r\n")
 	loggedIn := false
 	for try := 1; try <= telnetMaxLoginTries; try++ {
-		fmt.Fprint(conn, "gateway login: ")
-		user, err := reader.readLine()
-		if err != nil {
+		user, ok := readUsername(conn, reader)
+		if !ok {
 			return
 		}
 
@@ -131,12 +131,28 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			return
 		}
 
-		output, exit := runShellLine(sh, line, newEvent, shipper)
+		output, _, exit := runShellLine(sh, line, newEvent, shipper)
 		fmt.Fprint(conn, toCRLF(output))
 		if exit {
 			return
 		}
 	}
+}
+
+// readUsername asks "gateway login: " like BusyBox login: an empty line only asks again (no
+// "Password:", not a login attempt), 10 times at most, and the name ends at the first space.
+func readUsername(conn net.Conn, reader *telnetReader) (string, bool) {
+	for range telnetMaxEmptyNames {
+		fmt.Fprint(conn, "gateway login: ")
+		line, err := reader.readLine()
+		if err != nil {
+			return "", false
+		}
+		if words := strings.Fields(line); len(words) > 0 {
+			return words[0], true
+		}
+	}
+	return "", false // the 10th empty name: BusyBox login exits
 }
 
 // toCRLF converts the shell's \n line endings to the \r\n that Telnet expects.

@@ -56,13 +56,13 @@ func newSessionID() string {
 }
 
 // runShellLine logs the line as command_exec and runs it in the fake shell (Telnet and SSH).
-// Returns the output (lines end in \n) and whether the session should end.
+// Returns the output (lines end in \n), the exit code of the last command and whether the session should end.
 func runShellLine(sh *vfs.Shell, line string,
-	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) (string, bool) {
+	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) (string, int, bool) {
 
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", false
+		return "", 0, false
 	}
 
 	// log the whole line exactly as sent (including ; && |)

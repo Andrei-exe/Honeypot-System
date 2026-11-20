@@ -1,6 +1,8 @@
 package vfs
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"path"
 	"sort"
@@ -40,7 +42,7 @@ var now = time.Now
 // fakeDirs exist from the start (read-only, shared by all sessions). Bots often cd into
 // /tmp, /var/run, /mnt or /dev/shm to drop their binary, so all of these must exist.
 var fakeDirs = map[string]bool{
-	"/": true, "/bin": true, "/dev": true, "/dev/shm": true, "/etc": true,
+	"/": true, "/bin": true, "/dev": true, "/dev/shm": true, "/etc": true, "/etc/dropbear": true,
 	"/lib": true, "/mnt": true, "/proc": true, "/root": true, "/sbin": true,
 	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/sbin": true,
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
@@ -113,6 +115,15 @@ var fakeFiles = map[string]string{
 	// the vendor's profile: the PS1 here is why the prompt is root@gateway:~# (Buildroot's own is "# ")
 	"/etc/profile":   "export PATH=/bin:/sbin:/usr/bin:/usr/sbin\n" + `export PS1='\u@\h:\w\$ '` + "\n",
 	"/etc/issue.net": "Gateway Linux 4.14\n", // telnetd shows it before "gateway login:"
+
+	// Buildroot's own /etc/group (system/skeleton); admin, support and user are in group 0
+	"/etc/group": "root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:\ntty:x:5:\ndisk:x:6:\nlp:x:7:\n" +
+		"mail:x:8:\nkmem:x:9:\nwheel:x:10:root\ncdrom:x:11:\ndialout:x:18:\nfloppy:x:19:\nvideo:x:28:\n" +
+		"audio:x:29:\ntape:x:32:\nwww-data:x:33:\noperator:x:37:\nutmp:x:43:\nplugdev:x:46:\nstaff:x:50:\n" +
+		"lock:x:54:\nnetdev:x:82:\nusers:x:100:\nnogroup:x:65534:\n",
+	"/etc/shells": "/bin/ash\n", // Buildroot's busybox package writes only this line
+	// Dropbear's host key (the SSH server's type: ECDSA)
+	"/etc/dropbear/dropbear_ecdsa_host_key": dropbearHostKey(),
 
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
@@ -201,6 +212,25 @@ func bootLog() string {
 		out.WriteString(t.Format("Jan _2 15:04:05") + " gateway " + l.text + "\n")
 	}
 	return out.String()
+}
+
+// dropbearHostKey is a key file in Dropbear's format: type, curve, public point, private number
+// (141 bytes, like a real ECDSA P-256 one). The numbers are made up from a hash of a fixed text:
+// the real SSH host key is never put where an attacker can read it.
+func dropbearHostKey() string {
+	var key []byte
+	field := func(b []byte) { // Dropbear writes each part as length (4 bytes) + bytes
+		key = binary.BigEndian.AppendUint32(key, uint32(len(b)))
+		key = append(key, b...)
+	}
+	x := sha256.Sum256([]byte("gateway dropbear x"))
+	y := sha256.Sum256(x[:])
+	d := sha256.Sum256(y[:])
+	field([]byte("ecdsa-sha2-nistp256"))
+	field([]byte("nistp256"))
+	field(append(append([]byte{4}, x[:]...), y[:]...)) // the point: 04 | X | Y
+	field(append([]byte{0}, d[:]...))                  // the private number
+	return string(key)
 }
 
 // resolve turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path.

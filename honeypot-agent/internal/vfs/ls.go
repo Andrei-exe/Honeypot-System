@@ -19,7 +19,7 @@ const terminalWidth = 79
 var specialModes = map[string]string{
 	"/tmp": "drwxrwxrwt", "/var/tmp": "drwxrwxrwt", "/dev/shm": "drwxrwxrwt", // anyone can write, sticky bit
 	"/proc": "dr-xr-xr-x", "/sys": "dr-xr-xr-x",
-	"/etc/shadow": "-rw-------",
+	"/etc/shadow": "-rw-------", "/etc/dropbear/dropbear_ecdsa_host_key": "-rw-------",
 }
 
 // lsFlags are the options we understand; the others are ignored.

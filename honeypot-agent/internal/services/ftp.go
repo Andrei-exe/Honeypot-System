@@ -3,9 +3,11 @@ package services
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -16,11 +18,14 @@ import (
 )
 
 const (
-	ftpIdleTimeout   = 60 * time.Second
 	ftpMaxLine       = 1024
 	ftpMaxCommands   = 50
 	ftpMaxLoginTries = 3
 )
+
+// ftpIdleTimeout is vsftpd's idle_session_timeout (300s); after it vsftpd says "421 Timeout."
+// and hangs up. A variable only so the test can shorten it.
+var ftpIdleTimeout = 300 * time.Second
 
 // RunFTP serves a fake vsftpd on address until ctx is cancelled.
 // Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
@@ -82,6 +87,10 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	for i := 0; i < ftpMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(ftpIdleTimeout))
 		if !scanner.Scan() {
+			if errors.Is(scanner.Err(), os.ErrDeadlineExceeded) {
+				conn.SetWriteDeadline(time.Now().Add(time.Second)) // the old deadline has passed
+				reply("421 Timeout.")                              // like vsftpd (ftpcmdio.c)
+			}
 			return
 		}
 

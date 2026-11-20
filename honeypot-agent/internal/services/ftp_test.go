@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"slices"
 	"testing"
@@ -147,4 +148,32 @@ func TestFTPSession(t *testing.T) {
 	if !slices.Equal(commands, want) {
 		t.Errorf("command_exec: %q\n           want %q", commands, want)
 	}
+}
+
+// After vsftpd's idle timeout (300s, shortened here) the server says "421 Timeout." and hangs up.
+func TestFTPIdleTimeout(t *testing.T) {
+	old := ftpIdleTimeout
+	ftpIdleTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { ftpIdleTimeout = old })
+
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleFTP(c, "ftp-test", s) })
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	all, err := io.ReadAll(conn) // say nothing and wait until the server hangs up
+	if err != nil {
+		t.Fatalf("the server did not hang up: %v", err)
+	}
+	if string(all) != "220 (vsFTPd 3.0.3)\r\n421 Timeout.\r\n" {
+		t.Errorf("got %q", all)
+	}
+	waitDone(t, done)
+	checkSession(t, parseEvents(t, out.String()), "FTP", 21)
 }
