@@ -24,6 +24,7 @@ flowchart LR
   - Four fake services with one consistent persona, a router called `gateway`: SSH (Dropbear), Telnet (BusyBox), FTP (vsFTPd) and HTTP (a lighttpd login page).
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
   - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout.
+  - It limits what one attacker can do: at most 200 connections per service and 10 per IP. The web server answers like a slow router, in 200 to 300 ms, which keeps a web flood under about 1000 events per second (50 per IP), so the events of the other services still get through.
   - On shutdown (`docker stop`, a server reboot, an update), it stops accepting connections, ends the open sessions and delivers its last events before it exits, usually within a second.
 - **threat-engine:**
   - Receives the events (`POST /api/events`, protected by a token) and evaluates each one in real time. It flags successful logins, brute force, download attempts, dangerous commands and malicious HTTP paths, with severities from LOW to CRITICAL.
@@ -196,12 +197,12 @@ In `http` mode, each loop acts as one bot after another. A bot opens a connectio
 - passwords in the URL (`/login.cgi?user=...&pwd=...`);
 - scanner and exploit paths (`/.env`, path traversal, SQL injection, a Log4Shell probe, command injection).
 
-User names, passwords and user agents vary. The payloads are harmless: every address in them is in `203.0.113.0/24`, a range reserved for documentation. The generator also checks each answer against what the agent should send (200, 401 or the 404 page). The line looks like `http 25s: requests=9347 (374/s) logins=7043 unexpected=0 errors=12`:
+User names, passwords and user agents vary. The payloads are harmless: every address in them is in `203.0.113.0/24`, a range reserved for documentation. The generator also checks each answer against what the agent should send (200, 401 or the 404 page). The line looks like `http 25s: requests=1040 (42/s) logins=790 unexpected=0 errors=0`. About 42 requests per second per copy is the expected rate: each copy has 10 connections and the agent takes 200 to 300 ms per answer. The fields:
 
 - `requests`: answered requests. The agent logs each one, so the sum over all copies equals the number of HTTP events it wrote;
 - `logins`: the answered requests that carried a password (`login_attempt` events);
 - `unexpected`: answers with a different status than the agent should send. It must be 0; otherwise the first one is printed;
-- `errors`: requests without an answer, with the first error printed (usually `connection reset by peer` or `EOF`). With 20 copies at full speed, 10 to 20 percent is normal: a bot reconnects before the agent has freed its previous connection, so the 10-per-IP limit refuses it.
+- `errors`: requests without an answer, with the first error printed. It should be 0. `connection reset by peer` or `EOF` means the agent refused a connection because of its 10-per-IP limit.
 
 Watch the agent with `docker stats` in another terminal. The generated sessions are recorded like real attacks, from `172.x` addresses, so they show up on the dashboard. Do not run the generator on a production sensor.
 

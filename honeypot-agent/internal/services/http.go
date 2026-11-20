@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,9 @@ import (
 
 // sessionKey is the context key under which ConnContext stores a connection's session_id.
 type sessionKey struct{}
+
+// httpDelay is the shortest time the router takes to answer a request (see the handler).
+const httpDelay = 200 * time.Millisecond
 
 // The field names read as credentials, in a form body or in the URL. The password is kept out of
 // raw_data and http_path: it goes only in credentials.
@@ -93,6 +97,12 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		}
 
 		shipper.EmitEvent(event)
+
+		// A cheap router is slow: every answer takes 200-300ms (random, like a real device). This also
+		// caps a flood: a request keeps its connection busy that long and there are at most 200
+		// connections (10 per IP, limit.go), so at most 200 / 0.2s = 1000 events/s (50/s per IP), which
+		// the shipper can deliver. Without it, one fast scanner made 4000 events/s and most were lost.
+		time.Sleep(httpDelay + rand.N(httpDelay/2))
 
 		// Like lighttpd with the vendor's lighttpd.conf (vfs/web.go): only the files in /var/www exist
 		// (a fake that answers 200 to any path is a classic tell), login.cgi is a program.

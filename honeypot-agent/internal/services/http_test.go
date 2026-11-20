@@ -97,6 +97,8 @@ func TestHTTP(t *testing.T) {
 		return resp, string(body)
 	}
 
+	start := time.Now() // every answer takes at least httpDelay: checked after the 9 requests
+
 	// 1. a scanner looking for a path that doesn't exist -> lighttpd's own 404 page
 	req, _ := http.NewRequest("GET", "http://"+addr+"/cgi-bin/luci?x=1", nil)
 	req.Header.Set("User-Agent", "zgrab/0.x")
@@ -155,6 +157,10 @@ func TestHTTP(t *testing.T) {
 		if resp, _ = do(req); resp.StatusCode != 404 {
 			t.Errorf("GET %s: %d (expected 404)", p, resp.StatusCode)
 		}
+	}
+	// the slow answers are what caps an HTTP flood (see RunHTTP): all kinds of requests, not only logins
+	if took := time.Since(start); took < 9*httpDelay {
+		t.Errorf("9 requests took %v: every answer should take at least %v", took, httpDelay)
 	}
 
 	cancel() // like SIGTERM: RunHTTP must return nil
