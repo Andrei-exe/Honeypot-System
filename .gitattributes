@@ -1,0 +1,4 @@
+# Files that run on the Linux server keep LF line endings, even in a Windows checkout
+# (core.autocrlf=true would turn them into CRLF, and sh fails with "$'\r': command not found").
+*.sh      text eol=lf
+*.service text eol=lf
