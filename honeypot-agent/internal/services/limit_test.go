@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// One IP can't hold more than maxConnsPerIP connections at once; closing one frees a slot.
+// One IP can't hold more than maxConnsPerIP connections at once; closing one frees its slot,
+// but only minSlotTime after it was accepted.
 func TestPerIPLimit(t *testing.T) {
 	raw, err := net.Listen("tcp", "127.0.0.1:0") // :0 = any free port
 	if err != nil {
@@ -31,6 +32,7 @@ func TestPerIPLimit(t *testing.T) {
 	}()
 
 	// open maxConnsPerIP + 1 connections from 127.0.0.1
+	start := time.Now() // before any Accept
 	var clients []net.Conn
 	for i := 0; i < maxConnsPerIP+1; i++ {
 		c, err := net.Dial("tcp", raw.Addr().String())
@@ -50,6 +52,7 @@ func TestPerIPLimit(t *testing.T) {
 			t.Fatalf("only %d of %d connections were accepted", i, maxConnsPerIP)
 		}
 	}
+	allAccepted := time.Now() // after every Accept
 
 	// the last connection must be closed by the server: reading gives EOF
 	last := clients[len(clients)-1]
@@ -63,8 +66,27 @@ func TestPerIPLimit(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// close one -> a new connection must get in
+	// close one -> right away its slot is still taken: a new connection is refused...
 	serverSide[0].Close()
+	if time.Since(start) < minSlotTime/2 { // (checked only when there is time left for it)
+		early, err := net.Dial("tcp", raw.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer early.Close()
+		early.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := early.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("a connection right after Close should be refused (EOF), got: %v", err)
+		}
+		select {
+		case <-accepted:
+			t.Fatal("the slot was freed before minSlotTime: connecting and closing in a loop is not limited")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// ...and minSlotTime after Accept a new connection must get in
+	time.Sleep(time.Until(allAccepted.Add(minSlotTime)) + 50*time.Millisecond)
 	c, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +128,21 @@ func TestDoubleCloseReleasesOnce(t *testing.T) {
 	conn.Close()
 	if l.total != 0 || len(l.perIP) != 0 {
 		t.Fatalf("after 2x Close: total=%d, perIP=%v (should be 0 and empty)", l.total, l.perIP)
+	}
+
+	// closed before minSlotTime: the slot is freed later (by a timer), and still only once
+	l.acquire("1.2.3.4")
+	a2, b2 := net.Pipe()
+	defer b2.Close()
+	conn = &limitedConn{Conn: a2, release: func() { l.release("1.2.3.4") }, accepted: time.Now()}
+	conn.Close()
+	conn.Close()
+	time.Sleep(minSlotTime + 100*time.Millisecond)
+	l.mu.Lock() // the timer's goroutine wrote these: read them under the mutex
+	total, perIP := l.total, len(l.perIP)
+	l.mu.Unlock()
+	if total != 0 || perIP != 0 {
+		t.Fatalf("2x Close before minSlotTime: total=%d, %d IPs (should be 0 and 0)", total, perIP)
 	}
 }
 

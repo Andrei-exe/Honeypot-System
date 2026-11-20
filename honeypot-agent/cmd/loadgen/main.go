@@ -326,7 +326,11 @@ func runHTTP(d time.Duration) {
 					if err != nil {
 						errs.Add(1) // no answer: the agent refused the connection (limit), timeout...
 						errOnce.Do(func() { firstErr = err.Error() })
-						continue
+						// like a bot: give up this visit and wait before coming back. Without the
+						// pause the loop would retry thousands of times a second (measured: 227k
+						// refused connections in 10s from 20 copies, the agent busy just refusing)
+						time.Sleep(time.Second)
+						break
 					}
 					// answered = the agent logged it: the sum over all copies = its number of HTTP events
 					requests.Add(1)

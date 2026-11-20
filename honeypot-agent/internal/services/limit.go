@@ -11,6 +11,7 @@ import (
 const (
 	maxConnsPerService = 200              // max open connections per service
 	maxConnsPerIP      = 10               // ...of which at most this many from one IP
+	minSlotTime        = time.Second      // a connection's slot stays taken at least this long (see Close)
 	maxAcceptDelay     = time.Second      // max pause after repeated Accept errors
 	limitLogEvery      = 10 * time.Second // log about limits at most this often
 )
@@ -63,7 +64,7 @@ func (l *limitListener) Accept() (net.Conn, error) {
 			conn.Close()
 			continue
 		}
-		return &limitedConn{Conn: conn, release: func() { l.release(ip) }}, nil
+		return &limitedConn{Conn: conn, release: func() { l.release(ip) }, accepted: time.Now()}, nil
 	}
 }
 
@@ -103,14 +104,26 @@ func (l *limitListener) logRarely(format string, args ...any) {
 // limitedConn is a net.Conn that frees its limit slot when closed.
 type limitedConn struct {
 	net.Conn
-	once    sync.Once
-	release func()
+	once     sync.Once
+	release  func()
+	accepted time.Time // when Accept let it in (zero = long ago: the slot is freed right away)
 }
 
 // Close may be called more than once (on SSH both the library and our defer close the conn).
 // sync.Once releases the slot exactly once, otherwise the counters would go negative.
+//
+// A slot is freed only minSlotTime after Accept, even if the client left sooner. Otherwise a bot
+// connecting and closing in a loop makes hundreds of sessions a second (2 events each, measured:
+// 1300 events/s from one IP on Telnet) and buries the other events. Now at most maxConnsPerIP new
+// connections per second per IP, maxConnsPerService per service. Longer sessions see no change.
 func (c *limitedConn) Close() error {
-	c.once.Do(c.release)
+	c.once.Do(func() {
+		if wait := minSlotTime - time.Since(c.accepted); wait > 0 {
+			time.AfterFunc(wait, c.release) // runs c.release in its own goroutine after wait
+		} else {
+			c.release()
+		}
+	})
 	return c.Conn.Close()
 }
 
