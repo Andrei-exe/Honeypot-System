@@ -5,9 +5,6 @@ import (
 	"time"
 )
 
-// Banner is shown right after login (both Telnet and SSH).
-const Banner = "\nBusyBox v1.30.1 built-in shell (ash)\n\n"
-
 // Shell is the fake shell of ONE connection. Every attacker gets a new one (NewShell),
 // so their current directory and files are invisible to other attackers.
 type Shell struct {

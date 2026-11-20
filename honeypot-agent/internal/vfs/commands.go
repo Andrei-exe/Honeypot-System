@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -38,7 +39,7 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	case "busybox":
 		// "busybox wget ..." = "wget ..." (on routers every command is a busybox applet)
 		if len(args) == 0 {
-			return "BusyBox v1.30.1 multi-call binary.\n", 0, false
+			return busyboxHelp(), 0, false
 		}
 		out, code, exit := s.command(args, input)
 		if code == 127 {
@@ -106,20 +107,65 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	return "-sh: " + name + ": not found\n", 127, false
 }
 
-// uname answers the flags bots usually ask for.
+// busyboxHelp is what "busybox" alone prints: BusyBox 1.30.1's text (libbb/appletlib.c, with
+// Buildroot's config) and the applets, wrapped like BusyBox does for an 80-column terminal.
+func busyboxHelp() string {
+	var names []string
+	for _, a := range applets {
+		names = append(names, a.names...)
+	}
+	sort.Strings(names)
+
+	var out strings.Builder
+	out.WriteString(busyboxBanner + " multi-call binary.\n" +
+		"BusyBox is copyrighted by many authors between 1998-2015.\n" +
+		"Licensed under GPLv2. See source distribution for detailed\n" +
+		"copyright notices.\n\n" +
+		"Usage: busybox [function [arguments]...]\n" +
+		"   or: busybox --list[-full]\n" +
+		"   or: busybox --install [-s] [DIR]\n" +
+		"   or: function [arguments]...\n\n" +
+		"\tBusyBox is a multi-call binary that combines many common Unix\n" +
+		"\tutilities into a single executable.  Most people will create a\n" +
+		"\tlink to busybox for each function they wish to use and BusyBox\n" +
+		"\twill act like whatever it was invoked as.\n\n" +
+		"Currently defined functions:\n")
+	col := 0
+	for _, name := range names {
+		if col >= 79-(len(name)+2) { // the line would get too long: wrap
+			out.WriteString(",\n")
+			col = 0
+		}
+		if col == 0 {
+			out.WriteString("\t")
+			col = 6 // BusyBox counts the tab as 6
+		} else {
+			out.WriteString(", ")
+		}
+		out.WriteString(name)
+		col += len(name) + 2
+	}
+	return out.String() + "\n"
+}
+
+// uname answers the flags bots usually ask for; -a agrees with /proc/version.
 func uname(args []string) string {
 	if len(args) == 0 {
 		return "Linux\n"
 	}
 	switch args[0] {
 	case "-a":
-		return "Linux gateway 4.14.180 #1 SMP armv7l GNU/Linux\n"
+		return "Linux gateway " + kernelRelease + " " + kernelVersion + " armv7l GNU/Linux\n"
 	case "-m":
 		return "armv7l\n" // bots ask this to pick which binary to download
 	case "-r":
-		return "4.14.180\n"
+		return kernelRelease + "\n"
+	case "-v":
+		return kernelVersion + "\n"
 	case "-n":
 		return "gateway\n"
+	case "-o":
+		return "GNU/Linux\n"
 	}
 	return "Linux\n"
 }

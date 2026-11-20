@@ -16,6 +16,16 @@ const maxSize = 16 * 1024
 // these bytes to learn the architecture (0x28 = ARM), then download the matching binary.
 const elfHeader = "\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00\x01\x00\x00\x00"
 
+// The firmware's identity: built with Buildroot 2019.05.3 (the release that has exactly our
+// BusyBox, Dropbear, uClibc-ng, vsftpd and lighttpd) on Jun 4 2020. /proc/version, uname -a,
+// the boot log and busybox must agree; the kernel's date pads the day like date does: "Jun  4".
+const (
+	kernelRelease = "4.14.180"
+	kernelVersion = "#1 SMP Thu Jun  4 12:00:00 UTC 2020"
+	linuxVersion  = "Linux version " + kernelRelease + " (builder@buildhost) (gcc version 8.3.0 (Buildroot 2019.05.3)) " + kernelVersion
+	busyboxBanner = "BusyBox v1.30.1 (2020-06-04 12:00:00 UTC)"
+)
+
 // firmwareTime is when the firmware was built (the date in /proc/version). ls -l shows it for
 // every built-in file, except those on the in-memory filesystems (see mtime in ls.go).
 var firmwareTime = time.Date(2020, time.June, 4, 12, 0, 0, 0, time.UTC)
@@ -32,7 +42,7 @@ var now = time.Now
 var fakeDirs = map[string]bool{
 	"/": true, "/bin": true, "/dev": true, "/dev/shm": true, "/etc": true,
 	"/lib": true, "/mnt": true, "/proc": true, "/root": true, "/sbin": true,
-	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/sbin": true,
+	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/sbin": true,
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 }
 
@@ -59,6 +69,7 @@ func makeLinks() map[string]string {
 		// the C library (uClibc-ng, common on cheap routers): short names -> the versioned file
 		"/lib/ld-uClibc.so.0": "ld-uClibc-1.0.31.so",
 		"/lib/libc.so.0":      "libuClibc-1.0.31.so",
+		"/etc/os-release":     "../usr/lib/os-release", // Buildroot makes exactly this link
 	}
 	for _, a := range applets {
 		for _, name := range a.names {
@@ -96,6 +107,13 @@ var fakeFiles = map[string]string{
 	"/var/run/dropbear.pid": "341\n", // ps: dropbear -P /var/run/dropbear.pid, PID 341
 	"/var/log/messages":     bootLog(),
 
+	// what Buildroot writes in os-release (its Makefile, target-finalize)
+	"/usr/lib/os-release": "NAME=Buildroot\nVERSION=2019.05.3\nID=buildroot\nVERSION_ID=2019.05.3\n" +
+		"PRETTY_NAME=\"Buildroot 2019.05.3\"\n",
+	// the vendor's profile: the PS1 here is why the prompt is root@gateway:~# (Buildroot's own is "# ")
+	"/etc/profile":   "export PATH=/bin:/sbin:/usr/bin:/usr/sbin\n" + `export PS1='\u@\h:\w\$ '` + "\n",
+	"/etc/issue.net": "Gateway Linux 4.14\n", // telnetd shows it before "gateway login:"
+
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
 	"/etc/resolv.conf": "nameserver 192.168.1.1\n",
@@ -114,7 +132,7 @@ var fakeFiles = map[string]string{
 		"user:$1$Zx8cV2bN$Mk1lO3pI5uY7tR9eW0qA2.:18417:0:99999:7:::\n" +
 		"nobody:*:0:0:99999:7:::\n",
 
-	"/proc/version": "Linux version 4.14.180 (builder@buildhost) (gcc version 8.4.0) #1 SMP Thu Jun 4 12:00:00 UTC 2020\n",
+	"/proc/version": linuxVersion + "\n",
 	"/proc/meminfo": meminfo(),
 	"/proc/cpuinfo": "processor\t: 0\n" +
 		"model name\t: ARMv7 Processor rev 5 (v7l)\n" +
@@ -171,7 +189,7 @@ func bootLog() string {
 		text   string
 	}{
 		{0, "syslog.info syslogd started: BusyBox v1.30.1"},
-		{0, "kern.notice kernel: [    0.000000] Linux version 4.14.180 (builder@buildhost) (gcc version 8.4.0) #1 SMP Thu Jun 4 12:00:00 UTC 2020"},
+		{0, "kern.notice kernel: [    0.000000] " + linuxVersion},
 		{0, "kern.info kernel: [    0.000000] CPU: ARMv7 Processor [410fc075] revision 5 (ARMv7), cr=10c5387d"},
 		{0, "kern.info kernel: [    0.000000] Memory: 123496K/131072K available (5120K kernel code, 380K rwdata, 1344K rodata, 1024K init, 260K bss, 7576K reserved, 0K cma-reserved)"},
 		{0, "kern.info kernel: [    3.512214] eth0: link up (1000Mbps/Full duplex)"},

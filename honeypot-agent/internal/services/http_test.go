@@ -100,7 +100,7 @@ func TestHTTP(t *testing.T) {
 	req, _ := http.NewRequest("GET", "http://"+addr+"/cgi-bin/luci?x=1", nil)
 	req.Header.Set("User-Agent", "zgrab/0.x")
 	resp, body := do(req)
-	if resp.StatusCode != 200 || resp.Header.Get("Server") != "lighttpd/1.4.55" ||
+	if resp.StatusCode != 200 || resp.Header.Get("Server") != "lighttpd/1.4.53" ||
 		!strings.Contains(body, "Gateway Router") || resp.Header.Get("WWW-Authenticate") != "" {
 		t.Errorf("GET: %d, Server %q, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("Server"), resp.Header.Get("WWW-Authenticate"))
 	}

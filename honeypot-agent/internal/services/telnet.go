@@ -122,8 +122,8 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	}
 
 	// ---------- Phase 2: fake shell ----------
+	// no banner: Buildroot builds BusyBox's shell "quiet" (FEATURE_SH_EXTRA_QUIET), the prompt comes right away
 	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
-	fmt.Fprint(conn, toCRLF(vfs.Banner))
 	for i := 0; i < telnetMaxCommands; i++ {
 		fmt.Fprint(conn, sh.Prompt())
 		line, err := reader.readLine()

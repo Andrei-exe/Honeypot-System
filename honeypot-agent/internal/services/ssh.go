@@ -196,8 +196,7 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 
 	// term.Terminal handles echo, backspace and arrow keys (with a pty the client doesn't
 	// echo what it types, the server must send it back). It also turns \n into \r\n.
-	terminal := term.NewTerminal(channel, sh.Prompt())
-	fmt.Fprint(terminal, vfs.Banner)
+	terminal := term.NewTerminal(channel, sh.Prompt()) // no banner, like telnet.go
 
 	for i := 0; i < sshMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))

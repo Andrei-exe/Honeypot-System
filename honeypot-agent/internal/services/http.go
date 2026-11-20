@@ -80,7 +80,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 
 		shipper.EmitEvent(event)
 
-		w.Header().Set("Server", "lighttpd/1.4.55")
+		w.Header().Set("Server", "lighttpd/1.4.53") // the version in Buildroot 2019.05.3 (see vfs/fs.go)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if isBasic {
 			// ask for Basic Auth only from clients that already sent it

