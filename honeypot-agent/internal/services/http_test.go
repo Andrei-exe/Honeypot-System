@@ -96,13 +96,15 @@ func TestHTTP(t *testing.T) {
 		return resp, string(body)
 	}
 
-	// 1. a scanner looking around
+	// 1. a scanner looking for a path that doesn't exist -> lighttpd's own 404 page
 	req, _ := http.NewRequest("GET", "http://"+addr+"/cgi-bin/luci?x=1", nil)
 	req.Header.Set("User-Agent", "zgrab/0.x")
 	resp, body := do(req)
-	if resp.StatusCode != 200 || resp.Header.Get("Server") != "lighttpd/1.4.53" ||
-		!strings.Contains(body, "Gateway Router") || resp.Header.Get("WWW-Authenticate") != "" {
-		t.Errorf("GET: %d, Server %q, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("Server"), resp.Header.Get("WWW-Authenticate"))
+	if resp.StatusCode != 404 || resp.Header.Get("Server") != "lighttpd/1.4.53" ||
+		resp.Header.Get("Content-Type") != "text/html" || resp.Header.Get("WWW-Authenticate") != "" ||
+		!strings.Contains(body, "<title>404 Not Found</title>") || len(body) != 341 {
+		t.Errorf("GET unknown path: %d, Server %q, Content-Type %q, %d bytes: %q", resp.StatusCode,
+			resp.Header.Get("Server"), resp.Header.Get("Content-Type"), len(body), body)
 	}
 
 	// 2. the login form
@@ -114,21 +116,30 @@ func TestHTTP(t *testing.T) {
 		t.Errorf("form login: %d, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
 
-	// 3. Basic Auth -> only now we answer with WWW-Authenticate
+	// 3. Basic Auth -> only now we answer with WWW-Authenticate (and lighttpd's 401 page)
 	req, _ = http.NewRequest("GET", "http://"+addr+"/", nil)
 	req.SetBasicAuth("root", "xc3511")
-	resp, _ = do(req)
-	if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != `Basic realm="Gateway"` {
+	resp, body = do(req)
+	if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != `Basic realm="Gateway"` ||
+		!strings.Contains(body, "<h1>401 Unauthorized</h1>") {
 		t.Errorf("Basic Auth: %d, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
 
-	// 4. another client = another TCP connection = another session
-	other := &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
-	resp, err = other.Get("http://" + addr + "/")
-	if err != nil {
-		t.Fatal(err)
+	// 4-6. another client = another TCP connection = another session
+	client = &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
+	req, _ = http.NewRequest("GET", "http://"+addr+"/", nil)
+	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, "Gateway Router") {
+		t.Errorf("GET /: %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	// the password in the URL (IoT exploits): a login_attempt, even on a path that doesn't exist
+	req, _ = http.NewRequest("GET", "http://"+addr+"/login.cgi?user=admin&pwd=s3cr3t&lang=en", nil)
+	if resp, _ = do(req); resp.StatusCode != 404 {
+		t.Errorf("GET /login.cgi: %d (expected 404)", resp.StatusCode)
+	}
+	req, _ = http.NewRequest("GET", "http://"+addr+"/index.html", nil)
+	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, "Gateway Router") {
+		t.Errorf("GET /index.html: %d", resp.StatusCode)
+	}
 
 	cancel() // like SIGTERM: RunHTTP must return nil
 	select {
@@ -142,8 +153,8 @@ func TestHTTP(t *testing.T) {
 
 	// RunHTTP has returned = every request handler has finished, so out is complete
 	events := parseEvents(t, out.String())
-	if len(events) != 4 {
-		t.Fatalf("%d events (expected 4): %+v", len(events), events)
+	if len(events) != 6 {
+		t.Fatalf("%d events (expected 6): %+v", len(events), events)
 	}
 	for _, e := range events {
 		if e.Protocol != "HTTP" || e.TargetPort != 80 || e.SourceIP != "127.0.0.1" {
@@ -156,8 +167,8 @@ func TestHTTP(t *testing.T) {
 	if len(first) != 16 || events[1].SessionID != first || events[2].SessionID != first {
 		t.Errorf("same connection, session_ids %q %q %q (expected one, 16 hex)", first, events[1].SessionID, events[2].SessionID)
 	}
-	if id := events[3].SessionID; len(id) != 16 || id == first {
-		t.Errorf("new connection, session_id %q (expected a new one, not %q)", id, first)
+	if id := events[3].SessionID; len(id) != 16 || id == first || events[4].SessionID != id || events[5].SessionID != id {
+		t.Errorf("new connection, session_ids %q %q %q (expected one new id, not %q)", id, events[4].SessionID, events[5].SessionID, first)
 	}
 
 	if e := events[0]; e.EventType != "http_request" || e.Credentials != nil ||
@@ -177,5 +188,13 @@ func TestHTTP(t *testing.T) {
 	if e := events[2]; e.EventType != "login_attempt" ||
 		e.Credentials.Username != "root" || e.Credentials.Password != "xc3511" || e.Credentials.Success {
 		t.Errorf("Basic Auth event: %+v %+v", e, e.Credentials)
+	}
+	// the password from the URL: in credentials, cut out of http_path (the rest stays as sent)
+	if e := events[4]; e.EventType != "login_attempt" || e.Credentials.Username != "admin" ||
+		e.Credentials.Password != "s3cr3t" || e.PayloadDetails.HTTPPath != "/login.cgi?user=admin&lang=en" {
+		t.Errorf("URL login event: %+v %+v %+v", e, e.Credentials, e.PayloadDetails)
+	}
+	if e := events[5]; e.EventType != "http_request" || e.PayloadDetails.HTTPPath != "/index.html" {
+		t.Errorf("GET /index.html event: %+v %+v", e, e.PayloadDetails)
 	}
 }

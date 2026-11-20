@@ -22,8 +22,16 @@ import (
 // sessionKey is the context key under which ConnContext stores a connection's session_id.
 type sessionKey struct{}
 
-// passwordFields are the form fields read as the password; they are kept out of raw_data.
-var passwordFields = []string{"password", "pass", "pwd"}
+// The field names read as credentials, in a form body or in the URL. The password is kept out of
+// raw_data and http_path: it goes only in credentials.
+var (
+	userFields     = []string{"username", "log", "user"}
+	passwordFields = []string{"password", "pass", "pwd"}
+)
+
+// pages are the paths that exist: the login page and its form's target. Every other path gets
+// lighttpd's 404, like a real server (a fake that answers 200 to anything is a classic tell).
+var pages = map[string]bool{"/": true, "/index.html": true, "/login": true}
 
 // RunHTTP serves a fake router login page (lighttpd) and logs every request, until ctx is cancelled.
 // Submitted credentials are logged as login_attempt and always rejected.
@@ -56,12 +64,21 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			},
 		}
 
-		// credentials from a login form (common field names) or from Basic Auth
-		values, _ := url.ParseQuery(string(body))
-		user := formValue(values, "username", "log", "user")
-		pass := formValue(values, passwordFields...)
-		if pass != "" {
-			event.PayloadDetails.RawData = withoutPasswords(string(body)) // the password goes only in credentials
+		// credentials from a login form, from the URL (GET /login.cgi?user=admin&pwd=admin, common
+		// in IoT exploits) or from Basic Auth
+		form, _ := url.ParseQuery(string(body))
+		query := r.URL.Query()
+		user, pass := formValue(form, userFields...), formValue(form, passwordFields...)
+		switch {
+		case pass != "":
+			event.PayloadDetails.RawData = withoutPasswords(string(body))
+		case formValue(query, passwordFields...) != "":
+			user, pass = formValue(query, userFields...), formValue(query, passwordFields...)
+			path := r.URL.EscapedPath() // = http_path without the password
+			if rest := withoutPasswords(r.URL.RawQuery); rest != "" {
+				path += "?" + rest
+			}
+			event.PayloadDetails.HTTPPath = path
 		}
 
 		basicUser, basicPass, isBasic := r.BasicAuth()
@@ -82,16 +99,24 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 
 		w.Header().Set("Server", "lighttpd/1.4.53") // the version in Buildroot 2019.05.3 (see vfs/fs.go)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if isBasic {
-			// ask for Basic Auth only from clients that already sent it
+		switch {
+		case isBasic:
+			// ask for Basic Auth only from clients that already sent it. Any path: lighttpd checks
+			// the login (mod_auth) before it looks for the file, and answers with its own page.
 			w.Header().Set("WWW-Authenticate", `Basic realm="Gateway"`)
-		}
-		if event.EventType == "login_attempt" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, lighttpdErrorPage("401 Unauthorized"))
+		case !pages[r.URL.Path]:
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, lighttpdErrorPage("404 Not Found"))
+		case event.EventType == "login_attempt":
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprint(w, fakeLoginPage(true))
-			return
+		default:
+			fmt.Fprint(w, fakeLoginPage(false))
 		}
-		fmt.Fprint(w, fakeLoginPage(false))
 	}
 
 	// timeouts so slow clients can't hold connections open forever
@@ -154,6 +179,23 @@ func withoutPasswords(body string) string {
 		}
 	}
 	return strings.Join(kept, "&")
+}
+
+// lighttpdErrorPage is the page lighttpd 1.4.53 builds itself for an error (src/connections.c), for
+// a status like "404 Not Found" (its text from http_kv.c; older versions had "404 - Not Found").
+func lighttpdErrorPage(status string) string {
+	return `<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+         "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+ <head>
+  <title>` + status + `</title>
+ </head>
+ <body>
+  <h1>` + status + `</h1>
+ </body>
+</html>
+`
 }
 
 // fakeLoginPage returns the router login HTML; showError adds the "Invalid username or password" line.
