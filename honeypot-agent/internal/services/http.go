@@ -17,6 +17,7 @@ import (
 
 	"honeypot-agent/internal/models"
 	"honeypot-agent/internal/shipper"
+	"honeypot-agent/internal/vfs"
 )
 
 // sessionKey is the context key under which ConnContext stores a connection's session_id.
@@ -28,10 +29,6 @@ var (
 	userFields     = []string{"username", "log", "user"}
 	passwordFields = []string{"password", "pass", "pwd"}
 )
-
-// pages are the paths that exist: the login page and its form's target. Every other path gets
-// lighttpd's 404, like a real server (a fake that answers 200 to anything is a classic tell).
-var pages = map[string]bool{"/": true, "/index.html": true, "/login": true}
 
 // RunHTTP serves a fake router login page (lighttpd) and logs every request, until ctx is cancelled.
 // Submitted credentials are logged as login_attempt and always rejected.
@@ -97,25 +94,28 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 
 		shipper.EmitEvent(event)
 
+		// Like lighttpd with the vendor's lighttpd.conf (vfs/web.go): only the files in /var/www exist
+		// (a fake that answers 200 to any path is a classic tell), login.cgi is a program.
 		w.Header().Set("Server", "lighttpd/1.4.53") // the version in Buildroot 2019.05.3 (see vfs/fs.go)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Type", "text/html") // mimetype.assign for .html; the CGI says the same
+		file, exists := vfs.WebFile(r.URL.Path)
 		switch {
 		case isBasic:
 			// ask for Basic Auth only from clients that already sent it. Any path: lighttpd checks
 			// the login (mod_auth) before it looks for the file, and answers with its own page.
 			w.Header().Set("WWW-Authenticate", `Basic realm="Gateway"`)
-			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprint(w, lighttpdErrorPage("401 Unauthorized"))
-		case !pages[r.URL.Path]:
-			w.Header().Set("Content-Type", "text/html")
+		case !exists:
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, lighttpdErrorPage("404 Not Found"))
 		case event.EventType == "login_attempt":
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, fakeLoginPage(true))
+			w.WriteHeader(http.StatusUnauthorized) // what login.cgi answers to a wrong password
+			fmt.Fprint(w, vfs.LoginPage(true))
+		case strings.HasSuffix(r.URL.Path, ".cgi"):
+			fmt.Fprint(w, vfs.LoginPage(false)) // login.cgi without a password shows the form
 		default:
-			fmt.Fprint(w, fakeLoginPage(false))
+			fmt.Fprint(w, file) // a static file (index.html), exactly as it is in the filesystem
 		}
 	}
 
@@ -196,39 +196,4 @@ func lighttpdErrorPage(status string) string {
  </body>
 </html>
 `
-}
-
-// fakeLoginPage returns the router login HTML; showError adds the "Invalid username or password" line.
-func fakeLoginPage(showError bool) string {
-	errorHTML := ""
-	if showError {
-		errorHTML = `<p style="color: #ff4d4d; font-size: 14px;">Invalid username or password</p>`
-	}
-
-	return fmt.Sprintf(`<!DOCTYPE html>
-		<html>
-		<head>
-			<title>Gateway - Login</title>
-			<style>
-				body { font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-				.box { background: #2a2a2a; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 300px; }
-				h2 { margin-top: 0; font-size: 20px; border-bottom: 1px solid #444; padding-bottom: 10px; }
-				input { width: 100%%; padding: 10px; margin: 8px 0; box-sizing: border-box; background: #333; border: 1px solid #555; color: #fff; border-radius: 4px; }
-				button { width: 100%%; padding: 10px; background: #ff793b; border: none; color: white; font-weight: bold; border-radius: 4px; cursor: pointer; margin-top: 10px; }
-				button:hover { background: #cc6225; }
-			</style>
-		</head>
-		<body>
-			<div class="box">
-				<h2>Gateway Router</h2>
-				<p style="color: #aaa; font-size: 13px; margin-top: 0;">Please log in to manage your router.</p>
-				%s
-				<form method="POST" action="/login">
-					<input type="text" name="username" placeholder="Username" required>
-					<input type="password" name="password" placeholder="Password" required>
-					<button type="submit">Log In</button>
-				</form>
-			</div>
-		</body>
-		</html>`, errorHTML)
 }

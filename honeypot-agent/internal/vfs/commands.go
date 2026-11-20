@@ -14,6 +14,7 @@ const fakePS = `  PID USER       VSZ STAT COMMAND
   289 root      1032 S    /sbin/syslogd -n
   291 root      1032 S    /sbin/klogd -n
   341 root      1124 S    /usr/sbin/dropbear -F -P /var/run/dropbear.pid -p 22
+  349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf
   356 root      1032 S    /usr/sbin/telnetd -F -l /bin/login
   402 root      1208 S    /usr/sbin/vsftpd
   517 root      1300 S    -sh
@@ -100,6 +101,15 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 
 	// Everything else is "not found", like on a real BusyBox: also curl and Mirai's probes for a
 	// vendor CLI (enable, system, shell, linuxshell), which Mirai sends without reading the answer.
+
+	// a program in PATH that isn't an applet (dropbear, vsftpd, lighttpd) "runs" silently too
+	if !strings.Contains(name, "/") {
+		for _, dir := range []string{"/bin", "/sbin", "/usr/bin", "/usr/sbin"} {
+			if _, ok := fakeFiles[dir+"/"+name]; ok {
+				return "", 0, false
+			}
+		}
+	}
 
 	// ./bot or /tmp/x: if the file exists it "runs" silently (like malware started in the background)
 	if strings.Contains(name, "/") {

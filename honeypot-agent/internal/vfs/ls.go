@@ -221,7 +221,8 @@ func (s *Shell) mtime(p string) time.Time {
 	if t, ok := s.mtimes[p]; ok {
 		return t
 	}
-	for _, dir := range []string{"/dev", "/proc", "/sys", "/tmp", "/var"} {
+	// in-memory filesystems; /var itself is on the firmware (its www), only log, run and tmp are not
+	for _, dir := range []string{"/dev", "/proc", "/sys", "/tmp", "/var/log", "/var/run", "/var/tmp"} {
 		if under(p, dir) {
 			return bootTime
 		}

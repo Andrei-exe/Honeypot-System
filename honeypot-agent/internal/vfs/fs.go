@@ -43,6 +43,7 @@ var now = time.Now
 // /tmp, /var/run, /mnt or /dev/shm to drop their binary, so all of these must exist.
 var fakeDirs = map[string]bool{
 	"/": true, "/bin": true, "/dev": true, "/dev/shm": true, "/etc": true, "/etc/dropbear": true,
+	"/etc/lighttpd": true, "/usr/lib/lighttpd": true, "/var/www": true,
 	"/lib": true, "/mnt": true, "/proc": true, "/root": true, "/sbin": true,
 	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/sbin": true,
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
@@ -90,6 +91,14 @@ var binarySizes = map[string]int{
 	"/lib/ld-uClibc-1.0.31.so": 28324,
 	"/lib/libuClibc-1.0.31.so": 334688,
 	"/lib/libgcc_s.so.1":       58640,
+
+	"/usr/sbin/lighttpd":                  203512,
+	"/var/www/login.cgi":                  13764,
+	"/usr/lib/lighttpd/mod_access.so":     5328,
+	"/usr/lib/lighttpd/mod_cgi.so":        22968,
+	"/usr/lib/lighttpd/mod_dirlisting.so": 21456,
+	"/usr/lib/lighttpd/mod_indexfile.so":  4912,
+	"/usr/lib/lighttpd/mod_staticfile.so": 9632,
 }
 
 // fakeFiles exist from the start: path -> content (read-only, shared by all sessions).
@@ -104,9 +113,21 @@ var fakeFiles = map[string]string{
 	"/lib/libuClibc-1.0.31.so": elfHeader,
 	"/lib/libgcc_s.so.1":       elfHeader,
 
+	// the web server (ps: lighttpd -f /etc/lighttpd/lighttpd.conf), its modules and its site
+	"/usr/sbin/lighttpd":                  elfHeader,
+	"/usr/lib/lighttpd/mod_access.so":     elfHeader, // the 2 modules in lighttpd.conf...
+	"/usr/lib/lighttpd/mod_cgi.so":        elfHeader,
+	"/usr/lib/lighttpd/mod_dirlisting.so": elfHeader, // ...and the 3 lighttpd always loads
+	"/usr/lib/lighttpd/mod_indexfile.so":  elfHeader,
+	"/usr/lib/lighttpd/mod_staticfile.so": elfHeader,
+	"/etc/lighttpd/lighttpd.conf":         lighttpdConf,
+	"/var/www/index.html":                 LoginPage(false),
+	"/var/www/login.cgi":                  elfHeader, // the form's target: a compiled CGI, like on real routers
+
 	"/dev/null": "",
 
 	"/var/run/dropbear.pid": "341\n", // ps: dropbear -P /var/run/dropbear.pid, PID 341
+	"/var/run/lighttpd.pid": "349\n", // lighttpd.conf: server.pid-file
 	"/var/log/messages":     bootLog(),
 
 	// what Buildroot writes in os-release (its Makefile, target-finalize)
@@ -250,12 +271,17 @@ func under(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, dir+"/")
 }
 
-// readFile checks the session's files first, then the built-in ones (following a symlink),
+// readFile checks the session's files first, then the built-in ones,
 // so "echo x > /etc/passwd" overwrites it only for this attacker.
 func (s *Shell) readFile(p string) (string, bool) {
 	if content, ok := s.files[p]; ok {
 		return content, true
 	}
+	return readBuiltin(p)
+}
+
+// readBuiltin reads a built-in file, following a symlink.
+func readBuiltin(p string) (string, bool) {
 	if target, ok := fakeLinks[p]; ok {
 		p = resolve(path.Dir(p), target) // /usr/bin/wget -> ../../bin/busybox -> /bin/busybox
 	}
