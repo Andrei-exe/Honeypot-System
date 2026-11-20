@@ -1,6 +1,9 @@
 package vfs
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Banner is shown right after login (both Telnet and SSH).
 const Banner = "\nBusyBox v1.30.1 built-in shell (ash)\n\n"
@@ -11,14 +14,17 @@ type Shell struct {
 	cwd   string            // current directory
 	files map[string]string // files created by the attacker (echo > x, touch, cp)
 	dirs  map[string]bool   // directories created by the attacker (mkdir)
+
+	mtimes map[string]time.Time // when the attacker created or touched a path (the date in ls -l)
 }
 
 // NewShell returns a fresh shell that starts in /root.
 func NewShell() *Shell {
 	return &Shell{
-		cwd:   "/root",
-		files: map[string]string{},
-		dirs:  map[string]bool{},
+		cwd:    "/root",
+		files:  map[string]string{},
+		dirs:   map[string]bool{},
+		mtimes: map[string]time.Time{},
 	}
 }
 

@@ -1,9 +1,11 @@
 package vfs
 
 import (
+	"fmt"
 	"path"
 	"sort"
 	"strings"
+	"time"
 )
 
 // maxSize caps an attacker-created file and the output of one command. Without it,
@@ -14,6 +16,17 @@ const maxSize = 16 * 1024
 // these bytes to learn the architecture (0x28 = ARM), then download the matching binary.
 const elfHeader = "\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00\x01\x00\x00\x00"
 
+// firmwareTime is when the firmware was built (the date in /proc/version). ls -l shows it for
+// every built-in file, except those on the in-memory filesystems (see mtime in ls.go).
+var firmwareTime = time.Date(2020, time.June, 4, 12, 0, 0, 0, time.UTC)
+
+// bootTime is when the "router" booted = when the agent started. /tmp, /var, /dev, /proc
+// and the boot log in /var/log/messages date from then.
+var bootTime = time.Now().UTC()
+
+// now is the current time; the tests replace it to get a fixed ls -l output.
+var now = time.Now
+
 // fakeDirs exist from the start (read-only, shared by all sessions). Bots often cd into
 // /tmp, /var/run, /mnt or /dev/shm to drop their binary, so all of these must exist.
 var fakeDirs = map[string]bool{
@@ -23,25 +36,65 @@ var fakeDirs = map[string]bool{
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 }
 
+// applets are the BusyBox commands, installed as symlinks to /bin/busybox like on a real router.
+// Only commands the fake shell answers: a listed command that says "not found" would give us
+// away (TestAppletsAreImplemented checks it).
+var applets = []struct {
+	dir    string
+	target string // /bin/busybox, relative to dir (the way BusyBox installs its links)
+	names  []string
+}{
+	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "echo", "false", "grep", "hostname",
+		"kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sh", "sleep", "touch", "true", "uname"}},
+	{"/sbin", "../bin/busybox", []string{"init", "klogd", "syslogd"}},
+	{"/usr/bin", "../../bin/busybox", []string{"ftpget", "id", "killall", "tftp", "wget", "whoami"}},
+	{"/usr/sbin", "../../bin/busybox", []string{"telnetd"}},
+}
+
+// fakeLinks are the symbolic links: path -> target, written the way ls -l shows it.
+var fakeLinks = makeLinks()
+
+func makeLinks() map[string]string {
+	links := map[string]string{
+		// the C library (uClibc-ng, common on cheap routers): short names -> the versioned file
+		"/lib/ld-uClibc.so.0": "ld-uClibc-1.0.31.so",
+		"/lib/libc.so.0":      "libuClibc-1.0.31.so",
+	}
+	for _, a := range applets {
+		for _, name := range a.names {
+			links[a.dir+"/"+name] = a.target
+		}
+	}
+	return links
+}
+
+// binarySizes are the sizes ls -l shows for the programs. Their content is only the ELF header
+// (what bots read), but a real busybox is a few hundred KB.
+var binarySizes = map[string]int{
+	"/bin/busybox":             278412,
+	"/usr/sbin/dropbear":       196104,
+	"/usr/sbin/vsftpd":         121352,
+	"/lib/ld-uClibc-1.0.31.so": 28324,
+	"/lib/libuClibc-1.0.31.so": 334688,
+	"/lib/libgcc_s.so.1":       58640,
+}
+
 // fakeFiles exist from the start: path -> content (read-only, shared by all sessions).
 var fakeFiles = map[string]string{
-	// on routers every command in /bin is the same program (busybox)
+	// every command in /bin, /sbin, /usr/bin and /usr/sbin is a link to busybox (see applets)
 	"/bin/busybox": elfHeader,
-	"/bin/ash":     elfHeader,
-	"/bin/sh":      elfHeader,
-	"/bin/cat":     elfHeader,
-	"/bin/echo":    elfHeader,
-	"/bin/ls":      elfHeader,
-	"/bin/ps":      elfHeader,
-	"/bin/wget":    elfHeader,
-	"/sbin/init":   elfHeader,
 
-	// "our" services, matching what ps shows
-	"/usr/sbin/dropbear": elfHeader,
-	"/usr/sbin/telnetd":  elfHeader,
-	"/usr/sbin/vsftpd":   elfHeader,
+	// the services ps shows that are separate programs, and the libraries they use
+	"/usr/sbin/dropbear":       elfHeader,
+	"/usr/sbin/vsftpd":         elfHeader,
+	"/lib/ld-uClibc-1.0.31.so": elfHeader,
+	"/lib/libuClibc-1.0.31.so": elfHeader,
+	"/lib/libgcc_s.so.1":       elfHeader,
 
 	"/dev/null": "",
+
+	"/var/run/dropbear.pid": "341\n", // ps: dropbear -P /var/run/dropbear.pid, PID 341
+	"/var/log/messages":     bootLog(),
 
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
@@ -62,7 +115,7 @@ var fakeFiles = map[string]string{
 		"nobody:*:0:0:99999:7:::\n",
 
 	"/proc/version": "Linux version 4.14.180 (builder@buildhost) (gcc version 8.4.0) #1 SMP Thu Jun 4 12:00:00 UTC 2020\n",
-	"/proc/meminfo": "MemTotal:         124520 kB\nMemFree:           38412 kB\nMemAvailable:      61208 kB\n",
+	"/proc/meminfo": meminfo(),
 	"/proc/cpuinfo": "processor\t: 0\n" +
 		"model name\t: ARMv7 Processor rev 5 (v7l)\n" +
 		"BogoMIPS\t: 48.00\n" +
@@ -83,6 +136,55 @@ var fakeFiles = map[string]string{
 		"tmpfs /dev tmpfs rw,nosuid,relatime,size=512k,mode=755 0 0\n",
 }
 
+// meminfo is /proc/meminfo of a 4.14 kernel with 128MB and no swap, in the kernel's format.
+// The numbers agree (Active = Active(anon) + Active(file), Slab = SReclaimable + SUnreclaim,
+// CommitLimit = MemTotal / 2), so a future "free" can be computed from them.
+func meminfo() string {
+	fields := []struct {
+		name string
+		kb   int
+	}{
+		{"MemTotal", 124520}, {"MemFree", 38412}, {"MemAvailable", 61208},
+		{"Buffers", 3216}, {"Cached", 24284}, {"SwapCached", 0},
+		{"Active", 20412}, {"Inactive", 17228},
+		{"Active(anon)", 10232}, {"Inactive(anon)", 220},
+		{"Active(file)", 10180}, {"Inactive(file)", 17008},
+		{"Unevictable", 0}, {"Mlocked", 0}, {"SwapTotal", 0}, {"SwapFree", 0},
+		{"Dirty", 0}, {"Writeback", 0}, {"AnonPages", 10140}, {"Mapped", 7860}, {"Shmem", 312},
+		{"Slab", 17640}, {"SReclaimable", 4268}, {"SUnreclaim", 13372},
+		{"KernelStack", 640}, {"PageTables", 432}, {"NFS_Unstable", 0}, {"Bounce", 0},
+		{"WritebackTmp", 0}, {"CommitLimit", 62260}, {"Committed_AS", 19044},
+		{"VmallocTotal", 901120}, {"VmallocUsed", 0}, {"VmallocChunk", 0},
+	}
+	var out strings.Builder
+	for _, f := range fields {
+		fmt.Fprintf(&out, "%-16s%8d kB\n", f.name+":", f.kb)
+	}
+	return out.String()
+}
+
+// bootLog is /var/log/messages: what BusyBox syslogd wrote while the router booted. The kernel
+// lines agree with /proc/version, /proc/cpuinfo and /proc/meminfo, dropbear's PID with ps.
+func bootLog() string {
+	lines := []struct {
+		second int // after boot
+		text   string
+	}{
+		{0, "syslog.info syslogd started: BusyBox v1.30.1"},
+		{0, "kern.notice kernel: [    0.000000] Linux version 4.14.180 (builder@buildhost) (gcc version 8.4.0) #1 SMP Thu Jun 4 12:00:00 UTC 2020"},
+		{0, "kern.info kernel: [    0.000000] CPU: ARMv7 Processor [410fc075] revision 5 (ARMv7), cr=10c5387d"},
+		{0, "kern.info kernel: [    0.000000] Memory: 123496K/131072K available (5120K kernel code, 380K rwdata, 1344K rodata, 1024K init, 260K bss, 7576K reserved, 0K cma-reserved)"},
+		{0, "kern.info kernel: [    3.512214] eth0: link up (1000Mbps/Full duplex)"},
+		{2, "authpriv.info dropbear[341]: Not backgrounding"},
+	}
+	var out strings.Builder
+	for _, l := range lines {
+		t := bootTime.Add(time.Duration(l.second) * time.Second)
+		out.WriteString(t.Format("Jan _2 15:04:05") + " gateway " + l.text + "\n")
+	}
+	return out.String()
+}
+
 // resolve turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path.
 // E.g. cwd "/tmp" + "../etc/passwd" -> "/etc/passwd"
 func resolve(cwd, p string) string {
@@ -95,11 +197,19 @@ func resolve(cwd, p string) string {
 	return path.Clean(p)
 }
 
-// readFile checks the session's files first, then the built-in ones,
+// under reports whether p is dir itself or something inside it.
+func under(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// readFile checks the session's files first, then the built-in ones (following a symlink),
 // so "echo x > /etc/passwd" overwrites it only for this attacker.
 func (s *Shell) readFile(p string) (string, bool) {
 	if content, ok := s.files[p]; ok {
 		return content, true
+	}
+	if target, ok := fakeLinks[p]; ok {
+		p = resolve(path.Dir(p), target) // /usr/bin/wget -> ../../bin/busybox -> /bin/busybox
 	}
 	content, ok := fakeFiles[p]
 	return content, ok
@@ -110,7 +220,7 @@ func (s *Shell) isDir(p string) bool {
 	return fakeDirs[p] || s.dirs[p]
 }
 
-// list returns the names inside dir, sorted alphabetically like ls.
+// list returns the names inside dir (hidden ones too), sorted alphabetically like ls.
 func (s *Shell) list(dir string) []string {
 	seen := map[string]bool{}
 	add := func(p string) {
@@ -119,6 +229,9 @@ func (s *Shell) list(dir string) []string {
 		}
 	}
 	for p := range fakeFiles {
+		add(p)
+	}
+	for p := range fakeLinks {
 		add(p)
 	}
 	for p := range fakeDirs {
@@ -160,5 +273,6 @@ func (s *Shell) writeFile(name, content string, appendTo bool) string {
 		content = content[:maxSize]
 	}
 	s.files[p] = content
+	s.mtimes[p] = now().UTC()
 	return ""
 }

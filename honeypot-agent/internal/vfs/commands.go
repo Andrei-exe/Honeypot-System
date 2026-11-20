@@ -6,9 +6,12 @@ import (
 	"strings"
 )
 
-// fakePS is the output of ps. It matches the persona: a router running dropbear, telnetd and vsftpd.
+// fakePS is the output of ps. It matches the persona: a router running dropbear, telnetd and vsftpd,
+// with syslogd writing /var/log/messages. Every program here exists in the fake filesystem.
 const fakePS = `  PID USER       VSZ STAT COMMAND
     1 root      1516 S    /sbin/init
+  289 root      1032 S    /sbin/syslogd -n
+  291 root      1032 S    /sbin/klogd -n
   341 root      1124 S    /usr/sbin/dropbear -F -P /var/run/dropbear.pid -p 22
   356 root      1032 S    /usr/sbin/telnetd -F -l /bin/login
   402 root      1208 S    /usr/sbin/vsftpd
@@ -20,9 +23,11 @@ const fakePS = `  PID USER       VSZ STAT COMMAND
 // (0 = ok, 127 = command not found, other = error) and whether the session should end.
 func (s *Shell) command(args []string, input string) (string, int, bool) {
 	name := args[0]
-	// "/bin/cat" = "cat", if it exists in our fake /bin
-	if _, ok := fakeFiles[name]; ok && path.Dir(name) == "/bin" {
-		name = path.Base(name)
+	// "/bin/cat" or "/usr/bin/wget" = "cat" / "wget": busybox itself or one of its applet links
+	if strings.Contains(name, "/") {
+		if p := resolve(s.cwd, name); p == "/bin/busybox" || path.Base(fakeLinks[p]) == "busybox" {
+			name = path.Base(p)
+		}
 	}
 	args = args[1:] // from here on, args holds only the arguments
 
@@ -79,11 +84,17 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 		return name + ": can't connect to remote host: Connection timed out\n", 1, false
 
 	case "sh", "ash", "enable", "system", "shell", "linuxshell", "chmod", "mv",
-		"kill", "killall", "export", "ulimit", "sleep", "true":
-		// commands that print nothing on success on a real system
+		"kill", "killall", "export", "ulimit", "sleep", "true", "syslogd", "klogd":
+		// commands that print nothing on success on a real system (the daemons go to the background)
 		return "", 0, false
+	case "login":
+		return "", 0, false // simplification: a real one would ask "gateway login:" again
 	case "false":
 		return "", 1, false
+	case "init":
+		return "init: must be run as PID 1\n", 1, false
+	case "telnetd":
+		return "telnetd: bind: Address already in use\n", 1, false // it is already running (ps)
 	}
 
 	// ./bot or /tmp/x: if the file exists it "runs" silently (like malware started in the background)
@@ -192,29 +203,6 @@ func (s *Shell) cd(args []string) (string, int, bool) {
 	return "", 0, false
 }
 
-func (s *Shell) ls(args []string) (string, int, bool) {
-	target := "."
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") { // options (-la, -l) are ignored
-			target = a
-		}
-	}
-
-	p := resolve(s.cwd, target)
-	if !s.isDir(p) {
-		if _, ok := s.readFile(p); ok {
-			return target + "\n", 0, false // ls on a file prints its name
-		}
-		return "ls: " + target + ": No such file or directory\n", 1, false
-	}
-
-	names := s.list(p)
-	if len(names) == 0 {
-		return "", 0, false
-	}
-	return strings.Join(names, "  ") + "\n", 0, false
-}
-
 func (s *Shell) cat(args []string, input string) (string, int, bool) {
 	if len(args) == 0 {
 		return input, 0, false // "... | cat" passes its input through
@@ -272,7 +260,8 @@ func (s *Shell) touch(args []string) (string, int, bool) {
 	for _, a := range args {
 		p := resolve(s.cwd, a)
 		if _, ok := s.readFile(p); ok || s.isDir(p) {
-			continue // already exists
+			s.mtimes[p] = now().UTC() // already exists: touch only changes its date
+			continue
 		}
 		if msg := s.writeFile(a, "", false); msg != "" {
 			return "touch: " + a + ": No such file or directory\n", 1, false
@@ -291,6 +280,7 @@ func (s *Shell) mkdir(args []string) (string, int, bool) {
 			return "mkdir: can't create directory '" + a + "': No such file or directory\n", 1, false
 		}
 		s.dirs[p] = true
+		s.mtimes[p] = now().UTC()
 	}
 	return "", 0, false
 }
@@ -301,6 +291,7 @@ func (s *Shell) rm(args []string) (string, int, bool) {
 		p := resolve(s.cwd, a)
 		delete(s.files, p)
 		delete(s.dirs, p)
+		delete(s.mtimes, p)
 	}
 	return "", 0, false
 }
