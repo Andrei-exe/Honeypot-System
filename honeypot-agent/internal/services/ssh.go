@@ -2,7 +2,8 @@ package services
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
@@ -29,9 +30,23 @@ const (
 	// BusyBox routers run Dropbear, not OpenSSH -> same persona as Telnet.
 	sshServerVersion = "SSH-2.0-dropbear_2019.78"
 
-	// Kept on disk so the key (and its fingerprint) doesn't change on restart.
-	sshHostKeyFile = "ssh_host_ed25519_key"
+	// Kept on disk so the key (and its fingerprint) doesn't change on restart. ECDSA, not ed25519:
+	// Dropbear only got ed25519 in 2020.79, so a 2019.78 with an ed25519 key can't exist.
+	sshHostKeyFile = "ssh_host_ecdsa_key"
 )
+
+// dropbearAlgorithms are the algorithms Dropbear 2019.78 offers when Buildroot 2019.05.3 builds it
+// with its defaults (no legacy crypto, no zlib), in Dropbear's order (common-algo.c). Scanners
+// fingerprint these lists (HASSH); x/crypto's defaults have algorithms Dropbear never had (mlkem,
+// chacha20, gcm, etm). Can't be imitated: x/crypto always adds kex-strict-s-v00@openssh.com,
+// and it can't send Dropbear's kexguess2@matt.ucc.asn.au.
+var dropbearAlgorithms = ssh.Config{
+	KeyExchanges: []string{"curve25519-sha256", "curve25519-sha256@libssh.org",
+		"ecdh-sha2-nistp521", "ecdh-sha2-nistp384", "ecdh-sha2-nistp256",
+		"diffie-hellman-group14-sha256", "diffie-hellman-group14-sha1"},
+	Ciphers: []string{"aes128-ctr", "aes256-ctr"},
+	MACs:    []string{"hmac-sha1", "hmac-sha2-256"},
+}
 
 // RunSSH serves a fake Dropbear SSH server on address until ctx is cancelled.
 // Returns nil after a clean shutdown, or an error if it fails (usually the port is in use).
@@ -85,6 +100,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	// ---------- Phase 1: handshake + login ----------
 	// The library does the crypto; we only decide which passwords work.
 	config := &ssh.ServerConfig{
+		Config:        dropbearAlgorithms, // a copy: every connection gets its own
 		ServerVersion: sshServerVersion,
 		MaxAuthTries:  sshMaxAuth,
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
@@ -231,7 +247,7 @@ func loadOrCreateHostKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader) // ecdsa-sha2-nistp256, Dropbear's default
 	if err != nil {
 		return nil, err
 	}

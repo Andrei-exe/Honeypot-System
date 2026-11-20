@@ -1,5 +1,5 @@
-# SSH server private key (generated automatically on the first RunSSH)
-ssh_host_ed25519_key
+# SSH server private key (generated automatically on the first RunSSH; ed25519 = the old one)
+ssh_host_*_key
 
 # events from tests/demos (they contain passwords)
 events.jsonl

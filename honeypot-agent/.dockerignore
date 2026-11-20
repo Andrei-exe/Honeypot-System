@@ -1,7 +1,7 @@
 # What we do NOT send to Docker when building the image (like .gitignore, but for the build).
 
 # SSH private key from `go run .` - the container generates its own, on the volume
-ssh_host_ed25519_key
+ssh_host_*_key
 
 # events from tests/demos (they contain passwords)
 *.jsonl

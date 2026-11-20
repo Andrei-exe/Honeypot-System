@@ -1,10 +1,16 @@
 package services
 
 import (
+	"bufio"
 	"bytes"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+	"io"
 	"net"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -14,10 +20,10 @@ import (
 	"honeypot-agent/internal/shipper"
 )
 
-// newTestKey makes a throwaway ed25519 key in memory (RunSSH would write the host key to disk).
+// newTestKey makes a throwaway ECDSA key in memory (RunSSH would write the host key to disk).
 func newTestKey(t *testing.T) ssh.Signer {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +62,91 @@ func checkOfferedMethods(t *testing.T, offered []string) {
 	sorted := slices.Sorted(slices.Values(offered)) // the order is chosen by x/crypto, not by us
 	if !slices.Equal(sorted, []string{"password", "publickey"}) {
 		t.Errorf("offered login methods: %v (expected publickey and password, like Dropbear)", offered)
+	}
+}
+
+// readServerKexInit does what a scanner does: it sends a version line, then reads the server's
+// first binary packet (KEXINIT, not encrypted yet) and returns its 10 algorithm lists as sent.
+func readServerKexInit(t *testing.T, addr string) []string {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprint(conn, "SSH-2.0-scanner\r\n")
+	r := bufio.NewReader(conn)
+	readUntil(t, r, "\r\n") // the server's version line
+
+	// packet = length (4 bytes) | padding length (1) | payload | padding
+	var length uint32
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, length)
+	if _, err := io.ReadFull(r, packet); err != nil {
+		t.Fatal(err)
+	}
+	payload := packet[1 : len(packet)-int(packet[0])]
+	if payload[0] != 20 { // SSH_MSG_KEXINIT
+		t.Fatalf("first message type %d, expected KEXINIT (20)", payload[0])
+	}
+
+	// after the type byte and a 16-byte random cookie: 10 name-lists, each length (4) + text
+	p := payload[17:]
+	var lists []string
+	for range 10 {
+		n := binary.BigEndian.Uint32(p)
+		lists = append(lists, string(p[4:4+n]))
+		p = p[4+n:]
+	}
+	return lists
+}
+
+// The algorithm lists must be Dropbear 2019.78's (as Buildroot 2019.05.3 builds it), in its order:
+// that's what scanners fingerprint. Only kex-strict-s-v00 is extra (x/crypto always adds it).
+func TestSSHAlgorithmsLikeDropbear(t *testing.T) {
+	s := shipper.NewShipper(io.Discard, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	lists := readServerKexInit(t, addr)
+	want := []string{
+		// key exchange: Dropbear's list (without its kexguess2@matt.ucc.asn.au) + x/crypto's kex-strict
+		"curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384," +
+			"ecdh-sha2-nistp256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1," +
+			"kex-strict-s-v00@openssh.com",
+		"ecdsa-sha2-nistp256",                            // host key: no ed25519 (Dropbear 2020.79+)
+		"aes128-ctr,aes256-ctr", "aes128-ctr,aes256-ctr", // ciphers, both directions
+		"hmac-sha1,hmac-sha2-256", "hmac-sha1,hmac-sha2-256", // MACs
+		"none", "none", // compression (Buildroot's "small" Dropbear has no zlib)
+		"", "", // languages
+	}
+	for i := range want {
+		if lists[i] != want[i] {
+			t.Errorf("list %d:\n got: %s\nwant: %s", i, lists[i], want[i])
+		}
+	}
+	waitDone(t, done)
+}
+
+// The host key is created once and then read back: same key = same fingerprint after a restart.
+func TestHostKeyIsKeptOnDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), sshHostKeyFile)
+	first, err := loadOrCreateHostKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := loadOrCreateHostKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PublicKey().Type() != "ecdsa-sha2-nistp256" {
+		t.Errorf("host key type %s, expected ecdsa-sha2-nistp256", first.PublicKey().Type())
+	}
+	if !bytes.Equal(first.PublicKey().Marshal(), again.PublicKey().Marshal()) {
+		t.Error("the second start made a new key: the fingerprint would change")
 	}
 }
 
