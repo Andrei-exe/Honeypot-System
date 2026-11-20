@@ -81,6 +81,18 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	case "cp":
 		return s.cp(args)
 
+	// what cryptominers check before installing (system.go)
+	case "free":
+		return free(args)
+	case "nproc":
+		return nproc(), 0, false
+	case "uptime":
+		return uptime(args), 0, false
+	case "df":
+		return s.df(args)
+	case "crontab":
+		return s.crontab(args, input)
+
 	case "wget", "tftp", "ftpget":
 		// nothing is downloaded: pretend the network is down (the URL is already logged).
 		// No curl: BusyBox has none, so "curl" is "not found" below, like on a real router.

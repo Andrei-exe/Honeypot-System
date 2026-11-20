@@ -47,6 +47,7 @@ var fakeDirs = map[string]bool{
 	"/lib": true, "/mnt": true, "/proc": true, "/root": true, "/sbin": true,
 	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/sbin": true,
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
+	"/var/spool": true, "/var/spool/cron": true, crontabDir: true, // crontab's (Buildroot: FEATURE_CROND_DIR)
 }
 
 // applets are the BusyBox commands, installed as symlinks to /bin/busybox like on a real router.
@@ -57,10 +58,11 @@ var applets = []struct {
 	target string // /bin/busybox, relative to dir (the way BusyBox installs its links)
 	names  []string
 }{
-	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "echo", "false", "grep", "hostname",
+	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "df", "echo", "false", "grep", "hostname",
 		"kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sh", "sleep", "touch", "true", "uname"}},
 	{"/sbin", "../bin/busybox", []string{"init", "klogd", "syslogd"}},
-	{"/usr/bin", "../../bin/busybox", []string{"ftpget", "id", "killall", "tftp", "wget", "whoami"}},
+	{"/usr/bin", "../../bin/busybox", []string{"crontab", "free", "ftpget", "id", "killall", "nproc",
+		"tftp", "uptime", "wget", "whoami"}},
 	{"/usr/sbin", "../../bin/busybox", []string{"telnetd"}},
 }
 
@@ -186,28 +188,40 @@ var fakeFiles = map[string]string{
 		"tmpfs /dev tmpfs rw,nosuid,relatime,size=512k,mode=755 0 0\n",
 }
 
-// meminfo is /proc/meminfo of a 4.14 kernel with 128MB and no swap, in the kernel's format.
-// The numbers agree (Active = Active(anon) + Active(file), Slab = SReclaimable + SUnreclaim,
-// CommitLimit = MemTotal / 2), so a future "free" can be computed from them.
-func meminfo() string {
-	fields := []struct {
-		name string
-		kb   int
-	}{
-		{"MemTotal", 124520}, {"MemFree", 38412}, {"MemAvailable", 61208},
-		{"Buffers", 3216}, {"Cached", 24284}, {"SwapCached", 0},
-		{"Active", 20412}, {"Inactive", 17228},
-		{"Active(anon)", 10232}, {"Inactive(anon)", 220},
-		{"Active(file)", 10180}, {"Inactive(file)", 17008},
-		{"Unevictable", 0}, {"Mlocked", 0}, {"SwapTotal", 0}, {"SwapFree", 0},
-		{"Dirty", 0}, {"Writeback", 0}, {"AnonPages", 10140}, {"Mapped", 7860}, {"Shmem", 312},
-		{"Slab", 17640}, {"SReclaimable", 4268}, {"SUnreclaim", 13372},
-		{"KernelStack", 640}, {"PageTables", 432}, {"NFS_Unstable", 0}, {"Bounce", 0},
-		{"WritebackTmp", 0}, {"CommitLimit", 62260}, {"Committed_AS", 19044},
-		{"VmallocTotal", 901120}, {"VmallocUsed", 0}, {"VmallocChunk", 0},
+// memInfo is the memory of a 4.14 kernel with 128MB and no swap. The numbers agree
+// (Active = Active(anon) + Active(file), Slab = SReclaimable + SUnreclaim, CommitLimit = MemTotal / 2);
+// /proc/meminfo, free and df (the size of a tmpfs) are all computed from them.
+var memInfo = []struct {
+	name string
+	kb   int
+}{
+	{"MemTotal", 124520}, {"MemFree", 38412}, {"MemAvailable", 61208},
+	{"Buffers", 3216}, {"Cached", 24284}, {"SwapCached", 0},
+	{"Active", 20412}, {"Inactive", 17228},
+	{"Active(anon)", 10232}, {"Inactive(anon)", 220},
+	{"Active(file)", 10180}, {"Inactive(file)", 17008},
+	{"Unevictable", 0}, {"Mlocked", 0}, {"SwapTotal", 0}, {"SwapFree", 0},
+	{"Dirty", 0}, {"Writeback", 0}, {"AnonPages", 10140}, {"Mapped", 7860}, {"Shmem", 312},
+	{"Slab", 17640}, {"SReclaimable", 4268}, {"SUnreclaim", 13372},
+	{"KernelStack", 640}, {"PageTables", 432}, {"NFS_Unstable", 0}, {"Bounce", 0},
+	{"WritebackTmp", 0}, {"CommitLimit", 62260}, {"Committed_AS", 19044},
+	{"VmallocTotal", 901120}, {"VmallocUsed", 0}, {"VmallocChunk", 0},
+}
+
+// memKB returns one memInfo value in kB ("MemTotal" -> 124520).
+func memKB(name string) int {
+	for _, f := range memInfo {
+		if f.name == name {
+			return f.kb
+		}
 	}
+	return 0 // a typo in our own code: free's exact output in the tests would show it
+}
+
+// meminfo is /proc/meminfo, in the kernel's format.
+func meminfo() string {
 	var out strings.Builder
-	for _, f := range fields {
+	for _, f := range memInfo {
 		fmt.Fprintf(&out, "%-16s%8d kB\n", f.name+":", f.kb)
 	}
 	return out.String()
@@ -285,6 +299,9 @@ func readBuiltin(p string) (string, bool) {
 	if target, ok := fakeLinks[p]; ok {
 		p = resolve(path.Dir(p), target) // /usr/bin/wget -> ../../bin/busybox -> /bin/busybox
 	}
+	if gen, ok := dynamicFiles[p]; ok {
+		return gen(), true // /proc/uptime: computed now
+	}
 	content, ok := fakeFiles[p]
 	return content, ok
 }
@@ -303,6 +320,9 @@ func (s *Shell) list(dir string) []string {
 		}
 	}
 	for p := range fakeFiles {
+		add(p)
+	}
+	for p := range dynamicFiles {
 		add(p)
 	}
 	for p := range fakeLinks {
