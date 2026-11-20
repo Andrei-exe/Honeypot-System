@@ -174,20 +174,34 @@ docker compose rm -f loadgen                            # always remove the fini
 
 Always remove the containers after a run. On Docker Desktop, starting a run with a different mode on top of the old containers once left them stuck until Docker was restarted.
 
-Each copy prints one line, for example `hold 25s: ssh ok=10 closed=0 failed=0 | telnet ok=10 closed=0 failed=0 | ...`:
+Choose what it does with environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOADGEN_MODE` | `hold` | `hold` logs in on every service and keeps the sessions open; `brute` runs SSH logins with a wrong password in a loop; `http` sends a mix of web attacks in a loop |
+| `LOADGEN_SECONDS` | `25` | How long to hold the sessions or run the loops |
+
+For example, `LOADGEN_MODE=http docker compose up --scale loadgen=20 loadgen` on Linux or macOS. On Windows, set the variable first: `set LOADGEN_MODE=http` (cmd) or `$env:LOADGEN_MODE="http"` (PowerShell).
+
+Each copy prints one line. In `hold` mode, for example `hold 25s: ssh ok=10 closed=0 failed=0 | telnet ok=10 closed=0 failed=0 | ...`:
 
 - `ok`: the session stayed open until the end;
 - `closed`: the agent closed it early (a timeout);
 - `failed`: the generator could not connect or log in (for example, a connection limit was hit).
 
-Choose what it does with environment variables:
+In `http` mode, each loop acts as one bot after another. A bot opens a connection, sends 1 to 5 requests of one kind and leaves. The kinds are:
 
-| Variable | Default | Description |
-|---|---|---|
-| `LOADGEN_MODE` | `hold` | `hold` logs in on every service and keeps the sessions open; `brute` runs SSH logins with a wrong password in a loop |
-| `LOADGEN_SECONDS` | `25` | How long to hold the sessions or run the loops |
+- logins with a form, with the field names of different targets: `username`/`password` (this router), `user`/`pass`, `log`/`pwd` (WordPress);
+- Basic Auth;
+- passwords in the URL (`/login.cgi?user=...&pwd=...`);
+- scanner and exploit paths (`/.env`, path traversal, SQL injection, a Log4Shell probe, command injection).
 
-For example, `LOADGEN_MODE=brute docker compose up --scale loadgen=20 loadgen` on Linux or macOS. On Windows, set the variable first: `set LOADGEN_MODE=brute` (cmd) or `$env:LOADGEN_MODE="brute"` (PowerShell).
+User names, passwords and user agents vary. The payloads are harmless: every address in them is in `203.0.113.0/24`, a range reserved for documentation. The generator also checks each answer against what the agent should send (200, 401 or the 404 page). The line looks like `http 25s: requests=9347 (374/s) logins=7043 unexpected=0 errors=12`:
+
+- `requests`: answered requests. The agent logs each one, so the sum over all copies equals the number of HTTP events it wrote;
+- `logins`: the answered requests that carried a password (`login_attempt` events);
+- `unexpected`: answers with a different status than the agent should send. It must be 0; otherwise the first one is printed;
+- `errors`: requests without an answer, with the first error printed (usually `connection reset by peer` or `EOF`). With 20 copies at full speed, 10 to 20 percent is normal: a bot reconnects before the agent has freed its previous connection, so the 10-per-IP limit refuses it.
 
 Watch the agent with `docker stats` in another terminal. The generated sessions are recorded like real attacks, from `172.x` addresses, so they show up on the dashboard. Do not run the generator on a production sensor.
 

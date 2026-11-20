@@ -164,7 +164,8 @@ services:
     build:
       context: ./honeypot-agent
       dockerfile: cmd/loadgen/Dockerfile
-    # hold = tine sesiuni deschise; brute = logari SSH gresite in bucla (vezi README "Load testing")
+    # hold = tine sesiuni deschise; brute = logari SSH gresite in bucla;
+    # http = atacuri web variate in bucla (logari, scannere, exploit-uri) (vezi README "Load testing")
     command: ["-mode", "${LOADGEN_MODE:-hold}", "-seconds", "${LOADGEN_SECONDS:-25}"]
     networks:
       - honeynet   # langa agent, ca sa-l atace direct cu IP-uri diferite
