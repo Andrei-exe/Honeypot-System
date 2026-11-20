@@ -20,6 +20,7 @@ var specialModes = map[string]string{
 	"/tmp": "drwxrwxrwt", "/var/tmp": "drwxrwxrwt", "/dev/shm": "drwxrwxrwt", // anyone can write, sticky bit
 	"/proc": "dr-xr-xr-x", "/sys": "dr-xr-xr-x",
 	"/etc/shadow": "-rw-------", "/etc/dropbear/dropbear_ecdsa_host_key": "-rw-------",
+	"/etc/ppp/chap-secrets": "-rw-------", // pppd warns when its secrets can be read by everyone
 }
 
 // lsFlags are the options we understand; the others are ignored.

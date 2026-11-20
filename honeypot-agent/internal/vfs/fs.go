@@ -48,7 +48,18 @@ var fakeDirs = map[string]bool{
 	"/sys": true, "/tmp": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/sbin": true,
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 	"/var/spool": true, "/var/spool/cron": true, crontabDir: true, // crontab's (Buildroot: FEATURE_CROND_DIR)
+	"/etc/ppp": true, "/etc/ppp/peers": true, "/usr/lib/pppd": true, "/usr/lib/pppd/2.4.7": true,
 }
+
+// Honeytokens: secrets that exist only in the files below (the Wi-Fi password, the provider's
+// PPPoE account). Reading the files is logged anyway (command_exec). If one of these strings ever
+// comes back in a login attempt, whoever sent it had read the file. They must never be in
+// weakCredentials: the Wi-Fi password is not root's password on a real router either.
+const (
+	wifiPassphrase = "w7Kq2mVx9pLz"
+	pppoeUser      = "2210417553"
+	pppoePassword  = "Rp4tHx92kQ"
+)
 
 // applets are the BusyBox commands, installed as symlinks to /bin/busybox like on a real router.
 // Only commands the fake shell answers: a listed command that says "not found" would give us
@@ -101,6 +112,10 @@ var binarySizes = map[string]int{
 	"/usr/lib/lighttpd/mod_dirlisting.so": 21456,
 	"/usr/lib/lighttpd/mod_indexfile.so":  4912,
 	"/usr/lib/lighttpd/mod_staticfile.so": 9632,
+
+	"/usr/sbin/hostapd":               598764,
+	"/usr/sbin/pppd":                  301228,
+	"/usr/lib/pppd/2.4.7/rp-pppoe.so": 22584,
 }
 
 // fakeFiles exist from the start: path -> content (read-only, shared by all sessions).
@@ -125,6 +140,19 @@ var fakeFiles = map[string]string{
 	"/etc/lighttpd/lighttpd.conf":         lighttpdConf,
 	"/var/www/index.html":                 LoginPage(false),
 	"/var/www/login.cgi":                  elfHeader, // the form's target: a compiled CGI, like on real routers
+
+	// Wi-Fi (ps: hostapd -B /etc/hostapd.conf) and the provider link (ps: pppd call isp): their
+	// configs hold the honeytokens. A vendor's default SSID ends with part of the MAC address.
+	"/usr/sbin/hostapd": elfHeader,
+	"/etc/hostapd.conf": "interface=wlan0\ndriver=nl80211\nssid=Gateway-4F2A\nhw_mode=g\nchannel=6\n" +
+		"ieee80211n=1\nwmm_enabled=1\nauth_algs=1\nwpa=2\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\n" +
+		"wpa_passphrase=" + wifiPassphrase + "\n",
+	"/usr/sbin/pppd":                  elfHeader,
+	"/usr/lib/pppd/2.4.7/rp-pppoe.so": elfHeader, // PPPoE = PPP over the WAN port (eth0)
+	"/etc/ppp/peers/isp": "plugin rp-pppoe.so eth0\nuser \"" + pppoeUser + "\"\nnoauth\ndefaultroute\n" +
+		"persist\nmaxfail 0\nholdoff 10\nmtu 1492\nmru 1492\n",
+	"/etc/ppp/chap-secrets": "# Secrets for authentication using CHAP\n# client\tserver\tsecret\t\t\tIP addresses\n" +
+		"\"" + pppoeUser + "\"\t*\t\"" + pppoePassword + "\"\t*\n",
 
 	"/dev/null": "",
 

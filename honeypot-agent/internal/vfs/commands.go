@@ -8,7 +8,8 @@ import (
 )
 
 // fakePS is the output of ps. It matches the persona: a router running dropbear, telnetd and vsftpd,
-// with syslogd writing /var/log/messages. Every program here exists in the fake filesystem.
+// with syslogd writing /var/log/messages, Wi-Fi (hostapd) and a PPPoE link to the provider (pppd).
+// Every program here exists in the fake filesystem.
 const fakePS = `  PID USER       VSZ STAT COMMAND
     1 root      1516 S    /sbin/init
   289 root      1032 S    /sbin/syslogd -n
@@ -16,6 +17,8 @@ const fakePS = `  PID USER       VSZ STAT COMMAND
   341 root      1124 S    /usr/sbin/dropbear -F -P /var/run/dropbear.pid -p 22
   349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf
   356 root      1032 S    /usr/sbin/telnetd -F -l /bin/login
+  362 root      1840 S    /usr/sbin/hostapd -B /etc/hostapd.conf
+  377 root      1216 S    /usr/sbin/pppd call isp
   402 root      1208 S    /usr/sbin/vsftpd
   517 root      1300 S    -sh
   530 root      1296 R    ps

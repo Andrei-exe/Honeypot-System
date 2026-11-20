@@ -37,8 +37,9 @@ func TestRun(t *testing.T) {
 		{"cat /tmp", "cat: read error: Is a directory\n"},
 		{"./bot", "-sh: ./bot: not found\n"},
 		{"cd /tmp; cp /bin/busybox x; ./x && echo started", "started\n"},
-		{"ls /etc", "dropbear     hostname     issue.net    os-release   profile      shadow\n" + // columns as wide
-			"group        hosts        lighttpd     passwd       resolv.conf  shells\n"}, // as the longest name + 2
+		{"ls /etc", "dropbear      hostname      lighttpd      ppp           shadow\n" + // columns as wide as
+			"group         hosts         os-release    profile       shells\n" + // the longest name + 2
+			"hostapd.conf  issue.net     passwd        resolv.conf\n"},
 		{"ps | grep lighttpd", "  349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf\n"}, // port 80 = a running web server
 		{"cat /var/run/lighttpd.pid", "349\n"}, // its PID, in the pid-file from its config
 		{"ls /var/www", "index.html  login.cgi\n"},
@@ -302,7 +303,7 @@ func TestMinerCommands(t *testing.T) {
 
 		{"uptime", " 10:30:00 up 2 days,  1:15,  load average: 0.08, 0.03, 0.01\n"},
 		{"uptime -s", "2026-11-18 09:15:00\n"},
-		{"cat /proc/uptime /proc/loadavg", "177300.00 173754.00\n0.08 0.03 0.01 1/9 530\n"},
+		{"cat /proc/uptime /proc/loadavg", "177300.00 173754.00\n0.08 0.03 0.01 1/11 530\n"}, // 11 processes in ps
 
 		// df: the two tmpfs from /proc/mounts (rootfs, proc and sysfs have no blocks); /tmp gets
 		// half the RAM (62260K), /dev its size=512k
@@ -350,6 +351,35 @@ func TestMinerCommands(t *testing.T) {
 		got, _, _ := NewShell().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
+		}
+	}
+}
+
+// The honeytokens are where an attacker looks for them, and the programs that use those files run.
+func TestHoneytokens(t *testing.T) {
+	fixedClock(t)
+	tests := []struct{ line, want string }{
+		{"grep wpa_passphrase /etc/hostapd.conf", "wpa_passphrase=w7Kq2mVx9pLz\n"},
+		{"cat /etc/ppp/chap-secrets | grep 2210417553", "\"2210417553\"\t*\t\"Rp4tHx92kQ\"\t*\n"},
+		{"grep user /etc/ppp/peers/isp", "user \"2210417553\"\n"}, // the same account in both pppd files
+		{"ps | grep hostapd", "  362 root      1840 S    /usr/sbin/hostapd -B /etc/hostapd.conf\n"},
+		{"ps | grep pppd", "  377 root      1216 S    /usr/sbin/pppd call isp\n"},
+		{"ls -l /etc/ppp", "-rw-------    1 root     root           108 Jun  4  2020 chap-secrets\n" +
+			"drwxr-xr-x    2 root     root            60 Jun  4  2020 peers\n"},
+		{"ls /usr/lib/pppd/2.4.7", "rp-pppoe.so\n"}, // the plugin named in /etc/ppp/peers/isp
+	}
+	for _, tt := range tests {
+		got, _, _ := NewShell().Run(tt.line)
+		if got != tt.want {
+			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
+		}
+	}
+
+	// a honeytoken found in a password list would no longer prove that someone read the file
+	shadow := fakeFiles["/etc/shadow"] + fakeFiles["/etc/passwd"]
+	for _, token := range []string{wifiPassphrase, pppoeUser, pppoePassword} {
+		if strings.Contains(shadow, token) {
+			t.Errorf("honeytoken %q is in /etc/passwd or /etc/shadow", token)
 		}
 	}
 }

@@ -23,6 +23,7 @@ flowchart LR
 - **honeypot-agent:**
   - Four fake services with one consistent persona, a router called `gateway`: SSH (Dropbear), Telnet (BusyBox), FTP (vsFTPd) and HTTP (a lighttpd login page).
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
+  - The filesystem holds decoy secrets (honeytokens): the Wi-Fi password in `/etc/hostapd.conf` and the provider's PPPoE account in `/etc/ppp/chap-secrets`. They exist nowhere else. Reading the files is logged, and a later login with one of these strings proves that whoever sent it had read them, even from another IP.
   - It also answers what cryptominer bots check before installing (`free`, `nproc`, `df`, `uptime`, `crontab`) exactly like the router's BusyBox would. The numbers agree with `/proc`. A cron job a bot adds stays visible to it for the rest of its session.
   - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout.
   - It limits what one attacker can do, so a flood cannot bury the events of the other services:

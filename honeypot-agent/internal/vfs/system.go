@@ -24,7 +24,7 @@ var load = [3]int{8, 3, 1}
 // dynamicFiles are the /proc files whose content changes with time: computed when they are read.
 var dynamicFiles = map[string]func() string{
 	"/proc/uptime":  procUptime,
-	"/proc/loadavg": func() string { return loadText(" ") + " 1/9 530\n" }, // + running/total processes (ps), last PID
+	"/proc/loadavg": func() string { return loadText(" ") + " 1/11 530\n" }, // + running/total processes (ps), last PID
 }
 
 // usage is BusyBox's answer to wrong arguments (bb_show_usage in libbb/appletlib.c), exit code 1.
