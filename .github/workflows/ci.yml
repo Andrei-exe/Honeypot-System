@@ -76,6 +76,18 @@ jobs:
         working-directory: threat-engine
         run: python test_filters.py
 
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # ShellCheck: missing quotes, bash-only syntax in a #!/bin/sh script, a CR left by Windows.
+      # A fixed image version = the same result here and on a PC (newer versions add new checks).
+      - name: shellcheck
+        run: docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.11.0 deploy/*.sh
+
   docker:
     name: Docker images
     runs-on: ubuntu-latest
