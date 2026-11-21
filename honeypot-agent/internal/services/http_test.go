@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -50,21 +51,20 @@ func TestWithoutPasswords(t *testing.T) {
 	}
 }
 
-// The real RunHTTP on a local port: a scanner's GET, a login form and Basic Auth, then shutdown.
-// Checks the persona (lighttpd, "Gateway Router"), the status codes and the logged events.
-func TestHTTP(t *testing.T) {
+// startHTTP runs the real RunHTTP on a free local port. stop shuts it down like SIGTERM and checks
+// that RunHTTP returns nil; after that every handler has finished, so the shipper's output is complete.
+func startHTTP(t *testing.T, s *shipper.Shipper) (addr string, stop func()) {
+	t.Helper()
 	// RunHTTP opens its own listener -> find a free port first
 	free, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := free.Addr().String()
+	addr = free.Addr().String()
 	free.Close()
 
-	var out bytes.Buffer
-	s := shipper.NewShipper(&out, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	result := make(chan error, 1)
 	go func() { result <- RunHTTP(ctx, addr, "http-test", s) }()
 
@@ -83,6 +83,26 @@ func TestHTTP(t *testing.T) {
 			t.Fatal("RunHTTP is not listening")
 		}
 	}
+
+	return addr, func() {
+		t.Helper()
+		cancel() // like SIGTERM: RunHTTP must return nil
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("on shutdown RunHTTP should return nil, it returned %v", err)
+			}
+		case <-time.After(shutdownWait + time.Second):
+			t.Fatal("RunHTTP did not stop")
+		}
+	}
+}
+
+// The real RunHTTP on a local port: a scanner's GET, a login form and Basic Auth, then shutdown.
+// Checks the persona (lighttpd, "Gateway Router"), the status codes and the logged events.
+func TestHTTP(t *testing.T) {
+	var out bytes.Buffer
+	addr, stop := startHTTP(t, shipper.NewShipper(&out, "", ""))
 
 	// own Transport = own keep-alive connection: requests 1-3 reuse one TCP connection
 	client := &http.Client{Transport: &http.Transport{}, Timeout: 5 * time.Second}
@@ -163,17 +183,7 @@ func TestHTTP(t *testing.T) {
 		t.Errorf("9 requests took %v: every answer should take at least %v", took, httpDelay)
 	}
 
-	cancel() // like SIGTERM: RunHTTP must return nil
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("on shutdown RunHTTP should return nil, it returned %v", err)
-		}
-	case <-time.After(shutdownWait + time.Second):
-		t.Fatal("RunHTTP did not stop")
-	}
-
-	// RunHTTP has returned = every request handler has finished, so out is complete
+	stop()
 	events := parseEvents(t, out.String())
 	if len(events) != 9 {
 		t.Fatalf("%d events (expected 9): %+v", len(events), events)
@@ -223,5 +233,52 @@ func TestHTTP(t *testing.T) {
 	}
 	if e := events[5]; e.EventType != "http_request" || e.PayloadDetails.HTTPPath != "/index.html" {
 		t.Errorf("GET /index.html event: %+v %+v", e, e.PayloadDetails)
+	}
+}
+
+// Like lighttpd (max-request-field-size 8192): a request line + headers of 8192 bytes is served,
+// 8193 gets lighttpd's own 431, byte for byte. Far over the limit Go stops reading: no huge event.
+func TestHTTPHeaderLimit(t *testing.T) {
+	var out bytes.Buffer
+	addr, stop := startHTTP(t, shipper.NewShipper(&out, "", ""))
+
+	// send sends exact bytes and reads the answer until the server closes the connection.
+	// The header block is 60 bytes + the User-Agent.
+	send := func(userAgent string) string {
+		t.Helper()
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: h\r\nUser-Agent: %s\r\nConnection: close\r\n\r\n", userAgent)
+		answer, _ := io.ReadAll(conn) // a reset after Go's own 431 is fine: the events are what matter
+		return string(answer)
+	}
+
+	if answer := send(strings.Repeat("a", 8192-60)); !strings.HasPrefix(answer, "HTTP/1.1 200 OK\r\n") {
+		t.Errorf("8192 bytes of headers: %.60q (expected 200, lighttpd allows exactly 8192)", answer)
+	}
+
+	answer := send(strings.Repeat("b", 8193-60))
+	head, page, _ := strings.Cut(answer, "\r\n\r\n")
+	date, _ := time.Parse(http.TimeFormat, strings.TrimPrefix(strings.Split(head, "\r\n")[4], "Date: "))
+	if !strings.HasPrefix(head, "HTTP/1.0 431 \r\nContent-Type: text/html\r\nContent-Length: 323\r\nConnection: close\r\nDate: ") ||
+		!strings.HasSuffix(head, "\r\nServer: lighttpd/1.4.53") || time.Since(date) > time.Minute ||
+		page != lighttpdErrorPage("431 ") || len(page) != 323 {
+		t.Errorf("8193 bytes of headers, not lighttpd's 431:\n%s", answer)
+	}
+
+	huge := send(strings.Repeat("c", 20000)) // over MaxHeaderBytes + Go's 4KB: Go's own 431
+	if huge != "" && !strings.HasPrefix(huge, "HTTP/1.1 431 ") {
+		t.Errorf("20000 bytes of headers: %.60q (expected Go's 431)", huge)
+	}
+
+	stop()
+	events := parseEvents(t, out.String())
+	if len(events) != 2 || len(events[0].PayloadDetails.HTTPUserAgent) != 8192-60 ||
+		len(events[1].PayloadDetails.HTTPUserAgent) != 8193-60 {
+		t.Fatalf("%d events (expected the 8192 and 8193 requests, not the huge one)", len(events))
 	}
 }

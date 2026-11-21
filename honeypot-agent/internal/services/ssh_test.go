@@ -13,6 +13,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,79 @@ func TestSSHExitCodes(t *testing.T) {
 		}
 		client.Close()
 		waitDone(t, done)
+	}
+}
+
+// Like Dropbear (MAX_CMD_LEN 9000): a longer exec command is refused (nothing runs, nothing is
+// logged) and the client may try again on the same channel; exactly 9000 bytes still runs.
+func TestSSHLongCommand(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	client, _, err := sshDial(addr, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Run("echo " + strings.Repeat("a", dropbearMaxCmdLen-4)); err == nil {
+		t.Error("a 9001-byte command was accepted")
+	}
+	command := "echo " + strings.Repeat("b", dropbearMaxCmdLen-5) // exactly 9000 bytes
+	output, err := session.Output(command)
+	if err != nil || string(output) != command[5:]+"\n" {
+		t.Errorf("9000-byte command after the refused one: %d bytes, %v", len(output), err)
+	}
+	client.Close()
+	waitDone(t, done)
+
+	commands := ofType(parseEvents(t, out.String()), "command_exec")
+	if len(commands) != 1 || commands[0].PayloadDetails.Command != command {
+		t.Errorf("%d command_exec events (expected only the 9000-byte one)", len(commands))
+	}
+}
+
+// Like Dropbear: a username or password over 100 bytes is refused without being checked, and not
+// logged (one login could put ~256KB into an event). 100 bytes is still a normal, logged attempt.
+func TestSSHLongLogin(t *testing.T) {
+	long := strings.Repeat("x", dropbearMaxLogin)
+	tests := []struct {
+		user, password string
+		logged         bool
+	}{
+		{"root", long, true},
+		{"root", long + "x", false},
+		{long + "x", "root", false}, // the right password, but never checked
+	}
+	for _, tt := range tests {
+		var out bytes.Buffer
+		s := shipper.NewShipper(&out, "", "")
+		hostKey := newTestKey(t)
+		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+		config := &ssh.ClientConfig{
+			User:            tt.user,
+			Auth:            []ssh.AuthMethod{ssh.Password(tt.password)},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(), // test only: the server key is a throwaway one
+			Timeout:         5 * time.Second,
+		}
+		if client, err := ssh.Dial("tcp", addr, config); err == nil {
+			client.Close()
+			t.Errorf("user of %d bytes, password of %d: accepted", len(tt.user), len(tt.password))
+		}
+		waitDone(t, done)
+
+		logins := ofType(parseEvents(t, out.String()), "login_attempt")
+		if tt.logged && (len(logins) != 1 || logins[0].Credentials.Password != tt.password) ||
+			!tt.logged && len(logins) != 0 {
+			t.Errorf("user of %d bytes, password of %d: %d login_attempt events (logged: %v)",
+				len(tt.user), len(tt.password), len(logins), tt.logged)
+		}
 	}
 }
 

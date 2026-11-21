@@ -111,7 +111,8 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
 - **Built-in limits:**
   - connections per service and per IP;
   - an idle timeout;
-  - limits on line length and number of commands.
+  - limits on line length and number of commands;
+  - size limits copied from the real servers: 8 KB of HTTP request headers (lighttpd), 9000 bytes for an SSH command and 100 bytes for an SSH username or password (Dropbear). No single request can turn into a huge event.
 - **No escape routes:**
   - FTP never opens data connections;
   - SSH allows no port forwarding;

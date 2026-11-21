@@ -24,8 +24,14 @@ import (
 // sessionKey is the context key under which ConnContext stores a connection's session_id.
 type sessionKey struct{}
 
-// httpDelay is the shortest time the router takes to answer a request (see the handler).
-const httpDelay = 200 * time.Millisecond
+const (
+	// httpDelay is the shortest time the router takes to answer a request (see the handler).
+	httpDelay = 200 * time.Millisecond
+
+	// lighttpdMaxHeader is lighttpd's server.max-request-field-size (default 8192, server.c): a
+	// longer request line + headers gets 431 (connections.c). It also keeps every event small.
+	lighttpdMaxHeader = 8192
+)
 
 // The field names read as credentials, in a form body or in the URL. The password is kept out of
 // raw_data and http_path: it goes only in credentials.
@@ -104,6 +110,11 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		// the shipper can deliver. Without it, one fast scanner made 4000 events/s and most were lost.
 		time.Sleep(httpDelay + rand.N(httpDelay/2))
 
+		if headerSize(r) > lighttpdMaxHeader {
+			lighttpdTooLarge(w) // lighttpd doesn't even parse it: no 404, no Basic Auth
+			return
+		}
+
 		// Like lighttpd with the vendor's lighttpd.conf (vfs/web.go): only the files in /var/www exist
 		// (a fake that answers 200 to any path is a classic tell), login.cgi is a program.
 		w.Header().Set("Server", "lighttpd/1.4.53") // the version in Buildroot 2019.05.3 (see vfs/fs.go)
@@ -136,6 +147,9 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		// Go's default is 1MB (a 1MB path would go into one event). Over this + 4KB, Go answers its own
+		// 431 and the handler never runs; between lighttpdMaxHeader and that, the handler answers like lighttpd.
+		MaxHeaderBytes: lighttpdMaxHeader,
 		// called once per new TCP connection: keep-alive requests on it share one session_id
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
 			return context.WithValue(ctx, sessionKey{}, newSessionID())
@@ -189,6 +203,37 @@ func withoutPasswords(body string) string {
 		}
 	}
 	return strings.Join(kept, "&")
+}
+
+// headerSize is the size of the request line + headers + blank line, what lighttpd compares with
+// lighttpdMaxHeader. Go doesn't keep the raw bytes, so it's rebuilt as "Name: value\r\n" per header:
+// exact for a normal client, a few bytes off if it put extra spaces around the values.
+func headerSize(r *http.Request) int {
+	size := len(r.Method) + 1 + len(r.RequestURI) + 1 + len(r.Proto) + 2 // "GET /x HTTP/1.1\r\n"
+	if r.Host != "" {
+		size += len("Host: ") + len(r.Host) + 2 // Go moves the Host header out of r.Header
+	}
+	for name, values := range r.Header {
+		for _, value := range values {
+			size += len(name) + len(": ") + len(value) + 2
+		}
+	}
+	return size + 2
+}
+
+// lighttpdTooLarge answers like lighttpd 1.4.53 to a too-large header: HTTP/1.0 (the request was
+// never parsed), "431 " with no text (http_kv.c has none for 431), then it closes the connection.
+// Written by hand (Hijack): net/http would add its own status text and header order.
+func lighttpdTooLarge(w http.ResponseWriter) {
+	conn, buf, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	page := lighttpdErrorPage("431 ")
+	fmt.Fprintf(buf, "HTTP/1.0 431 \r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n"+
+		"Date: %s\r\nServer: lighttpd/1.4.53\r\n\r\n%s", len(page), time.Now().UTC().Format(http.TimeFormat), page)
+	buf.Flush()
 }
 
 // lighttpdErrorPage is the page lighttpd 1.4.53 builds itself for an error (src/connections.c), for

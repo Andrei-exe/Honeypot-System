@@ -28,6 +28,11 @@ const (
 	sshMaxCommands = 50
 	sshMaxAuth     = 6 // password attempts allowed per connection
 
+	// Dropbear's limits (MAX_USERNAME_LEN, DROPBEAR_MAX_PASSWORD_LEN, MAX_CMD_LEN): longer is refused.
+	// They also keep events small: an SSH packet could carry ~256KB into one event.
+	dropbearMaxLogin  = 100 // username or password, in bytes
+	dropbearMaxCmdLen = 9000
+
 	// BusyBox routers run Dropbear, not OpenSSH -> same persona as Telnet.
 	sshServerVersion = "SSH-2.0-dropbear_2019.78"
 
@@ -110,6 +115,10 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 
 			user := meta.User()
 			pass := string(password)
+			if len(user) > dropbearMaxLogin || len(pass) > dropbearMaxLogin {
+				time.Sleep(time.Second) // Dropbear doesn't check it: a plain failure, not logged
+				return nil, errors.New("too long")
+			}
 			success := weakCredentials[user+":"+pass]
 
 			event := newEvent("login_attempt")
@@ -180,6 +189,10 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			// ssh root@host "uname -a" -> one command, no prompt
 			var payload struct{ Command string }
 			ssh.Unmarshal(req.Payload, &payload)
+			if len(payload.Command) > dropbearMaxCmdLen {
+				req.Reply(false, nil) // like Dropbear: fails, nothing runs; the client may try again
+				continue
+			}
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
