@@ -398,7 +398,7 @@ func (s *Shell) cp(args []string) (string, int, bool) {
 		return "cp: can't create '" + dst + "': " + err.Error() + "\n", 1, false
 	}
 	if full {
-		return writeError("cp"), 1, false
+		return writeError("cp", errNoSpace), 1, false
 	}
 	return "", 0, false
 }

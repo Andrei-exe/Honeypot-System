@@ -26,6 +26,7 @@ var (
 	errIsDir   = errors.New("Is a directory")
 	errNoDir   = errors.New("No such file or directory")
 	errNoSpace = errors.New("No space left on device")
+	errBadFD   = errors.New("Bad file descriptor") // writing to a descriptor closed with >&-
 )
 
 // diskCost is what a file or directory takes from sessionQuota: its content in whole 4KB pages (like
@@ -58,14 +59,15 @@ func (s *Shell) room(p string) int {
 	return left - diskCost(p, "")
 }
 
-// writeError is what a command prints when the disk fills up under its output. echo is ash's builtin,
-// so it reports as the shell: "sh" (applet_name, the login "-" stripped); applets copying data (cat,
-// cp, crontab: libbb/copyfd.c) use their own name. Other applets would say "standard output" (simplified).
-func writeError(command string) string {
+// writeError is what a command prints when writing its output fails (the disk is full, or the output
+// was closed). echo is ash's builtin, so it reports as the shell: "sh" (applet_name, the login "-"
+// stripped); applets copying data (cat, cp, crontab: libbb/copyfd.c) use their own name. Other
+// applets would say "standard output" (simplified).
+func writeError(command string, reason error) string {
 	if command == "echo" {
 		command = "sh"
 	}
-	return path.Base(command) + ": write error: " + errNoSpace.Error() + "\n"
+	return path.Base(command) + ": write error: " + reason.Error() + "\n"
 }
 
 // elfHeader is the start of a 32-bit ARM ELF binary. Mirai-style bots "cat /bin/echo" and read

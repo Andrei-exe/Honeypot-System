@@ -372,7 +372,7 @@ func (s *Shell) crontab(args []string, input string) (string, int, bool) {
 		if err != nil {
 			out += "crontab: can't create " + dir + "/" + user + ".new\n" // its temporary file
 		} else if full {
-			out += writeError("crontab")
+			out += writeError("crontab", errNoSpace)
 		}
 	}
 	s.writeFile(path.Join(dirPath, "cron.update"), user+"\n", true) // the note for crond to reread (unchecked)

