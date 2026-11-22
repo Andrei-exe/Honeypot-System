@@ -5,6 +5,7 @@
  */
 
 import { inspectAttacker, initInspectorResizer, renderInspector } from "./components/inspector.js";
+import { initCopilot } from "./components/copilot.js";
 import { initCommandPalette } from "./components/palette.js";
 import { api } from "./core/api.js";
 import { fmtNum, fmtTime, showToast } from "./core/escape.js";
@@ -326,6 +327,7 @@ function bootstrap() {
   bindStaticControls();
   initInspectorResizer();
   initCommandPalette();
+  initCopilot();
 
   initShortcuts({
     onForceRefresh: () => {

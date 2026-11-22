@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from flask import Blueprint, jsonify, request
 
 from config import DEFAULT_SESSIONS_LIMIT, TECHNIQUE_TACTIC
+from services.copilot import answer_query
 from services.engine_client import EngineError, engine_client
 from services.exporters import build_iptables_script, build_ufw_script, extract_ips_from_plain_blocklist
 from services.normalizer import (
@@ -480,3 +481,14 @@ def v1_defense():
         recommendations=recommendations,
         telemetry=engine_client.telemetry(),
     ), 200
+
+
+@api_bp.post("/api/v1/copilot")
+def v1_copilot():
+    body = request.get_json(silent=True) or {}
+    message = str(body.get("message") or "")[:300]
+    try:
+        result = answer_query(message)
+        return jsonify(**result, telemetry=engine_client.telemetry()), 200
+    except EngineError as exc:
+        return _error_response(exc)

@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/css/components.css">
   <link rel="stylesheet" href="/static/css/tables.css">
   <link rel="stylesheet" href="/static/css/inspector.css">
+  <link rel="stylesheet" href="/static/css/copilot.css">
 </head>
 <body>
   <div class="soc-shell">
@@ -48,6 +49,7 @@
           <button class="btn live-on" id="btn-live" title="Toggle auto-refresh [Space]">LIVE 4S</button>
           <button class="btn" id="btn-refresh" title="Force refresh [r]">REFRESH</button>
           <button class="btn" id="btn-palette" title="Command Palette [Ctrl+K]">CMD [CTRL+K]</button>
+          <button class="btn" id="btn-copilot" title="Local SOC Copilot [F1]">COPILOT [F1]</button>
         </div>
       </div>
     </header>
@@ -158,6 +160,7 @@
     </div>
   </div>
 
+  <aside class="copilot-drawer hidden" id="copilot-drawer" aria-label="SOC Copilot"></aside>
   <div class="toast-container" id="toast-container"></div>
   <script type="module" src="/static/js/main.js"></script>
 </body>
