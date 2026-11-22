@@ -114,6 +114,7 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
   - an idle timeout;
   - limits on line length and number of commands;
   - size limits copied from the real servers: 8 KB of HTTP request headers (lighttpd), 9000 bytes for an SSH command and 100 bytes for an SSH username or password (Dropbear). No single request can turn into a huge event;
+  - a bug that some attacker input triggers ends only that attacker's session: the agent recovers, logs it and keeps serving everyone else;
   - 256 KB of fake disk space per shell session. Past that, writes fail the way they do on a full disk, with BusyBox's own error messages, and `df` shows the disk full. One session can no longer fill the agent's memory.
 - **No escape routes:**
   - FTP never opens data connections;

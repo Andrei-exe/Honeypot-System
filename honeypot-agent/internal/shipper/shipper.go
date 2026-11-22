@@ -67,9 +67,11 @@ func NewShipper(out io.Writer, url, token string) *Shipper {
 // EmitEvent is called by the services and never waits on the network:
 // it writes the JSONL line, queues the event and returns immediately.
 func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
-	s.mu.Lock()
-	s.enc.Encode(e)
-	s.mu.Unlock()
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock() // even if Encode panicked: a session's recovered panic must not leave it locked
+		s.enc.Encode(e)
+	}()
 
 	if s.queue == nil {
 		return // no URL: JSONL only

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -22,9 +23,31 @@ func serve(ctx context.Context, listener net.Listener, handle func(net.Conn)) er
 
 	var (
 		wg   sync.WaitGroup        // one count per running handler
-		mu   sync.Mutex            // guards open (changed from many goroutines)
+		mu   sync.Mutex            // guards open, panics and lastPanicLog (changed from many goroutines)
 		open = map[net.Conn]bool{} // connections whose handler is still running
+
+		panics       int       // sessions ended by a panic since the last message about them
+		lastPanicLog time.Time // like limit.go: at most one message per limitLogEvery
 	)
+
+	// endSession runs when a handler returns, or panics. A bug that some attacker input triggers must
+	// end only that session: in Go a panic nobody recovers, in any goroutine, stops the whole agent.
+	// The handler's own defers (session_end, closing the connection) have already run by then.
+	endSession := func(conn net.Conn, crash any) {
+		mu.Lock()
+		defer mu.Unlock()
+		delete(open, conn)
+		if crash == nil {
+			return
+		}
+		conn.Close()
+		panics++
+		if time.Since(lastPanicLog) >= limitLogEvery { // an attacker repeating it can't flood the log
+			log.Printf("panic in a session from %s, only that session was closed (%d since the last message): %v\n%s",
+				conn.RemoteAddr(), panics, crash, debug.Stack())
+			panics, lastPanicLog = 0, time.Now()
+		}
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -42,10 +65,8 @@ func serve(ctx context.Context, listener net.Listener, handle func(net.Conn)) er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() { endSession(conn, recover()) }() // recover: nil, or what the handler panicked with
 			handle(conn)
-			mu.Lock()
-			delete(open, conn)
-			mu.Unlock()
 		}()
 	}
 
