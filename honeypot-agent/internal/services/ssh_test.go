@@ -405,6 +405,48 @@ func TestSSHWrongPassword(t *testing.T) {
 	}
 }
 
+// In the interactive shell too, commands sent all at once are answered one by one, 200-300ms
+// apart (pacer), and none is lost.
+func TestSSHShellCommandsArePaced(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	client, _, err := sshDial(addr, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Shell(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	fmt.Fprint(stdin, strings.Repeat("echo x\r", 5)+"exit\r")     // 6 lines in one write (Enter = \r)
+	io.ReadAll(stdout)                                            // until the shell exits
+	if took := time.Since(start); took < 5*200*time.Millisecond { // the first runs at once, then 5 waits
+		t.Errorf("6 commands sent at once took %v (expected at least 1s)", took)
+	}
+	client.Close()
+	waitDone(t, done)
+	if n := len(ofType(parseEvents(t, out.String()), "command_exec")); n != 6 {
+		t.Errorf("%d command_exec events (expected 6)", n)
+	}
+}
+
 // Right password: Dropbear banner, port forwarding refused (we must never be a proxy),
 // and an exec command (ssh root@host "...") runs in the fake shell.
 func TestSSHSession(t *testing.T) {

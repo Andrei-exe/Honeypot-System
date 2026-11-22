@@ -3,8 +3,10 @@ package services
 import (
 	"crypto/rand"
 	"encoding/hex"
+	mrand "math/rand/v2" // rand is crypto/rand here (the session IDs)
 	"regexp"
 	"strings"
+	"time"
 
 	"honeypot-agent/internal/models"
 	"honeypot-agent/internal/shipper"
@@ -43,6 +45,29 @@ var weakCredentials = map[string]bool{
 	"root:7ujMko0vizxv": true,
 	"admin:admin1234":   true,
 	"admin:smcadmin":    true,
+}
+
+// routerDelay is how long the cheap router takes to answer, at least: an HTTP request (http.go) or
+// the next command of a session (pacer). Plus up to half of it at random, like a real device.
+const routerDelay = 200 * time.Millisecond
+
+// routerAnswerTime is one answer time: 200-300ms.
+func routerAnswerTime() time.Duration {
+	return routerDelay + mrand.N(routerDelay/2)
+}
+
+// pacer spaces out the commands of one session (Telnet, SSH shell, FTP): at most one per 200-300ms.
+// Whoever waits for each answer before sending the next command (a person, most bots) never waits
+// here; a bot that sends 50 commands at once gets them answered one by one. Without it one IP made
+// 530 events/s (10 sessions/s x 53 events) and a few IPs were more than the shipper can deliver.
+type pacer struct {
+	next time.Time // the earliest time the next command may run (zero: right away)
+}
+
+// wait blocks until the next command may run, then books the time for the one after it.
+func (p *pacer) wait() {
+	time.Sleep(time.Until(p.next)) // a time already past = no wait at all
+	p.next = time.Now().Add(routerAnswerTime())
 }
 
 // urlRegex finds download URLs in commands (wget http://..., tftp://...) for extracted_url.

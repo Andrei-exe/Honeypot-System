@@ -81,6 +81,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	loggedIn := false
 	failed := 0
 	cwd := "/"
+	var pace pacer // commands sent all at once are answered one by one (common.go)
 
 	reply("220 (vsFTPd 3.0.3)")
 
@@ -98,6 +99,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 		if line == "" {
 			continue
 		}
+		pace.wait() // even before login: refused commands are logged too
 
 		cmd, arg, _ := strings.Cut(line, " ")
 		cmd = strings.ToUpper(cmd)

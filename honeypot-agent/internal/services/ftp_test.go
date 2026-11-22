@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,38 @@ func TestFTPSession(t *testing.T) {
 	want := []string{"SYST", "PASV", portCommand, "LIST", "RETR /etc/passwd"}
 	if !slices.Equal(commands, want) {
 		t.Errorf("command_exec: %q\n           want %q", commands, want)
+	}
+}
+
+// Commands sent all at once are answered one by one, 200-300ms apart (pacer), even before login
+// (refused commands are logged too, so without it no password was needed for a flood).
+func TestFTPCommandsArePaced(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleFTP(c, "ftp-test", s) })
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+	readUntil(t, r, "\r\n") // the banner
+
+	start := time.Now()
+	fmt.Fprint(conn, strings.Repeat("SYST\r\n", 5)+"QUIT\r\n")    // 6 lines in one write
+	all, _ := io.ReadAll(r)                                       // until QUIT ends the session
+	if took := time.Since(start); took < 5*200*time.Millisecond { // the first runs at once, then 5 waits
+		t.Errorf("6 commands sent at once took %v (expected at least 1s)", took)
+	}
+	want := strings.Repeat("530 Please login with USER and PASS.\r\n", 5) + "221 Goodbye.\r\n"
+	if string(all) != want {
+		t.Errorf("got %q", all)
+	}
+	waitDone(t, done)
+	if n := len(ofType(parseEvents(t, out.String()), "command_exec")); n != 5 {
+		t.Errorf("%d command_exec events (expected 5)", n)
 	}
 }
 

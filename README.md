@@ -30,7 +30,8 @@ flowchart LR
   - It limits what one attacker can do, so a flood cannot bury the events of the other services:
     - at most 200 connections per service and 10 per IP;
     - a connection keeps its place for at least one second, so one IP can open at most 10 new connections per second;
-    - the web server answers like a slow router, in 200 to 300 ms, which keeps a web flood under about 1000 events per second (50 per IP).
+    - the web server answers like a slow router, in 200 to 300 ms, which keeps a web flood under about 1000 events per second (50 per IP);
+    - commands that arrive all at once (Telnet, the SSH shell, FTP) are answered one by one, 200 to 300 ms apart, so one IP produces about 40 events per second instead of over 500. A person, or a bot that waits for each answer, sees no delay at all.
   - On shutdown (`docker stop`, a server reboot, an update), it stops accepting connections, ends the open sessions and delivers its last events before it exits, usually within a second.
 - **threat-engine:**
   - Receives the events (`POST /api/events`, protected by a token) and evaluates each one in real time. It flags successful logins, brute force, download attempts, dangerous commands and malicious HTTP paths, with severities from LOW to CRITICAL.

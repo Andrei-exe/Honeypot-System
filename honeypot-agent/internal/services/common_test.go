@@ -4,9 +4,33 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"honeypot-agent/internal/vfs"
 )
+
+// The pacer makes only a command that comes too soon wait. The numbers are written here, not taken
+// from routerDelay, so a changed constant fails the test too.
+func TestPacer(t *testing.T) {
+	const slack = 50 * time.Millisecond // scheduling noise
+	var p pacer
+	took := func() time.Duration {
+		start := time.Now()
+		p.wait()
+		return time.Since(start)
+	}
+
+	if d := took(); d > slack {
+		t.Errorf("the first command waited %v (expected no wait)", d)
+	}
+	if d := took(); d < 200*time.Millisecond || d > 300*time.Millisecond+slack {
+		t.Errorf("a command right after the previous one waited %v (expected 200-300ms)", d)
+	}
+	time.Sleep(400 * time.Millisecond) // whoever waits for the answer before sending the next command...
+	if d := took(); d > slack {
+		t.Errorf("a command sent 400ms later waited %v (expected no wait)", d) // ...never waits
+	}
+}
 
 // urlRegex pulls the download URL out of typical bot lines and stops at shell separators and quotes.
 func TestURLRegex(t *testing.T) {

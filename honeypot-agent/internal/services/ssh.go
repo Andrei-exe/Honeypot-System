@@ -252,6 +252,7 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 	terminal := term.NewTerminal(channel, sh.Prompt()) // no banner, like telnet.go
 
 	code := 0
+	var pace pacer // commands sent all at once are answered one by one (common.go)
 	for i := 0; i < sshMaxCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
@@ -261,6 +262,7 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 			return code
 		}
 
+		pace.wait()
 		output, c, exit := runShellLine(sh, line, newEvent, shipper)
 		fmt.Fprint(terminal, output)
 		if exit {

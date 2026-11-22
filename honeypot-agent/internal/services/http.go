@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,9 +24,6 @@ import (
 type sessionKey struct{}
 
 const (
-	// httpDelay is the shortest time the router takes to answer a request (see the handler).
-	httpDelay = 200 * time.Millisecond
-
 	// lighttpdMaxHeader is lighttpd's server.max-request-field-size (default 8192, server.c): a
 	// longer request line + headers gets 431 (connections.c). It also keeps every event small.
 	lighttpdMaxHeader = 8192
@@ -108,7 +104,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		// caps a flood: a request keeps its connection busy that long and there are at most 200
 		// connections (10 per IP, limit.go), so at most 200 / 0.2s = 1000 events/s (50/s per IP), which
 		// the shipper can deliver. Without it, one fast scanner made 4000 events/s and most were lost.
-		time.Sleep(httpDelay + rand.N(httpDelay/2))
+		time.Sleep(routerAnswerTime()) // routerDelay in common.go
 
 		if headerSize(r) > lighttpdMaxHeader {
 			lighttpdTooLarge(w) // lighttpd doesn't even parse it: no 404, no Basic Auth

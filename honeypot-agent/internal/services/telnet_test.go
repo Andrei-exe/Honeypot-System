@@ -174,6 +174,38 @@ func TestTelnetSession(t *testing.T) {
 	}
 }
 
+// A bot that sends its commands all at once gets them answered one by one, 200-300ms apart (pacer),
+// so one session can't make hundreds of events a second. None of them is lost.
+func TestTelnetCommandsArePaced(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+	fmt.Fprint(conn, "root\r\nroot\r\n")
+	readUntil(t, r, "root@gateway:~# ")
+
+	start := time.Now()
+	fmt.Fprint(conn, strings.Repeat("echo x\r\n", 5)+"exit\r\n")  // 6 lines in one write
+	all, _ := io.ReadAll(r)                                       // until exit ends the session
+	if took := time.Since(start); took < 5*200*time.Millisecond { // the first runs at once, then 5 waits
+		t.Errorf("6 commands sent at once took %v (expected at least 1s)", took)
+	}
+	if n := strings.Count(string(all), "x\r\n"); n != 5 {
+		t.Errorf("%d outputs (expected 5): %q", n, all)
+	}
+	waitDone(t, done)
+	if n := len(ofType(parseEvents(t, out.String()), "command_exec")); n != 6 {
+		t.Errorf("%d command_exec events (expected 6)", n)
+	}
+}
+
 // Empty user names only ask again (no "Password:", no login_attempt). The 10th ends the session,
 // like BusyBox login (EMPTY_USERNAME_COUNT), so a bot can't keep us busy with empty lines.
 func TestTelnetEmptyNames(t *testing.T) {
