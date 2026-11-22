@@ -1,6 +1,6 @@
 /**
- * Sanitizare stricta XSS si utilitare de formatare tabulara.
- * Orice string venit de la atacatori (<, >, &, quotes) trece obligatoriu prin escapeHtml().
+ * Strict XSS sanitization and table formatting helpers.
+ * Every string coming from attackers (<, >, &, quotes) must go through escapeHtml().
  */
 
 const ESC_MAP = {

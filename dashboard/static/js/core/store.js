@@ -1,5 +1,5 @@
 /**
- * State management centralizat (pub/sub) pentru consola SOC.
+ * Centralized state management (pub/sub) for the SOC console.
  */
 
 const VALID_VIEWS = new Set([

@@ -1,10 +1,10 @@
-"""Normalizare si imbogatire a datelor din threat-engine pentru consola SOC.
+"""Normalization and enrichment of threat-engine data for the SOC console.
 
-Gestioneaza explicit:
-- Sesiunile HTTP care au session_id per conexiune TCP fara session_start/session_end
-- Monitorizarea saturatiei SessionStore (plafon 2000 sesiuni) si zgomotul scannerelor web
-- Separarea stricta intre credentials (parole HTTP/SSH/Telnet/FTP) si payload_details.raw_data
-- Detectia rapida de honeytokens (/etc/hostapd.conf, /etc/ppp/chap-secrets), Mirai si cryptomineri
+Explicitly handles:
+- HTTP sessions, which have a session_id per TCP connection but no session_start/session_end
+- SessionStore saturation (2000-session cap) and web scanner noise
+- Strict separation between credentials (HTTP/SSH/Telnet/FTP passwords) and payload_details.raw_data
+- Fast detection of honeytokens (/etc/hostapd.conf, /etc/ppp/chap-secrets), Mirai and cryptominers
 """
 
 from collections import Counter
@@ -108,7 +108,7 @@ def normalize_alert(alert, index=0):
 def build_ip_family_map(families):
     ip_map = {}
     for fam in families or []:
-        label = fam.get("label") or "familie necunoscuta"
+        label = fam.get("label") or "unknown family"
         for ip in fam.get("ips") or []:
             ip_map.setdefault(ip, [])
             if label not in ip_map[ip]:
@@ -221,7 +221,7 @@ def normalize_session(summary, ip_families=None, alerts_by_session=None):
 
 
 def compute_session_store_health(total_sessions, sessions_list):
-    """Calculeaza saturatia SessionStore (plafon 2000) si ponderea HTTP vs Interactive."""
+    """Computes SessionStore saturation (2000 cap) and the HTTP vs interactive share."""
     proto_counts = Counter()
     for s in sessions_list:
         proto_counts[(s.get("protocol") or "UNKNOWN").upper()] += 1
@@ -255,7 +255,7 @@ def compute_session_store_health(total_sessions, sessions_list):
 
 
 def build_timeline_buckets(normalized_alerts, bucket_count=36):
-    """Grupeaza alertele recente in intervale cronologice pe protocoale pentru graficul Canvas."""
+    """Groups recent alerts into time buckets per protocol for the Canvas chart."""
     parsed = []
     for al in normalized_alerts:
         ts_raw = al.get("timestamp")

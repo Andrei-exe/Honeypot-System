@@ -1,4 +1,4 @@
-"""Blueprint API intern (/api/v1/*) care agrega si normalizeaza toate endpoint-urile threat-engine."""
+"""Internal API blueprint (/api/v1/*) that aggregates and normalizes all threat-engine endpoints."""
 
 from collections import Counter, defaultdict
 
@@ -30,14 +30,14 @@ def _error_response(exc):
 def _load_normalized_alerts(bypass=False):
     raw = engine_client.get_alerts(bypass_cache=bypass)
     raw_alerts = raw.get("alerts") or []
-    # Cele mai noi alerte primele
+    # Newest alerts first
     normalized = [normalize_alert(a, idx) for idx, a in enumerate(raw_alerts)]
     normalized.reverse()
     return raw.get("total", len(normalized)), normalized
 
 
 def _build_correlation_graph(campaigns, families, sessions):
-    """Construieste noduri si muchii gata pentru randarea pe Canvas 2D force-directed."""
+    """Builds nodes and edges ready for rendering on a force-directed 2D canvas."""
     nodes = {}
     edges = []
     ip_sessions = Counter(s.get("source_ip") for s in sessions if s.get("source_ip"))
@@ -74,7 +74,7 @@ def _build_correlation_graph(campaigns, families, sessions):
 
     for idx, fam in enumerate(families):
         fid = f"fam:{idx}"
-        label = fam.get("label") or "familie"
+        label = fam.get("label") or "family"
         ensure_node(
             fid,
             label,
@@ -95,12 +95,12 @@ def _build_correlation_graph(campaigns, families, sessions):
 
 @api_bp.get("/api/alerts")
 def legacy_alerts():
-    """Pastreaza compatibilitatea cu endpoint-ul original /api/alerts."""
+    """Keeps compatibility with the original /api/alerts endpoint."""
     try:
         raw = engine_client.get_alerts(bypass_cache=_bypass())
         return jsonify(total=raw.get("total", 0), alerts=raw.get("alerts", [])), 200
     except EngineError as exc:
-        return jsonify(total=0, alerts=[], error=f"threat-engine nu raspunde: {exc}"), exc.status_code
+        return jsonify(total=0, alerts=[], error=f"threat-engine is not responding: {exc}"), exc.status_code
 
 
 @api_bp.get("/api/v1/health")
@@ -213,7 +213,7 @@ def v1_sessions():
 
 @api_bp.get("/api/v1/attackers")
 def v1_attackers_index():
-    """Index agregat al atacatorilor din stats + alerte + sesiuni + familii."""
+    """Aggregated attacker index built from stats + alerts + sessions + families."""
     bypass = _bypass()
     try:
         stats = engine_client.get_stats(bypass_cache=bypass)

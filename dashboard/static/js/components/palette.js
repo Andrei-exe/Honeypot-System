@@ -1,5 +1,5 @@
 /**
- * Command Palette (Ctrl+K) pentru navigare instanta, filtre DSL predefinite si exporturi.
+ * Command palette (Ctrl+K) for instant navigation, predefined DSL filters and exports.
  */
 
 import { escapeHtml } from "../core/escape.js";

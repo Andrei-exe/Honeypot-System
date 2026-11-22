@@ -1,5 +1,5 @@
 /**
- * Grafic multi-protocol pe HTML5 Canvas 2D (HiDPI, colțuri 90°, crosshair interactiv).
+ * Multi-protocol chart on an HTML5 2D Canvas (HiDPI, 90° corners, interactive crosshair).
  */
 
 const PROTO_COLORS = {
@@ -129,7 +129,7 @@ export class TimelineChart {
     const plotW = m.w - m.padL - m.padR;
     const plotH = m.h - m.padT - m.padB;
 
-    // Legenda compacta sus-dreapta
+    // Compact legend, top-right
     ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
     let lx = m.w - m.padR;
     for (let i = ORDER.length - 2; i >= 0; i--) {
@@ -151,7 +151,7 @@ export class TimelineChart {
     const maxTotal = Math.max(4, ...buckets.map((b) => b.total || 0));
     const yTicks = 4;
 
-    // Linii de grila orizontale + etichete Y
+    // Horizontal grid lines + Y labels
     ctx.strokeStyle = "#161d27";
     ctx.lineWidth = 1;
     ctx.textAlign = "right";
@@ -169,7 +169,7 @@ export class TimelineChart {
     }
     ctx.textAlign = "left";
 
-    // Bare stivuite pe protocoale (0px border-radius)
+    // Bars stacked by protocol (0px border-radius)
     const step = plotW / buckets.length;
     const barW = Math.max(2, Math.floor(step - 2));
 
@@ -192,14 +192,14 @@ export class TimelineChart {
         ctx.fillRect(x, Math.round(curY), barW, Math.ceil(segH));
       }
 
-      // Marcaj 2px rosu deasupra barei daca exista alerte CRITICAL in bucket
+      // 2px red mark above the bar if the bucket has CRITICAL alerts
       if (b.CRITICAL > 0) {
         ctx.fillStyle = "#e5484d";
         ctx.fillRect(x, Math.max(m.padT, Math.round(curY) - 3), barW, 2);
       }
     }
 
-    // Axe X / Y (hairline 1px)
+    // X / Y axes (1px hairline)
     ctx.strokeStyle = "#2b3647";
     ctx.beginPath();
     ctx.moveTo(m.padL + 0.5, m.padT);
@@ -207,7 +207,7 @@ export class TimelineChart {
     ctx.lineTo(m.w - m.padR, m.padT + plotH + 0.5);
     ctx.stroke();
 
-    // Etichete X (6 repere)
+    // X labels (6 ticks)
     const xLabelCount = Math.min(6, buckets.length);
     ctx.fillStyle = "#647285";
     ctx.textAlign = "center";
@@ -218,7 +218,7 @@ export class TimelineChart {
     }
     ctx.textAlign = "left";
 
-    // Crosshair vertical la hover
+    // Vertical crosshair on hover
     if (this.hoverIdx >= 0) {
       const cx = Math.round(m.padL + this.hoverIdx * step + step / 2) + 0.5;
       ctx.strokeStyle = "rgba(216, 222, 233, 0.35)";

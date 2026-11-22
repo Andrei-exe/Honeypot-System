@@ -1,6 +1,6 @@
 /**
- * Client HTTP catre backend-ul Flask (/api/v1/*) cu AbortController per endpoint.
- * Previne race-condition-urile cand operatorul schimba rapid tab-urile.
+ * HTTP client for the Flask backend (/api/v1/*) with one AbortController per endpoint.
+ * Prevents race conditions when the operator switches tabs quickly.
  */
 
 const controllers = new Map();

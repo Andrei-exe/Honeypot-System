@@ -1,4 +1,4 @@
-"""Client HTTP thread-safe catre threat-engine cu micro-cache in RAM si metrici de latenta."""
+"""Thread-safe HTTP client for the threat-engine, with a small in-RAM cache and latency metrics."""
 
 import json
 import threading

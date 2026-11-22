@@ -1,10 +1,10 @@
 /* ==========================================================================
    HONEYPOT SOC CONSOLE // DESIGN TOKENS
-   Estetica industriala stricta: 0px border-radius, hairline 1px, 0 box-shadow
+   Strict industrial aesthetic: 0px border-radius, 1px hairlines, 0 box-shadow
    ========================================================================== */
 
 :root {
-  /* Suprafete (90% monocrom grafit/otel) */
+  /* Surfaces (90% monochrome graphite/steel) */
   --bg-canvas: #080a0e;
   --bg-panel: #0d1117;
   --bg-panel-alt: #11161e;
@@ -27,7 +27,7 @@
   --text-bright: #f0f4fa;
   --text-inverse: #080a0e;
 
-  /* Semnale semantice (fara glow) */
+  /* Semantic signals (no glow) */
   --sev-critical: #e5484d;
   --sev-critical-bg: #291215;
   --sev-critical-border: #6e2328;
@@ -48,7 +48,7 @@
   --sev-none-bg: #141921;
   --sev-none-border: #28313f;
 
-  /* Stari operationale */
+  /* Operational states */
   --state-ok: #2ea043;
   --state-ok-bg: #0f2416;
   --state-ok-border: #215730;
@@ -56,20 +56,20 @@
   --state-warn-bg: #261f0b;
   --state-accent: #58a6ff;
 
-  /* Culori protocoale (pentru grafice Canvas & badge-uri) */
+  /* Protocol colors (for Canvas charts & badges) */
   --proto-ssh: #4b91d9;
   --proto-telnet: #e07b24;
   --proto-ftp: #a371f7;
   --proto-http: #2ea043;
   --proto-other: #7d8a9c;
 
-  /* Tipografie (zero dependente externe / CDN) */
+  /* Typography (zero external dependencies / CDN) */
   --font-mono: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", "Fira Code",
                ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --font-sans: "IBM Plex Sans", "Inter", system-ui, -apple-system, "Segoe UI",
                Roboto, Helvetica, Arial, sans-serif;
 
-  /* Dimensiuni structurale */
+  /* Structural dimensions */
   --topbar-h: 34px;
   --subbar-h: 36px;
   --footer-h: 24px;
@@ -127,7 +127,7 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Scrollbars industriale 6px */
+/* Industrial 6px scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

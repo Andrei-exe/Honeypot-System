@@ -1,6 +1,6 @@
 /**
- * Motor de interogare DSL client-side (stil Splunk / Kibana).
- * Exemple valide:
+ * Client-side DSL query engine (Splunk / Kibana style).
+ * Valid examples:
  *   proto:ssh,telnet sev:high+ ip:172.21.*
  *   -proto:http has:creds
  *   tag:"scanner web" -tag:mirai

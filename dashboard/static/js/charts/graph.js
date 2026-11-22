@@ -1,6 +1,6 @@
 /**
- * Graf interactiv force-directed pe Canvas 2D pentru campanii, familii si corelari IP.
- * Suporta: drag pe noduri, pan (drag pe fundal), zoom (scroll) si click-to-inspect.
+ * Interactive force-directed graph on a 2D Canvas for campaigns, families and IP correlations.
+ * Supports: dragging nodes, pan (drag on the background), zoom (scroll) and click-to-inspect.
  */
 
 const NODE_STYLE = {
@@ -202,7 +202,7 @@ export class CorrelationGraph {
     const n = nodes.length;
     if (!n) return;
 
-    // Respingere Coulomb simplificata
+    // Simplified Coulomb repulsion
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
       for (let j = i + 1; j < n; j++) {
@@ -221,7 +221,7 @@ export class CorrelationGraph {
       }
     }
 
-    // Atractie pe muchii
+    // Attraction along edges
     for (const e of this.edges) {
       const dx = e.target.x - e.source.x;
       const dy = e.target.y - e.source.y;
@@ -236,7 +236,7 @@ export class CorrelationGraph {
       e.target.vy -= fy;
     }
 
-    // Gravitatie usoara spre centru + amortizare
+    // Light gravity toward the center + damping
     for (const node of nodes) {
       if (node === this.dragNode) continue;
       node.vx += -node.x * 0.012;
@@ -286,7 +286,7 @@ export class CorrelationGraph {
     ctx.fillStyle = "#06080b";
     ctx.fillRect(0, 0, w, h);
 
-    // Grid tehnic discret 24px
+    // Subtle 24px technical grid
     ctx.strokeStyle = "#0e131b";
     ctx.lineWidth = 1;
     for (let gx = 0; gx < w; gx += 28) {
@@ -313,7 +313,7 @@ export class CorrelationGraph {
     ctx.translate(w / 2 + this.offset.x, h / 2 + this.offset.y);
     ctx.scale(this.scale, this.scale);
 
-    // Muchii
+    // Edges
     for (const e of this.edges) {
       const highlight = this.hovered && (e.source === this.hovered || e.target === this.hovered);
       ctx.strokeStyle = highlight ? "#d8dee9" : (EDGE_COLOR[e.kind] || "#354357");
@@ -324,7 +324,7 @@ export class CorrelationGraph {
       ctx.stroke();
     }
 
-    // Noduri (patrate/diamante stricte, 0 rotunjiri)
+    // Nodes (strict squares/diamonds, no rounding)
     ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
     for (const node of this.nodes) {
       const st = NODE_STYLE[node.kind] || NODE_STYLE.ip;
@@ -336,7 +336,7 @@ export class CorrelationGraph {
       ctx.lineWidth = isHover ? 2 : 1.2;
 
       if (node.kind === "campaign" || node.kind === "server") {
-        // Diamant (patrat rotit la 45°)
+        // Diamond (square rotated by 45°)
         ctx.beginPath();
         ctx.moveTo(node.x, node.y - sz);
         ctx.lineTo(node.x + sz, node.y);
@@ -356,7 +356,7 @@ export class CorrelationGraph {
 
     ctx.restore();
 
-    // Legenda fixa jos-stanga
+    // Fixed legend, bottom-left
     ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
     const items = [
       ["CAMPAIGN", "#e5484d"],

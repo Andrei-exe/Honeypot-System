@@ -1,6 +1,6 @@
 /**
- * Split-Pane Inspector redimensionabil (Alert / Session / Attacker / Campaign / Family).
- * Separa strict `credentials` de `raw_data` si ofera Terminal Replay SSH/Telnet.
+ * Resizable split-pane inspector (Alert / Session / Attacker / Campaign / Family).
+ * Keeps `credentials` strictly apart from `raw_data` and offers SSH/Telnet terminal replay.
  */
 
 import { api } from "../core/api.js";

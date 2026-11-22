@@ -1,7 +1,7 @@
 /**
  * View 3: SESSIONS EXPLORER & REPLAY LAUNCHER
- * Suporta explicit sesiunile HTTP (session_id per conexiune TCP fara session_start/end)
- * si monitorizeaza saturatia SessionStore (plafon 2000 sesiuni).
+ * Explicitly supports HTTP sessions (session_id per TCP connection, without session_start/end)
+ * and monitors SessionStore saturation (2000-session cap).
  */
 
 import { inspectAttacker } from "../components/inspector.js";

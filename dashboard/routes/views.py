@@ -1,4 +1,4 @@
-"""Rute de randare HTML pentru interfata web."""
+"""HTML rendering routes for the web interface."""
 
 from flask import Blueprint, render_template
 

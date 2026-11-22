@@ -1,7 +1,7 @@
 /**
- * Entrypoint principal Honeypot SOC Console.
- * Coordoneaza polling-ul API, rutarea celor 7 view-uri, bara de telemetrie,
- * motorul DSL, navigarea cu tastatura si Split-Pane Inspector-ul.
+ * Main entrypoint of the Honeypot SOC Console.
+ * Coordinates API polling, routing between the 7 views, the telemetry bar,
+ * the DSL engine, keyboard navigation and the split-pane inspector.
  */
 
 import { inspectAttacker, initInspectorResizer, renderInspector } from "./components/inspector.js";
@@ -81,7 +81,7 @@ async function backgroundOverviewRefresh() {
     const res = await api.getOverview(false);
     store.setData("overview", res);
   } catch {
-    // Eroarea principala este deja reflectata de view-ul activ
+    // The main error is already shown by the active view
   }
 }
 

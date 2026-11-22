@@ -1,4 +1,4 @@
-"""Entrypoint Flask pentru consola Honeypot SOC Dashboard."""
+"""Flask entrypoint for the Honeypot SOC Dashboard console."""
 
 from flask import Flask
 
@@ -40,5 +40,5 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    print(f"dashboard SOC pornit pe http://0.0.0.0:{PORT} | upstream: {THREAT_ENGINE_URL}")
+    print(f"SOC dashboard running on http://0.0.0.0:{PORT} | upstream: {THREAT_ENGINE_URL}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

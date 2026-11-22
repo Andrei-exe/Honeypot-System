@@ -1,4 +1,4 @@
-"""Generatoare in memorie (zero scrieri pe disc) pentru exporturi CSV, JSON, firewall si rapoarte SOC."""
+"""In-memory generators (zero disk writes) for CSV, JSON, firewall and SOC report exports."""
 
 import csv
 import io

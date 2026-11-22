@@ -1,5 +1,5 @@
 /**
- * Palnie Kill-Chain pe HTML5 Canvas 2D (6 etape, rate de conversie si 0px rotunjiri).
+ * Kill-chain funnel on an HTML5 2D Canvas (6 stages, conversion rates, 0px rounding).
  */
 
 const STAGE_COLORS = [
@@ -112,24 +112,24 @@ export class KillChainFunnel {
         ctx.fillRect(2, y, w - 4, rowH - 2);
       }
 
-      // Eticheta stanga
+      // Left label
       ctx.fillStyle = idx === this.hoverIdx ? "#f0f4fa" : "#9aa7b8";
       ctx.fillText(`${idx + 1}. ${String(item.stage || "").toUpperCase()}`, 8, y + rowH * 0.62);
 
-      // Track fundal
+      // Background track
       const barY = Math.floor(y + (rowH - 12) / 2);
       ctx.fillStyle = "#11161e";
       ctx.fillRect(labelW, barY, barMaxW, 12);
       ctx.strokeStyle = "#1e2633";
       ctx.strokeRect(labelW + 0.5, barY + 0.5, barMaxW - 1, 11);
 
-      // Bara efectiva
+      // Actual bar
       if (barW > 0) {
         ctx.fillStyle = STAGE_COLORS[idx % STAGE_COLORS.length];
         ctx.fillRect(labelW, barY, barW, 12);
       }
 
-      // Valoare + procent dreapta
+      // Value + percentage on the right
       ctx.textAlign = "right";
       ctx.fillStyle = count > 0 ? "#d8dee9" : "#647285";
       ctx.fillText(`${count} (${pct}%)`, w - 8, y + rowH * 0.62);

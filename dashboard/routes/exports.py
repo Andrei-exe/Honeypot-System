@@ -1,4 +1,4 @@
-"""Endpoint-uri de export (generare in RAM, fara fisiere scrise pe disc)."""
+"""Export endpoints (generated in RAM, no files written to disk)."""
 
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -52,7 +52,7 @@ def export_alerts(fmt):
         return _attachment(alerts_to_csv(alerts), f"honeypot-alerts-{_stamp()}.csv", "text/csv; charset=utf-8")
     if fmt == "json":
         return _attachment(to_pretty_json({"total": raw.get("total", len(alerts)), "alerts": alerts}), f"honeypot-alerts-{_stamp()}.json", "application/json; charset=utf-8")
-    return jsonify(error="format nesuportat (foloseste csv sau json)"), 400
+    return jsonify(error="unsupported format (use csv or json)"), 400
 
 
 @exports_bp.get("/api/v1/export/sessions.<fmt>")
@@ -77,7 +77,7 @@ def export_sessions(fmt):
         return _attachment(sessions_to_csv(sessions), f"honeypot-sessions-{_stamp()}.csv", "text/csv; charset=utf-8")
     if fmt == "json":
         return _attachment(to_pretty_json({"total": sessions_raw.get("total", len(sessions)), "sessions": sessions}), f"honeypot-sessions-{_stamp()}.json", "application/json; charset=utf-8")
-    return jsonify(error="format nesuportat (foloseste csv sau json)"), 400
+    return jsonify(error="unsupported format (use csv or json)"), 400
 
 
 @exports_bp.get("/api/v1/export/blocklist")
@@ -98,7 +98,7 @@ def export_blocklist():
     except EngineError as exc:
         return jsonify(error=str(exc)), exc.status_code
 
-    return jsonify(error="format nesuportat (plain|nftables|fail2ban|iptables|ufw)"), 400
+    return jsonify(error="unsupported format (plain|nftables|fail2ban|iptables|ufw)"), 400
 
 
 @exports_bp.get("/api/v1/export/navigator.json")
