@@ -131,7 +131,7 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
   | threat-engine | 512 MB | 1 core | 64 |
   | dashboard | 128 MB | 0.5 core | 64 |
 
-  In a local load test (see [Load testing](#load-testing)), the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 200 SSH login attempts per second with a third of one core. A process that goes over its memory limit is killed and the container restarts.
+  In a local load test (see [Load testing](#load-testing)), the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 160 SSH login attempts per second with a quarter of one core (a wrong password is answered after about 300 ms, as Dropbear does). A process that goes over its memory limit is killed and the container restarts.
 - **Automatic restart:** every container comes back after a crash or a server reboot (`restart: unless-stopped`). A container you stop yourself stays stopped.
 - **Log rotation:** Docker keeps at most 100 MB of logs for the agent (5 files of 20 MB) and 30 MB for each Python container (3 files of 10 MB), so a busy server cannot fill its disk. Older lines are deleted, which means `docker logs honeypot-agent` shows only recent events. The full history is kept by the threat engine in `received_events.jsonl`.
 

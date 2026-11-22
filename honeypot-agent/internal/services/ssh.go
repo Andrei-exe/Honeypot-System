@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	mrand "math/rand/v2" // rand is crypto/rand here (the host key)
 	"net"
 	"os"
 	"strconv"
@@ -26,7 +27,13 @@ import (
 const (
 	sshIdleTimeout = 60 * time.Second
 	sshMaxCommands = 50
-	sshMaxAuth     = 6 // password attempts allowed per connection
+
+	// Dropbear's MAX_AUTH_TRIES (Buildroot's S50dropbear passes no -T): wrong passwords per connection.
+	// Rejected public keys don't count (svr-authpubkey.c).
+	sshMaxAuth = 10
+
+	// After a wrong password Dropbear answers in 300ms +-50 (send_msg_userauth_failure): this + up to 100ms.
+	sshFailDelay = 250 * time.Millisecond
 
 	// Dropbear's limits (MAX_USERNAME_LEN, DROPBEAR_MAX_PASSWORD_LEN, MAX_CMD_LEN): longer is refused.
 	// They also keep events small: an SSH packet could carry ~256KB into one event.
@@ -103,12 +110,24 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	shipper.EmitEvent(newEvent("session_start"))
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
+	// wrongPassword answers a failed password like Dropbear: after ~300ms, and at the 10th one it just
+	// closes the connection (dropbear_exit: no disconnect message, the last failure isn't even sent).
+	// x/crypto's own limit would send OpenSSH's "too many authentication failures" instead.
+	failures := 0
+	wrongPassword := func() error {
+		time.Sleep(sshFailDelay + mrand.N(sshFailDelay*2/5))
+		if failures++; failures >= sshMaxAuth {
+			conn.Close()
+		}
+		return errors.New("password rejected")
+	}
+
 	// ---------- Phase 1: handshake + login ----------
 	// The library does the crypto; we only decide which passwords work.
 	config := &ssh.ServerConfig{
 		Config:        dropbearAlgorithms, // a copy: every connection gets its own
 		ServerVersion: sshServerVersion,
-		MaxAuthTries:  sshMaxAuth,
+		MaxAuthTries:  -1, // no limit in x/crypto: wrongPassword counts, like Dropbear
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			// keep the attacker connected while they keep trying passwords
 			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
@@ -116,8 +135,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 			user := meta.User()
 			pass := string(password)
 			if len(user) > dropbearMaxLogin || len(pass) > dropbearMaxLogin {
-				time.Sleep(time.Second) // Dropbear doesn't check it: a plain failure, not logged
-				return nil, errors.New("too long")
+				return nil, wrongPassword() // Dropbear doesn't check it: a plain failure, not logged
 			}
 			success := weakCredentials[user+":"+pass]
 
@@ -132,8 +150,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 			if success {
 				return nil, nil // nil error = login accepted
 			}
-			time.Sleep(time.Second) // real servers also delay after a wrong password
-			return nil, errors.New("password rejected")
+			return nil, wrongPassword()
 		},
 		// Dropbear offers exactly "publickey" and "password" (no keyboard-interactive).
 		// We offer publickey too but reject every key, so clients fall back to password.
@@ -158,8 +175,12 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 
 	// ---------- Phase 2: session channel ----------
 	// A client can open several channels on one connection; we serve only the first "session".
+	// After it, like Dropbear, the connection stays open until the CLIENT closes it (a server that
+	// hangs up first makes OpenSSH print "Connection to X closed by remote host."). The loop ends
+	// when the client goes away, or after sshIdleTimeout for one that never does.
+	served := false
 	for newChannel := range chans {
-		if newChannel.ChannelType() != "session" {
+		if served || newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
@@ -168,8 +189,9 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 		if err != nil {
 			return
 		}
+		served = true
 		handleSSHSession(conn, channel, requests, newEvent, shipper)
-		return
+		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 	}
 }
 
@@ -181,8 +203,9 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 
 	for req := range requests {
 		switch req.Type {
-		case "pty-req", "env", "window-change":
-			// accept terminal setup; the details don't matter to us
+		case "pty-req", "window-change", "x11-req", "auth-agent-req@openssh.com":
+			// what Dropbear accepts (chansessionrequest; Buildroot builds it with X11 and agent
+			// forwarding). Nothing is ever forwarded: we never open a channel toward the client.
 			req.Reply(true, nil)
 
 		case "exec":
@@ -199,7 +222,7 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			// no terminal: output goes straight to the channel with plain \n
 			output, code, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
 			fmt.Fprint(channel, output)
-			sendExitStatus(channel, code) // e.g. 127 for a command that doesn't exist
+			endCommand(channel, code) // e.g. 127 for a command that doesn't exist
 			return
 
 		case "shell":
@@ -207,11 +230,11 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			sendExitStatus(channel, runSSHShell(conn, channel, newEvent, shipper))
+			endCommand(channel, runSSHShell(conn, channel, newEvent, shipper))
 			return
 
 		default:
-			// sftp, x11 and the like -> rejected
+			// env (Dropbear has no handler for it), sftp and the like -> rejected
 			req.Reply(false, nil)
 		}
 	}
@@ -250,8 +273,10 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 	return code
 }
 
-// sendExitStatus tells the client the exit code of the command or shell, like a real server.
-func sendExitStatus(channel ssh.Channel, code int) {
+// endCommand ends the command or shell in Dropbear's order (check_close in common-channel.c): EOF,
+// then the exit status; the channel's CLOSE follows from the caller's defer.
+func endCommand(channel ssh.Channel, code int) {
+	channel.CloseWrite()
 	status := struct{ Status uint32 }{uint32(code)}
 	channel.SendRequest("exit-status", false, ssh.Marshal(&status))
 }

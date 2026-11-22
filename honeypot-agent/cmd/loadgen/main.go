@@ -191,6 +191,9 @@ func runBrute(d time.Duration) {
 					rejected.Add(1) // expected: full handshake, then the password was refused
 				default:
 					errs.Add(1) // connection refused, limit hit, timeout...
+					// like the http mode: retrying at once would be thousands of refused connections a
+					// second (a wrong password takes only ~300ms, the agent frees the place after 1s)
+					time.Sleep(time.Second)
 				}
 			}
 		}()

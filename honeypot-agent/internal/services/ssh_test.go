@@ -247,6 +247,121 @@ func TestSSHLongLogin(t *testing.T) {
 	}
 }
 
+// After a command, like Dropbear, the server keeps the connection until the client closes it (a
+// server that hangs up first makes OpenSSH print "Connection to X closed by remote host.").
+func TestSSHWaitsForClientToClose(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	client, _, err := sshDial(addr, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := session.Output("uname -m"); err != nil || string(output) != "armv7l\n" {
+		t.Fatalf("exec: %q, %v", output, err)
+	}
+	select {
+	case <-done:
+		t.Fatal("the server closed the connection after the command, before the client did")
+	case <-time.After(300 * time.Millisecond):
+	}
+	client.Close() // now the server's side ends too
+	waitDone(t, done)
+	checkSession(t, parseEvents(t, out.String()), "SSH", 22)
+}
+
+// Like Dropbear: 10 wrong passwords per connection (rejected public keys don't count), each answered
+// after ~300ms; at the 10th the server just closes, without x/crypto's (OpenSSH's) disconnect message.
+func TestSSHMaxAuthTries(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	var keys []ssh.Signer // more keys than the limit: if they counted, no password would be tried
+	for range 12 {
+		keys = append(keys, newTestKey(t))
+	}
+	tries := 0
+	config := &ssh.ClientConfig{
+		User: "root",
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(keys...),
+			ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
+				tries++
+				return fmt.Sprintf("wrong%d", tries), nil
+			}), 50),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // test only: the server key is a throwaway one
+		Timeout:         10 * time.Second,
+	}
+	start := time.Now()
+	client, err := ssh.Dial("tcp", addr, config)
+	took := time.Since(start)
+	if err == nil {
+		client.Close()
+		t.Fatal("wrong passwords were accepted")
+	}
+	if strings.Contains(err.Error(), "disconnect") {
+		t.Errorf("the server sent a disconnect message (Dropbear just closes): %v", err)
+	}
+	waitDone(t, done)
+
+	// Dropbear's numbers, not our constants (a changed constant must fail here)
+	logins := ofType(parseEvents(t, out.String()), "login_attempt")
+	if tries != 10 || len(logins) != 10 {
+		t.Errorf("%d passwords tried, %d login_attempt events (expected 10, Dropbear's MAX_AUTH_TRIES)", tries, len(logins))
+	}
+	if took < 10*250*time.Millisecond || took > 10*350*time.Millisecond+time.Second {
+		t.Errorf("10 wrong passwords took %v (expected 10 x 300ms +-50)", took)
+	}
+}
+
+// The channel requests Dropbear 2019.78 accepts as Buildroot builds it (chansessionrequest), and env,
+// which it has no handler for.
+func TestSSHRequestsLikeDropbear(t *testing.T) {
+	s := shipper.NewShipper(io.Discard, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	client, _, err := sshDial(addr, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		request string
+		want    bool
+	}{
+		{"env", false},
+		{"pty-req", true},
+		{"window-change", true},
+		{"x11-req", true},                    // ssh -X: accepted, nothing is ever forwarded
+		{"auth-agent-req@openssh.com", true}, // ssh -A: the same
+		{"break", false},
+	} {
+		if ok, err := session.SendRequest(tt.request, true, nil); err != nil || ok != tt.want {
+			t.Errorf("%s: accepted %v, %v (expected %v)", tt.request, ok, err, tt.want)
+		}
+	}
+	if output, err := session.Output("echo ok"); err != nil || string(output) != "ok\n" {
+		t.Errorf("exec after the requests: %q, %v", output, err)
+	}
+	client.Close()
+	waitDone(t, done)
+}
+
 // The host key is created once and then read back: same key = same fingerprint after a restart.
 func TestHostKeyIsKeptOnDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), sshHostKeyFile)
