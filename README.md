@@ -26,7 +26,7 @@ flowchart LR
   - The shell handles redirections like the router's BusyBox shell does: `>/dev/null 2>&1` (which bots append to almost every command), `2>&1 |`, `&>`, `<` and `>` written without spaces, with the same error messages.
   - The filesystem holds decoy secrets (honeytokens): the Wi-Fi password in `/etc/hostapd.conf` and the provider's PPPoE account in `/etc/ppp/chap-secrets`. They exist nowhere else. Reading the files is logged, and a later login with one of these strings proves that whoever sent it had read them, even from another IP.
   - It also answers what cryptominer bots check before installing (`free`, `nproc`, `df`, `uptime`, `crontab`) exactly like the router's BusyBox would. The numbers agree with `/proc`. A cron job a bot adds stays visible to it for the rest of its session.
-  - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout.
+  - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout. If the threat engine is down, the agent keeps up to 5000 events in memory and sends them when it is back, in requests of at most 200 events.
   - It limits what one attacker can do, so a flood cannot bury the events of the other services:
     - at most 200 connections per service and 10 per IP;
     - a connection keeps its place for at least one second, so one IP can open at most 10 new connections per second;

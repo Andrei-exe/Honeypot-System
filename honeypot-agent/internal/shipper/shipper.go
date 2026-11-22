@@ -22,6 +22,12 @@ const (
 	flushEvery = 2 * time.Second // ...or every 2 seconds, with whatever is there
 	retryAfter = 5 * time.Second // wait this long after a failed send
 	maxPending = 5000            // cap kept in RAM while the receiver is down
+
+	// maxPerPOST caps one POST. An event is at most ~96KB of JSON (12KB of HTTP headers + 4KB of body,
+	// every byte escaped to 6), so a POST stays under ~19MB: below receiver.py's 32MB limit (over it,
+	// a 413 would drop the whole POST), cheap to marshal, and quick for the receiver to process (a
+	// POST that takes over 5s is resent, and the receiver would store it twice).
+	maxPerPOST = 200
 )
 
 // errRejected means the receiver answered 4xx: the request itself is wrong (token, format, path),
@@ -114,11 +120,7 @@ func (s *Shipper) run() {
 			return
 
 		case e := <-s.queue:
-			batch = append(batch, e)
-			if len(batch) > maxPending {
-				batch = batch[1:] // drop the oldest (it's still in JSONL)
-				s.dropped.Add(1)
-			}
+			batch = s.add(batch, e)
 			if len(batch) < batchSize {
 				continue // wait, more may come
 			}
@@ -133,13 +135,10 @@ func (s *Shipper) run() {
 			continue
 		}
 
-		err := s.send(context.Background(), batch)
-		if errors.Is(err, errRejected) {
-			log.Printf("shipper: %d events %v - dropped, they are only in JSONL", len(batch), err)
-			batch = nil
-			down = false // it answered, so it is not down
-			continue
-		}
+		// what is already waiting in the queue goes now too: under load, fewer and bigger POSTs
+		batch = s.takeQueued(batch)
+		rest, sent, err := s.sendInParts(context.Background(), batch)
+		batch = rest
 		if err != nil {
 			if !down {
 				log.Printf("shipper: cannot send (%v) - keeping the events, retrying every %v", err, retryAfter)
@@ -148,20 +147,61 @@ func (s *Shipper) run() {
 			retryAt = time.Now().Add(retryAfter)
 			continue
 		}
-		if down {
-			log.Printf("shipper: working again, sent %d events", len(batch))
-			down = false
+		if down && sent > 0 { // not after a 4xx: those events were dropped, not sent
+			log.Printf("shipper: working again, sent %d events", sent)
 		}
-		batch = nil
+		down = false // it answered, so it is not down
 	}
 }
 
-// flush is the last send, on shutdown: the batch plus everything still in the queue,
+// add appends e to batch. Over maxPending the oldest event is dropped (it's still in JSONL).
+func (s *Shipper) add(batch []models.HoneypotEvent, e models.HoneypotEvent) []models.HoneypotEvent {
+	batch = append(batch, e)
+	if len(batch) > maxPending {
+		batch[0] = models.HoneypotEvent{} // so its strings can be freed (the array still holds them)
+		batch = batch[1:]
+		s.dropped.Add(1)
+	}
+	return batch
+}
+
+// takeQueued adds to batch the events already waiting in the queue, without waiting for more.
+func (s *Shipper) takeQueued(batch []models.HoneypotEvent) []models.HoneypotEvent {
+	for {
+		select {
+		case e := <-s.queue:
+			batch = s.add(batch, e)
+		default: // the queue is empty
+			return batch
+		}
+	}
+}
+
+// sendInParts sends batch in POSTs of at most maxPerPOST events, oldest first. A part the receiver
+// rejects (4xx) is dropped and logged, and the next parts still go. On a network error or 5xx it
+// stops and returns the events not sent yet (rest), to retry later. sent = events the receiver took.
+func (s *Shipper) sendInParts(ctx context.Context, batch []models.HoneypotEvent) (rest []models.HoneypotEvent, sent int, err error) {
+	for len(batch) > 0 {
+		n := min(len(batch), maxPerPOST)
+		err = s.send(ctx, batch[:n])
+		switch {
+		case errors.Is(err, errRejected):
+			log.Printf("shipper: %d events %v - dropped, they are only in JSONL", n, err)
+		case err != nil:
+			return batch, sent, err
+		default:
+			sent += n
+		}
+		clear(batch[:n]) // like in add: the array would keep the done events' strings alive
+		batch = batch[n:]
+	}
+	return nil, sent, nil
+}
+
+// flush is the last send, on shutdown: the batch plus everything still in the queue, in parts,
 // retried every half second until it works or the deadline passes.
 func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
-	for len(s.queue) > 0 { // the services have stopped, so nothing new comes in
-		batch = append(batch, <-s.queue)
-	}
+	batch = s.takeQueued(batch) // the services have stopped, so nothing new comes in
 	if len(batch) == 0 {
 		return
 	}
@@ -170,13 +210,18 @@ func (s *Shipper) flush(batch []models.HoneypotEvent, deadline time.Time) {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
+	total := 0
 	for {
-		err := s.send(ctx, batch)
+		rest, sent, err := s.sendInParts(ctx, batch)
+		total += sent
 		if err == nil {
-			log.Printf("shipper: shutdown: sent the last %d events", len(batch))
+			if total > 0 {
+				log.Printf("shipper: shutdown: sent the last %d events", total)
+			}
 			return
 		}
-		if errors.Is(err, errRejected) || time.Until(deadline) < 500*time.Millisecond {
+		batch = rest
+		if time.Until(deadline) < 500*time.Millisecond {
 			log.Printf("shipper: shutdown: %d events did not reach the threat-engine (%v) - they are only in JSONL", len(batch), err)
 			return
 		}

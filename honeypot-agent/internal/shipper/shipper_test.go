@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,11 +19,13 @@ import (
 // fakeReceiver is a test HTTP server that pretends to be the Python receiver.
 // status(n) is the response code for the n-th request (1, 2, 3...).
 type fakeReceiver struct {
-	mu       sync.Mutex
-	requests int
-	events   []models.HoneypotEvent
-	auth     string
-	status   func(n int) int
+	mu        sync.Mutex
+	requests  int
+	events    []models.HoneypotEvent
+	sizes     []int // events in each accepted POST
+	auth      string
+	status    func(n int) int
+	slowFirst time.Duration // the first request takes this long to answer (events pile up meanwhile)
 }
 
 func (f *fakeReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +39,10 @@ func (f *fakeReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var batch []models.HoneypotEvent
 		json.NewDecoder(r.Body).Decode(&batch)
 		f.events = append(f.events, batch...)
+		f.sizes = append(f.sizes, len(batch))
+	}
+	if f.requests == 1 {
+		time.Sleep(f.slowFirst)
 	}
 	w.WriteHeader(code)
 }
@@ -44,6 +51,110 @@ func (f *fakeReceiver) counts() (requests, events int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.requests, len(f.events)
+}
+
+// checkReceived checks that the receiver got exactly the events first, first+1, ... first+n-1, in
+// order, and returns how many were in each accepted POST.
+func checkReceived(t *testing.T, f *fakeReceiver, first, n int) []int {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.events) != n {
+		t.Fatalf("%d events arrived (expected %d)", len(f.events), n)
+	}
+	for i, e := range f.events {
+		if want := fmt.Sprint("test-", first+i); e.NodeID != want {
+			t.Fatalf("position %d: %s (expected %s)", i, e.NodeID, want)
+		}
+	}
+	return f.sizes
+}
+
+// checkPOSTSizes: no POST over 200 events (receiver.py refuses a body over 32MB, see maxPerPOST).
+// 200 is written here, not taken from maxPerPOST, so a changed constant fails the test too.
+func checkPOSTSizes(t *testing.T, sizes []int) {
+	t.Helper()
+	for _, n := range sizes {
+		if n > 200 {
+			t.Errorf("a POST with %d events (at most 200): %v", n, sizes)
+		}
+	}
+}
+
+// After the receiver was down, the backlog goes in several POSTs of at most 200 events, in order,
+// nothing lost (one POST with all of it could go over the receiver's limit and lose everything).
+func TestBacklogGoesInParts(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(n int) int {
+		if n == 1 {
+			return http.StatusServiceUnavailable // down: the events wait in RAM
+		}
+		return http.StatusOK
+	}}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "")
+	for i := 0; i < 450; i++ {
+		s.EmitEvent(event(i))
+	}
+	waitFor(2*time.Second, func() bool { req, _ := rcv.counts(); return req >= 1 }) // the first POST failed
+	s.Close(5 * time.Second)                                                        // the backlog goes now
+
+	sizes := checkReceived(t, rcv, 0, 450)
+	checkPOSTSizes(t, sizes)
+	if len(sizes) < 3 {
+		t.Errorf("450 events in %d POSTs: %v", len(sizes), sizes)
+	}
+}
+
+// Under load, what is already waiting in the queue goes in the same POST: fewer, bigger POSTs
+// (each one costs the receiver a request), still at most 200 events and in order.
+func TestBiggerPOSTsUnderLoad(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(int) int { return http.StatusOK }, slowFirst: 300 * time.Millisecond}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "")
+	for i := 0; i < 450; i++ { // the first 50 go, the other 400 wait for the slow answer
+		s.EmitEvent(event(i))
+	}
+	if !waitFor(5*time.Second, func() bool { _, n := rcv.counts(); return n == 450 }) {
+		_, n := rcv.counts()
+		t.Fatalf("%d of 450 events arrived", n)
+	}
+	sizes := checkReceived(t, rcv, 0, 450)
+	checkPOSTSizes(t, sizes)
+	if slices.Max(sizes) <= 50 {
+		t.Errorf("no POST took more than the 50 of a normal batch: %v", sizes)
+	}
+}
+
+// A part the receiver refuses (4xx, e.g. 413 Request Entity Too Large) is dropped alone: the parts
+// after it still go.
+func TestRejectedPartDoesNotDropTheRest(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(n int) int {
+		switch n {
+		case 1:
+			return http.StatusServiceUnavailable // down: a backlog builds up
+		case 2:
+			return http.StatusRequestEntityTooLarge // its first part is refused
+		}
+		return http.StatusOK
+	}}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	s := NewShipper(io.Discard, srv.URL, "")
+	for i := 0; i < 450; i++ {
+		s.EmitEvent(event(i))
+	}
+	waitFor(2*time.Second, func() bool { req, _ := rcv.counts(); return req >= 1 })
+	s.Close(5 * time.Second)
+
+	checkReceived(t, rcv, 200, 250) // events 0-199 were the refused part, 200-449 arrived
 }
 
 func event(i int) models.HoneypotEvent {
@@ -70,7 +181,7 @@ func TestDeliversAllEventsInOrder(t *testing.T) {
 	defer srv.Close()
 
 	s := NewShipper(io.Discard, srv.URL, "secret")
-	for i := 0; i < 120; i++ { // 2 full batches of 50 go right away, the last 20 on the next tick
+	for i := 0; i < 120; i++ { // the first 50 start a send; what already waits in the queue goes too
 		s.EmitEvent(event(i))
 	}
 
