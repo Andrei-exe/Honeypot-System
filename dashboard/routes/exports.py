@@ -1,3 +1,4 @@
+import sys
 """Export endpoints (generated in RAM, no files written to disk)."""
 
 from collections import defaultdict
@@ -43,7 +44,8 @@ def export_alerts(fmt):
     try:
         raw = engine_client.get_alerts(bypass_cache=True)
     except EngineError as exc:
-        return jsonify(error=str(exc)), exc.status_code
+        print(f"[dashboard] export error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(error="threat-engine unavailable"), exc.status_code
 
     alerts = [normalize_alert(a, i) for i, a in enumerate(raw.get("alerts") or [])]
     alerts.reverse()
@@ -62,7 +64,8 @@ def export_sessions(fmt):
         families_raw = engine_client.get_families(bypass_cache=True)
         alerts_raw = engine_client.get_alerts(bypass_cache=True)
     except EngineError as exc:
-        return jsonify(error=str(exc)), exc.status_code
+        print(f"[dashboard] export error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(error="threat-engine unavailable"), exc.status_code
 
     ip_fam_map = build_ip_family_map(families_raw.get("families"))
     alerts_by_sid = defaultdict(list)
@@ -96,7 +99,8 @@ def export_blocklist():
         if fmt == "ufw":
             return _attachment(build_ufw_script(ips), f"honeypot-ufw-{_stamp()}.sh", "text/x-shellscript; charset=utf-8")
     except EngineError as exc:
-        return jsonify(error=str(exc)), exc.status_code
+        print(f"[dashboard] export error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(error="threat-engine unavailable"), exc.status_code
 
     return jsonify(error="unsupported format (plain|nftables|fail2ban|iptables|ufw)"), 400
 
@@ -106,7 +110,8 @@ def export_navigator():
     try:
         layer = engine_client.get_navigator(bypass_cache=True)
     except EngineError as exc:
-        return jsonify(error=str(exc)), exc.status_code
+        print(f"[dashboard] export error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(error="threat-engine unavailable"), exc.status_code
     return _attachment(to_pretty_json(layer), f"honeypot-mitre-navigator-{_stamp()}.json", "application/json; charset=utf-8")
 
 
@@ -120,7 +125,8 @@ def export_incident_report():
         families_raw = engine_client.get_families(bypass_cache=True)
         navigator = engine_client.get_navigator(bypass_cache=True)
     except EngineError as exc:
-        return jsonify(error=str(exc)), exc.status_code
+        print(f"[dashboard] export error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(error="threat-engine unavailable"), exc.status_code
 
     alerts = [normalize_alert(a, i) for i, a in enumerate(alerts_raw.get("alerts") or [])]
     alerts.reverse()

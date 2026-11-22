@@ -11,6 +11,7 @@ from routes.views import views_bp
 def create_app():
     app = Flask(__name__)
     app.config["JSON_SORT_KEYS"] = False
+    app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
 
     app.register_blueprint(views_bp)
     app.register_blueprint(api_bp)
@@ -23,7 +24,7 @@ def create_app():
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "connect-src 'self'; "

@@ -159,7 +159,10 @@ function updateChrome(st) {
     const h = ov.session_health || {};
     setCnt("nav-cnt-alerts", stats.total_alerts);
     setCnt("nav-cnt-sessions", h.total_stored);
-    setCnt("nav-cnt-campaigns", (c.campaigns || 0) + (c.families || 0));
+    const campData = st.data.campaigns;
+    if (campData) {
+      setCnt("nav-cnt-campaigns", (campData.total_campaigns || 0) + (campData.total_families || 0));
+    }
     setCnt("nav-cnt-attackers", stats.unique_attacker_ips);
     setCnt("nav-cnt-honeytokens", c.honeytokens, true);
   }
@@ -361,7 +364,8 @@ function bootstrap() {
       reason === "sessionFilter" ||
       reason === "sort" ||
       reason === "defenseFormat" ||
-      reason === `data:${st.view}`
+      reason === `data:${st.view}` ||
+      (st.view === "overview" && reason === "data:campaigns")
     ) {
       renderWorkspace(st);
     }
@@ -371,6 +375,7 @@ function bootstrap() {
   updateChrome(store.get());
   renderWorkspace(store.get());
   fetchForView("overview", true);
+  api.getCampaigns(false).then((res) => store.setData("campaigns", res)).catch(() => {});
   schedulePolling();
 }
 

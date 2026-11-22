@@ -123,7 +123,7 @@ export function renderOverview(container, state) {
         <div class="kpi-cell accent">
           <span class="kpi-label">UNIQUE ATTACKER IPS</span>
           <span class="kpi-value">${fmtNum(stats.unique_attacker_ips)}</span>
-          <span class="kpi-sub">CAMPAIGNS:${fmtNum(counters.campaigns)} FAMILIES:${fmtNum(counters.families)}</span>
+          <span class="kpi-sub">CAMPAIGNS:${state.data.campaigns ? fmtNum(state.data.campaigns.total_campaigns) : "--"} FAMILIES:${state.data.campaigns ? fmtNum(state.data.campaigns.total_families) : "--"}</span>
         </div>
         <div class="kpi-cell ${counters.successful_logins > 0 ? "crit" : ""}">
           <span class="kpi-label">COMPROMISED AUTH (500W)</span>

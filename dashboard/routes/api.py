@@ -1,3 +1,4 @@
+import sys
 """Internal API blueprint (/api/v1/*) that aggregates and normalizes all threat-engine endpoints."""
 
 from collections import Counter, defaultdict
@@ -24,7 +25,17 @@ def _bypass():
 
 
 def _error_response(exc):
-    return jsonify(error=str(exc), telemetry=engine_client.telemetry()), exc.status_code
+    print(f"[dashboard] threat-engine error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+    msg = "resource not found" if exc.status_code == 404 else "threat-engine unavailable"
+    return jsonify(error=msg, telemetry=engine_client.telemetry()), exc.status_code
+
+
+def _safe_get_families(bypass=False):
+    try:
+        return engine_client.get_families(bypass_cache=bypass)
+    except EngineError as exc:
+        print(f"[dashboard] optional /api/families failed ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return {}
 
 
 def _load_normalized_alerts(bypass=False):
@@ -100,7 +111,8 @@ def legacy_alerts():
         raw = engine_client.get_alerts(bypass_cache=_bypass())
         return jsonify(total=raw.get("total", 0), alerts=raw.get("alerts", [])), 200
     except EngineError as exc:
-        return jsonify(total=0, alerts=[], error=f"threat-engine is not responding: {exc}"), exc.status_code
+        print(f"[dashboard] /api/alerts error ({exc.status_code}): {exc}", file=sys.stderr, flush=True)
+        return jsonify(total=0, alerts=[], error="threat-engine unavailable"), exc.status_code
 
 
 @api_bp.get("/api/v1/health")
@@ -125,8 +137,6 @@ def v1_overview():
         stats = engine_client.get_stats(bypass_cache=bypass)
         total_alerts, alerts = _load_normalized_alerts(bypass=bypass)
         sessions_raw = engine_client.get_sessions(limit=DEFAULT_SESSIONS_LIMIT, bypass_cache=bypass)
-        families_raw = engine_client.get_families(bypass_cache=bypass)
-        campaigns_raw = engine_client.get_campaigns(bypass_cache=bypass)
     except EngineError as exc:
         return _error_response(exc)
 
@@ -148,8 +158,8 @@ def v1_overview():
         session_health=session_health,
         honeytokens=honeytokens[:20],
         counters={
-            "campaigns": campaigns_raw.get("total", 0),
-            "families": families_raw.get("total", 0),
+            "campaigns": None,
+            "families": None,
             "honeytokens": len(honeytokens),
             "mirai_hits": mirai_hits,
             "miner_hits": miner_hits,
@@ -185,7 +195,7 @@ def v1_sessions():
     limit = request.args.get("limit", default=DEFAULT_SESSIONS_LIMIT, type=int)
     try:
         sessions_raw = engine_client.get_sessions(limit=limit, bypass_cache=bypass)
-        families_raw = engine_client.get_families(bypass_cache=bypass)
+        families_raw = _safe_get_families(bypass=bypass)
         _, alerts = _load_normalized_alerts(bypass=bypass)
     except EngineError as exc:
         return _error_response(exc)
@@ -219,7 +229,7 @@ def v1_attackers_index():
         stats = engine_client.get_stats(bypass_cache=bypass)
         _, alerts = _load_normalized_alerts(bypass=bypass)
         sessions_raw = engine_client.get_sessions(limit=DEFAULT_SESSIONS_LIMIT, bypass_cache=bypass)
-        families_raw = engine_client.get_families(bypass_cache=bypass)
+        families_raw = _safe_get_families(bypass=bypass)
     except EngineError as exc:
         return _error_response(exc)
 
@@ -304,7 +314,7 @@ def v1_attacker_detail(ip):
         profile = engine_client.get_attacker(ip, bypass_cache=bypass)
         _, alerts = _load_normalized_alerts(bypass=bypass)
         sessions_raw = engine_client.get_sessions(limit=DEFAULT_SESSIONS_LIMIT, bypass_cache=bypass)
-        families_raw = engine_client.get_families(bypass_cache=bypass)
+        families_raw = _safe_get_families(bypass=bypass)
     except EngineError as exc:
         return _error_response(exc)
 

@@ -133,10 +133,10 @@ class EngineClient:
         return self._request(f"/api/attackers/{encoded_ip}", expect_json=True, bypass_cache=bypass_cache, ttl=2.0)
 
     def get_campaigns(self, bypass_cache=False):
-        return self._request("/api/campaigns", expect_json=True, bypass_cache=bypass_cache, ttl=3.0)
+        return self._request("/api/campaigns", expect_json=True, bypass_cache=bypass_cache, ttl=30.0)
 
     def get_families(self, bypass_cache=False):
-        return self._request("/api/families", expect_json=True, bypass_cache=bypass_cache, ttl=3.0)
+        return self._request("/api/families", expect_json=True, bypass_cache=bypass_cache, ttl=30.0)
 
     def get_blocklist(self, fmt="plain", bypass_cache=False):
         safe_fmt = fmt if fmt in ("plain", "nftables", "fail2ban") else "plain"
@@ -147,7 +147,7 @@ class EngineClient:
 
     def telemetry(self):
         with self._lock:
-            return dict(self._metrics)
+            return {k: v for k, v in self._metrics.items() if k != "last_error"}
 
 
 engine_client = EngineClient()
