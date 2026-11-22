@@ -337,8 +337,8 @@ func (s *Shell) touch(args []string) (string, int, bool) {
 			s.mtimes[p] = now().UTC() // already exists: touch only changes its date
 			continue
 		}
-		if msg := s.writeFile(a, "", false); msg != "" {
-			return "touch: " + a + ": No such file or directory\n", 1, false
+		if _, err := s.writeFile(a, "", false); err != nil {
+			return "touch: " + a + ": " + err.Error() + "\n", 1, false
 		}
 	}
 	return "", 0, false
@@ -352,6 +352,9 @@ func (s *Shell) mkdir(args []string) (string, int, bool) {
 		p := resolve(s.cwd, a)
 		if !s.isDir(path.Dir(p)) {
 			return "mkdir: can't create directory '" + a + "': No such file or directory\n", 1, false
+		}
+		if s.room(p) < 0 {
+			return "mkdir: can't create directory '" + a + "': " + errNoSpace.Error() + "\n", 1, false
 		}
 		s.dirs[p] = true
 		s.mtimes[p] = now().UTC()
@@ -390,8 +393,12 @@ func (s *Shell) cp(args []string) (string, int, bool) {
 	if s.isDir(resolve(s.cwd, dst)) {
 		dst = dst + "/" + path.Base(src) // cp x /tmp -> /tmp/x
 	}
-	if msg := s.writeFile(dst, content, false); msg != "" {
-		return msg, 1, false
+	full, err := s.writeFile(dst, content, false)
+	if err != nil { // libbb/copy_file.c
+		return "cp: can't create '" + dst + "': " + err.Error() + "\n", 1, false
+	}
+	if full {
+		return writeError("cp"), 1, false
 	}
 	return "", 0, false
 }

@@ -225,11 +225,16 @@ func (s *Shell) df(args []string) (string, int, bool) {
 		}
 	}
 
+	// when the session's quota can't take another page, the disk is full: nothing is available
+	full := sessionQuota-s.quotaUsed() < 4096
 	for _, m := range rows {
-		used := s.usedKB(m)
-		percent := 0
-		if m.sizeKB > 0 { // in 4KB pages, like statvfs gives them: (used * 100 + total / 2) / total
-			percent = (used/4*100 + m.sizeKB/4/2) / (m.sizeKB / 4)
+		used, avail := s.usedKB(m), m.sizeKB-s.usedKB(m)
+		if full {
+			avail = 0
+		}
+		percent := 0 // df.c: used / (used + available) in 4KB blocks, rounded; 0 if both are 0
+		if total := (used + avail) / 4; total > 0 {
+			percent = (used/4*100 + total/2) / total
 		}
 		out += fmt.Sprintf("%-20s", m.device)
 		if len(m.device) > 20 {
@@ -239,7 +244,7 @@ func (s *Shell) df(args []string) (string, int, bool) {
 			out += fmt.Sprintf(" %-10s", m.fsType)
 		}
 		out += fmt.Sprintf(" %9s %9s %9s %3d%% %s\n",
-			dfSize(m.sizeKB, unit), dfSize(used, unit), dfSize(m.sizeKB-used, unit), percent, m.dir)
+			dfSize(m.sizeKB, unit), dfSize(used, unit), dfSize(avail, unit), percent, m.dir)
 	}
 	return out, code, false
 }
@@ -362,8 +367,14 @@ func (s *Shell) crontab(args []string, input string) (string, int, bool) {
 		out = "crontab: can't execute 'vi': No such file or directory\n"
 		fallthrough
 	default:
-		s.writeFile(file, content, false)
+		// on a full disk BusyBox still installs what it could write, and still exits 0 (crontab.c)
+		full, err := s.writeFile(file, content, false)
+		if err != nil {
+			out += "crontab: can't create " + dir + "/" + user + ".new\n" // its temporary file
+		} else if full {
+			out += writeError("crontab")
+		}
 	}
-	s.writeFile(path.Join(dirPath, "cron.update"), user+"\n", true) // the note for crond to reread
+	s.writeFile(path.Join(dirPath, "cron.update"), user+"\n", true) // the note for crond to reread (unchecked)
 	return out, 0, false
 }

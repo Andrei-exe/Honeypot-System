@@ -1,7 +1,9 @@
 package vfs
 
 import (
+	"fmt"
 	"path"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -352,6 +354,106 @@ func TestMinerCommands(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
+	}
+}
+
+// A session's files get 256KB in all (sessionQuota). Then every way of writing fails like on a full
+// disk, with BusyBox's own messages, df shows it full, and rm frees space again. One shell, in order.
+func TestDiskQuota(t *testing.T) {
+	sh := NewShell()
+	page := "echo " + strings.Repeat("a", 4095) // prints exactly one 4KB page (with the \n)
+	n := 0                                      // one-page files written before the disk was full
+	for ; n < 100; n++ {
+		if out, code, _ := sh.Run(fmt.Sprintf("%s > /tmp/f%d", page, n)); out != "" || code != 0 {
+			if out != "sh: write error: No space left on device\n" || code != 1 {
+				t.Fatalf("file %d: %q, exit code %d (expected echo's write error, 1)", n, out, code)
+			}
+			break
+		}
+	}
+	// each file costs its page + its name + 256 (the "inode"): f0-f9 4359, f10-f59 4360, so 60 fit
+	// (554 left); f60 still gets its name and inode (264), not its page: 290 bytes left
+	if left := sessionQuota - sh.quotaUsed(); n != 60 || left != 290 {
+		t.Fatalf("%d one-page files fit, %d bytes left (expected 60 and 290)", n, left)
+	}
+
+	tests := []struct {
+		line string
+		want string
+		code int
+	}{
+		{"cat /tmp/f60; echo end", "end\n", 0}, // the file that didn't fit exists, empty
+		// df: Used = the 60 pages, nothing Available, 100% (df.c: used / (used + available))
+		{"df /tmp /dev", "Filesystem           1K-blocks      Used Available Use% Mounted on\n" +
+			"tmpfs                    62260       240         0 100% /tmp\n" +
+			"tmpfs                      512         0         0   0% /dev\n", 0},
+		{"df -h /tmp", "Filesystem                Size      Used Available Use% Mounted on\n" +
+			"tmpfs                    60.8M    240.0K         0 100% /tmp\n", 0},
+		{"echo hi >> /tmp/f0", "sh: write error: No space left on device\n", 1}, // f0's page is full
+		{"echo hi >> /tmp/f1 2>/dev/null", "", 1},
+		{"cat /tmp/f1 | grep a", strings.Repeat("a", 4095) + "\n", 0},                  // f1 kept its page, without "hi"
+		{"cat /etc/passwd > /tmp/c", "cat: write error: No space left on device\n", 1}, // name fits, page doesn't
+		// 28 bytes left: not even an empty file fits now (like running out of inodes)
+		{"cp /etc/passwd /tmp/p", "cp: can't create '/tmp/p': No space left on device\n", 1},
+		{"touch /tmp/t", "touch: /tmp/t: No space left on device\n", 1},
+		{"mkdir /tmp/d", "mkdir: can't create directory '/tmp/d': No space left on device\n", 1},
+		{"echo x > /tmp/n", "-sh: can't create /tmp/n: No space left on device\n", 1},
+		{"echo '* * * * * /tmp/x' | crontab -", "crontab: can't create /var/spool/cron/crontabs/root.new\n", 0},
+		// rm frees space: 290 again, the crontab's name fits, its line doesn't (and BusyBox exits 0)
+		{"rm /tmp/c; echo '* * * * * /tmp/x' | crontab -", "crontab: write error: No space left on device\n", 0},
+		{"rm /tmp/f0 /tmp/f1; echo hi > /tmp/f0; cat /tmp/f0", "hi\n", 0},
+		{"touch /tmp/q; cp /tmp/f2 /tmp/p", "cp: write error: No space left on device\n", 1}, // 3840 left for p
+	}
+	for _, tt := range tests {
+		if got, code, _ := sh.Run(tt.line); got != tt.want || code != tt.code {
+			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
+		}
+	}
+}
+
+// Whatever a session does (the attacks found on 20.11: many copies of a big file, many empty files,
+// many directories, in one long SSH command), what it keeps in RAM stays around sessionQuota.
+// Measured for real (heap): a cut string can keep far more memory alive than its length says.
+func TestDiskQuotaBoundsMemory(t *testing.T) {
+	heap := func() int64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return int64(m.HeapAlloc)
+	}
+	for _, command := range []string{"cat /tmp/b > /tmp/f%d; ", "touch /tmp/e%d; ", "mkdir /tmp/d%d; "} {
+		var line strings.Builder
+		for i := range 3000 {
+			fmt.Fprintf(&line, command, i)
+		}
+		attack := func() *Shell {
+			sh := NewShell()
+			sh.Run("echo " + strings.Repeat("b", maxSize) + " > /tmp/b") // 16KB, the most one file can hold
+			sh.Run(line.String())
+			return sh
+		}
+
+		start := heap()
+		shells := []*Shell{attack(), attack(), attack(), attack()}
+		perShell := (heap() - start) / int64(len(shells))
+		if perShell > sessionQuota*3/2 { // the files + the maps around them (measured: at most ~260KB)
+			t.Errorf("%q x 3000: one session keeps %d bytes in RAM (quota %d)", command, perShell, sessionQuota)
+		}
+
+		sh := shells[0]
+		bytes := 0 // names + contents
+		for p, content := range sh.files {
+			bytes += len(p) + len(content)
+		}
+		for p := range sh.dirs {
+			bytes += len(p)
+		}
+		entries := len(sh.files) + len(sh.dirs)
+		if used := sh.quotaUsed(); used > sessionQuota || bytes > sessionQuota || entries > sessionQuota/256 {
+			t.Errorf("%q x 3000: used %d of %d, %d bytes in %d files and directories",
+				command, used, sessionQuota, bytes, entries)
+		}
+		runtime.KeepAlive(shells)
 	}
 }
 

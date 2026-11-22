@@ -3,6 +3,7 @@ package vfs
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -13,6 +14,59 @@ import (
 // maxSize caps an attacker-created file and the output of one command. Without it,
 // "cat a a > b; cat b b > a; ..." would double the file on every command until RAM runs out.
 const maxSize = 16 * 1024
+
+// sessionQuota is the "disk" of one session: its files live in the agent's RAM, and maxSize alone
+// doesn't stop "cat b >f1; cat b >f2; ...". Over it, writes fail like on a full disk (ENOSPC).
+// 400 shells (200 SSH + 200 Telnet) x 256KB = 100MB at most.
+const sessionQuota = 256 * 1024
+
+// Why a file can't be written: the kernel's texts (strerror), capitalized as the user sees them.
+// Each command puts them in its own message ("touch: x: ...", "cp: can't create 'x': ...").
+var (
+	errIsDir   = errors.New("Is a directory")
+	errNoDir   = errors.New("No such file or directory")
+	errNoSpace = errors.New("No space left on device")
+)
+
+// diskCost is what a file or directory takes from sessionQuota: its content in whole 4KB pages (like
+// tmpfs, and like df counts it) + its path + 256 bytes (like an inode), so even empty files run out.
+func diskCost(p, content string) int {
+	return (len(content)+4095)/4096*4096 + len(p) + 256
+}
+
+// quotaUsed is how much of sessionQuota the session's files and directories take.
+func (s *Shell) quotaUsed() int {
+	used := 0
+	for p, content := range s.files {
+		used += diskCost(p, content)
+	}
+	for p := range s.dirs {
+		used += diskCost(p, "")
+	}
+	return used
+}
+
+// room is how many bytes of content p can hold before the quota is full (p's current content is
+// replaced, so its space counts as free). Negative: not even an empty p fits.
+func (s *Shell) room(p string) int {
+	left := sessionQuota - s.quotaUsed()
+	if content, ok := s.files[p]; ok {
+		left += diskCost(p, content)
+	} else if s.dirs[p] {
+		left += diskCost(p, "")
+	}
+	return left - diskCost(p, "")
+}
+
+// writeError is what a command prints when the disk fills up under its output. echo is ash's builtin,
+// so it reports as the shell: "sh" (applet_name, the login "-" stripped); applets copying data (cat,
+// cp, crontab: libbb/copyfd.c) use their own name. Other applets would say "standard output" (simplified).
+func writeError(command string) string {
+	if command == "echo" {
+		command = "sh"
+	}
+	return path.Base(command) + ": write error: " + errNoSpace.Error() + "\n"
+}
 
 // elfHeader is the start of a 32-bit ARM ELF binary. Mirai-style bots "cat /bin/echo" and read
 // these bytes to learn the architecture (0x28 = ARM), then download the matching binary.
@@ -374,17 +428,22 @@ func (s *Shell) list(dir string) []string {
 	return names
 }
 
-// writeFile writes (or appends, for >>) to a session file.
-// Returns the error message, or "" on success.
-func (s *Shell) writeFile(name, content string, appendTo bool) string {
+// writeFile writes (or appends, for >>) to a session file. err says why the file can't be created
+// (nil if it was). full = the disk filled up: only the whole pages that fit were written, where a
+// real write stops with ENOSPC, and the caller prints the command's own write error.
+func (s *Shell) writeFile(name, content string, appendTo bool) (full bool, err error) {
 	p := resolve(s.cwd, name)
 	switch {
 	case p == "/dev/null":
-		return "" // anything written here disappears, like on a real system
+		return false, nil // anything written here disappears, like on a real system
 	case s.isDir(p):
-		return "-sh: can't create " + name + ": Is a directory\n"
+		return false, errIsDir
 	case !s.isDir(path.Dir(p)):
-		return "-sh: can't create " + name + ": nonexistent directory\n"
+		return false, errNoDir
+	}
+	room := s.room(p)
+	if room < 0 {
+		return false, errNoSpace // not even an empty file fits (like running out of inodes)
 	}
 
 	if appendTo {
@@ -394,7 +453,12 @@ func (s *Shell) writeFile(name, content string, appendTo bool) string {
 	if len(content) > maxSize {
 		content = content[:maxSize]
 	}
-	s.files[p] = content
+	if fits := room / 4096 * 4096; len(content) > fits {
+		content, full = content[:fits], true
+	}
+	// a copy: a cut string still holds all of the original's memory (even cut to ""), which the
+	// quota wouldn't see (measured: 2x the quota in RAM, from the empty files of a cat that didn't fit)
+	s.files[p] = strings.Clone(content)
 	s.mtimes[p] = now().UTC()
-	return ""
+	return full, nil
 }

@@ -229,11 +229,22 @@ func (s *Shell) exec(args []string, input string) (string, int, bool) {
 		if failed {
 			content = "" // the error stays on screen, the file is still created (empty)
 		}
-		if msg := s.writeFile(r.file, content, r.append); msg != "" {
-			return msg, 1, exit
+		full, err := s.writeFile(r.file, content, r.append)
+		if err != nil {
+			reason := err.Error()
+			if err == errNoDir {
+				reason = "nonexistent directory" // ash's own text for ENOENT (errmsg in ash.c)
+			}
+			return "-sh: can't create " + r.file + ": " + reason + "\n", 1, exit
 		}
 		if !failed {
 			out = "" // it went to the file, not to the screen
+		}
+		if full && len(args) > 0 { // the disk filled up while the command wrote: its error, exit code 1
+			out, code = writeError(args[0]), 1
+			if r.hideErrors {
+				out = ""
+			}
 		}
 	}
 	return out, code, exit
