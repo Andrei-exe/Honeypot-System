@@ -1,0 +1,145 @@
+/* ==========================================================================
+   ULTRA-DENSE SOC DATA TABLES (27px ROWS, STICKY HEADERS, KEYBOARD FOCUS)
+   ========================================================================== */
+
+.table-scroll {
+  width: 100%;
+  overflow: auto;
+  max-height: 100%;
+}
+
+.table-scroll.bounded-md {
+  max-height: 360px;
+}
+
+.table-scroll.bounded-lg {
+  max-height: calc(100vh - 210px);
+}
+
+.soc-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.soc-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: 26px;
+  padding: 0 7px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.soc-table thead th.sortable {
+  cursor: pointer;
+}
+
+.soc-table thead th.sortable:hover {
+  color: var(--text-bright);
+  background: var(--bg-hover);
+}
+
+.soc-table thead th.sort-asc::after {
+  content: " ^";
+  color: var(--state-accent);
+}
+
+.soc-table thead th.sort-desc::after {
+  content: " v";
+  color: var(--state-accent);
+}
+
+.soc-table thead th.num,
+.soc-table tbody td.num {
+  text-align: right;
+}
+
+.soc-table tbody tr {
+  height: var(--row-h);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+}
+
+.soc-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.soc-table tbody tr.selected {
+  background: var(--bg-selected);
+}
+
+.soc-table tbody tr.sev-row-CRITICAL td:first-child { box-shadow: inset 3px 0 0 var(--sev-critical) !important; }
+.soc-table tbody tr.sev-row-HIGH     td:first-child { box-shadow: inset 3px 0 0 var(--sev-high) !important; }
+.soc-table tbody tr.sev-row-MEDIUM   td:first-child { box-shadow: inset 3px 0 0 var(--sev-medium) !important; }
+.soc-table tbody tr.sev-row-LOW      td:first-child { box-shadow: inset 3px 0 0 var(--sev-low) !important; }
+
+.soc-table tbody td {
+  padding: 0 7px;
+  border-right: 1px solid #141a23;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.soc-table tbody td:last-child,
+.soc-table thead th:last-child {
+  border-right: none;
+}
+
+.ip-link {
+  color: var(--state-accent);
+  cursor: pointer;
+}
+
+.ip-link:hover {
+  text-decoration: underline;
+  color: var(--text-bright);
+}
+
+.cell-muted {
+  color: var(--text-muted);
+}
+
+.cell-strong {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+/* Stage pip indicator (6 kill-chain steps) */
+.stage-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.stage-pip {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+}
+
+.stage-pip.on-1 { background: var(--sev-low); border-color: var(--sev-low); }
+.stage-pip.on-2 { background: var(--sev-low); border-color: var(--sev-low); }
+.stage-pip.on-3 { background: var(--sev-medium); border-color: var(--sev-medium); }
+.stage-pip.on-4 { background: var(--sev-high); border-color: var(--sev-high); }
+.stage-pip.on-5 { background: var(--sev-critical); border-color: var(--sev-critical); }
+.stage-pip.on-6 { background: #ff2e4c; border-color: #ff2e4c; }

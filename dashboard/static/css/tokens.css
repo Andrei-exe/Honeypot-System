@@ -1,0 +1,143 @@
+/* ==========================================================================
+   HONEYPOT SOC CONSOLE // DESIGN TOKENS
+   Estetica industriala stricta: 0px border-radius, hairline 1px, 0 box-shadow
+   ========================================================================== */
+
+:root {
+  /* Suprafete (90% monocrom grafit/otel) */
+  --bg-canvas: #080a0e;
+  --bg-panel: #0d1117;
+  --bg-panel-alt: #11161e;
+  --bg-header: #141a24;
+  --bg-hover: #18202c;
+  --bg-selected: #1c2736;
+  --bg-input: #0a0d12;
+  --bg-terminal: #06080b;
+
+  /* Hairline borders */
+  --border-subtle: #1b222d;
+  --border-default: #242e3d;
+  --border-strong: #354357;
+  --border-focus: #5a8fd6;
+
+  /* Text */
+  --text-primary: #d8dee9;
+  --text-secondary: #9aa7b8;
+  --text-muted: #647285;
+  --text-bright: #f0f4fa;
+  --text-inverse: #080a0e;
+
+  /* Semnale semantice (fara glow) */
+  --sev-critical: #e5484d;
+  --sev-critical-bg: #291215;
+  --sev-critical-border: #6e2328;
+
+  --sev-high: #e07b24;
+  --sev-high-bg: #291a0d;
+  --sev-high-border: #6e3e14;
+
+  --sev-medium: #cfa82b;
+  --sev-medium-bg: #26200d;
+  --sev-medium-border: #635116;
+
+  --sev-low: #4b91d9;
+  --sev-low-bg: #101e2e;
+  --sev-low-border: #254b73;
+
+  --sev-none: #647285;
+  --sev-none-bg: #141921;
+  --sev-none-border: #28313f;
+
+  /* Stari operationale */
+  --state-ok: #2ea043;
+  --state-ok-bg: #0f2416;
+  --state-ok-border: #215730;
+  --state-warn: #d4a72c;
+  --state-warn-bg: #261f0b;
+  --state-accent: #58a6ff;
+
+  /* Culori protocoale (pentru grafice Canvas & badge-uri) */
+  --proto-ssh: #4b91d9;
+  --proto-telnet: #e07b24;
+  --proto-ftp: #a371f7;
+  --proto-http: #2ea043;
+  --proto-other: #7d8a9c;
+
+  /* Tipografie (zero dependente externe / CDN) */
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", "Fira Code",
+               ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-sans: "IBM Plex Sans", "Inter", system-ui, -apple-system, "Segoe UI",
+               Roboto, Helvetica, Arial, sans-serif;
+
+  /* Dimensiuni structurale */
+  --topbar-h: 34px;
+  --subbar-h: 36px;
+  --footer-h: 24px;
+  --rail-w: 184px;
+  --inspector-w: 470px;
+  --row-h: 27px;
+  --radius: 0px;
+
+  /* Z-index */
+  --z-sticky: 10;
+  --z-resizer: 20;
+  --z-dropdown: 40;
+  --z-modal: 80;
+  --z-toast: 100;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+kbd,
+.mono,
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+a {
+  color: var(--state-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Scrollbars industriale 6px */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-canvas);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
