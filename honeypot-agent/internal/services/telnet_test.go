@@ -174,6 +174,68 @@ func TestTelnetSession(t *testing.T) {
 	}
 }
 
+// Byte for byte what BusyBox 1.30.1 telnetd + login send: the option negotiation and the banner
+// first (Shodan stores exactly these bytes), then the echo of what is typed, except the password,
+// and 3s after a wrong password. The bytes are written out here from the sources (telnetd.c,
+// libbb/login.c, bb_askpass.c), not taken from our constants.
+func TestTelnetLikeBusyBox(t *testing.T) {
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+
+	// IAC DO ECHO, IAC DO NAWS, IAC WILL ECHO, IAC WILL SGA, then issue.net through the pty
+	want := "\xff\xfd\x01\xff\xfd\x1f\xff\xfb\x01\xff\xfb\x03\r\r\nGateway Linux 4.14\r\n\rgateway login: "
+	if got := readUntil(t, r, "gateway login: "); got != want {
+		t.Errorf("greeting: %q\n     want %q", got, want)
+	}
+
+	fmt.Fprint(conn, "root\r\n")
+	if got := readUntil(t, r, "Password: "); got != "root\r\nPassword: " { // echoed, no option change
+		t.Errorf("after the name: %q", got)
+	}
+	start := time.Now()
+	fmt.Fprint(conn, "secret\r\n")
+	if got := readUntil(t, r, "gateway login: "); got != "\r\nLogin incorrect\r\ngateway login: " {
+		t.Errorf("after a wrong password: %q (the password must not be echoed)", got)
+	}
+	if took := time.Since(start); took < 3*time.Second {
+		t.Errorf("a wrong password was answered after %v (BusyBox: 3s)", took)
+	}
+
+	fmt.Fprint(conn, "root\r\n")
+	readUntil(t, r, "Password: ")
+	fmt.Fprint(conn, "root\r\n")
+	readUntil(t, r, "root@gateway:~# ")
+	fmt.Fprint(conn, "idx\x7f\r\n") // a typo, deleted with backspace
+	want = "idx\b \b\r\nuid=0(root) gid=0(root) groups=0(root)\r\nroot@gateway:~# "
+	if got := readUntil(t, r, "root@gateway:~# "); got != want {
+		t.Errorf("command: %q\n   want %q", got, want)
+	}
+	fmt.Fprint(conn, "echo \xc3\xa9\r\n") // "é" in UTF-8: the echo must be these same 2 bytes
+	want = "echo \xc3\xa9\r\n\xc3\xa9\r\nroot@gateway:~# "
+	if got := readUntil(t, r, "root@gateway:~# "); got != want {
+		t.Errorf("non-ASCII: %q\n     want %q", got, want)
+	}
+	fmt.Fprint(conn, "exit\r\n")
+	waitDone(t, done)
+
+	events := parseEvents(t, out.String())
+	checkSession(t, events, "TELNET", 23)
+	if logins := ofType(events, "login_attempt"); len(logins) != 2 || logins[0].Credentials.Password != "secret" {
+		t.Errorf("login_attempt events: %+v", logins)
+	}
+	if commands := ofType(events, "command_exec"); len(commands) < 1 || commands[0].PayloadDetails.Command != "id" {
+		t.Errorf("command_exec events: %+v", commands)
+	}
+}
+
 // A bot that sends its commands all at once gets them answered one by one, 200-300ms apart (pacer),
 // so one session can't make hundreds of events a second. None of them is lost.
 func TestTelnetCommandsArePaced(t *testing.T) {
@@ -197,7 +259,7 @@ func TestTelnetCommandsArePaced(t *testing.T) {
 	if took := time.Since(start); took < 5*200*time.Millisecond { // the first runs at once, then 5 waits
 		t.Errorf("6 commands sent at once took %v (expected at least 1s)", took)
 	}
-	if n := strings.Count(string(all), "x\r\n"); n != 5 {
+	if n := strings.Count(string(all), "\r\nx\r\n"); n != 5 { // each output after the echoed "echo x\r\n"
 		t.Errorf("%d outputs (expected 5): %q", n, all)
 	}
 	waitDone(t, done)
@@ -236,7 +298,7 @@ func TestTelnetLoginTimeout(t *testing.T) {
 	if took := time.Since(start); took > 800*time.Millisecond {
 		t.Errorf("the login lasted %v (expected cut after 500ms)", took)
 	}
-	if !strings.HasSuffix(string(all), "gateway login: \r\nLogin timed out after 60 seconds\r\n") {
+	if !strings.HasSuffix(string(all), "gateway login: \r\r\nLogin timed out after 60 seconds\r\r\n") {
 		t.Errorf("got %q", all)
 	}
 	waitDone(t, done)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -27,13 +28,26 @@ const (
 	telnetSB      = 250 // subnegotiation begin
 	telnetSE      = 240 // subnegotiation end
 	telnetOptEcho = 1   // ECHO option
+	telnetOptSGA  = 3   // SUPPRESS-GO-AHEAD: the client sends each key as it is typed
+	telnetOptNAWS = 31  // window size
 )
+
+// telnetGreeting is what BusyBox 1.30.1 telnetd sends on a new connection, byte for byte (scanners
+// such as Shodan store exactly these bytes). First iacs_to_send (telnetd.c): DO ECHO, DO NAWS,
+// WILL ECHO, WILL SGA = "I echo, send me every key". Then /etc/issue.net, printed through the pty by
+// print_login_issue (libbb/login.c): puts("\r") and every \n written as \n\r, and the pty's ONLCR
+// turns each \n into \r\n -> the doubled \r, and a lone \r before "gateway login: ".
+const telnetGreeting = "\xff\xfd\x01\xff\xfd\x1f\xff\xfb\x01\xff\xfb\x03" + "\r\r\nGateway Linux 4.14\r\n\r"
 
 const (
 	telnetMaxLine       = 1024
 	telnetMaxLoginTries = 3
 	telnetMaxCommands   = 50
 	telnetMaxEmptyNames = 10 // BusyBox login gives up after 10 empty user names (EMPTY_USERNAME_COUNT)
+
+	// telnetFailDelay is BusyBox login's wait after a wrong password: bb_do_delay(LOGIN_FAIL_DELAY),
+	// LOGIN_FAIL_DELAY = 3 in include/libbb.h, at least 3s of wall-clock time.
+	telnetFailDelay = 3 * time.Second
 )
 
 // Variables only so the tests can shorten them.
@@ -91,15 +105,17 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	// wrapped in func() so the timestamp is taken at the end, not now
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
-	reader := &telnetReader{conn: conn, r: bufio.NewReader(conn)}
+	// echo: like the pty of a real telnetd (it said WILL ECHO), what the client types comes back
+	reader := &telnetReader{conn: conn, r: bufio.NewReader(conn), echo: true}
 
 	// ---------- Phase 1: login ----------
-	fmt.Fprint(conn, "\r\nGateway Linux 4.14\r\n\r\n")
+	fmt.Fprint(conn, telnetGreeting)
 	reader.limit = time.Now().Add(telnetLoginTimeout)
 	timedOut := func(err error) { // BusyBox login's alarm_handler, when its 60s run out
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			conn.SetWriteDeadline(time.Now().Add(time.Second)) // the old deadline (writes too) has passed
-			fmt.Fprint(conn, "\r\nLogin timed out after 60 seconds\r\n")
+			// printf("\r\nLogin timed out after %u seconds\r\n"): the pty adds a \r before each \n
+			fmt.Fprint(conn, "\r\r\nLogin timed out after 60 seconds\r\r\n")
 		}
 	}
 	loggedIn := false
@@ -113,16 +129,17 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			return // the 10th empty name: BusyBox login exits
 		}
 
-		// WILL ECHO = the client stops echoing what it types -> hidden password
-		conn.Write([]byte{telnetIAC, telnetWILL, telnetOptEcho})
+		// The password is hidden like bb_ask_noecho does it: no Telnet option changes (the client
+		// already leaves the echo to us), only no echo while it is typed, then a newline.
 		fmt.Fprint(conn, "Password: ")
+		reader.echo = false
 		pass, err := reader.readLine()
+		reader.echo = true
 		if err != nil {
 			timedOut(err)
 			return
 		}
-		conn.Write([]byte{telnetIAC, telnetWONT, telnetOptEcho})
-		fmt.Fprint(conn, "\r\n")
+		fmt.Fprint(conn, "\r\n") // bb_putchar('\n'), through the pty
 
 		success := weakCredentials[user+":"+pass]
 
@@ -138,7 +155,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			loggedIn = true
 			break
 		}
-		time.Sleep(time.Second) // real logins also delay after a failure
+		time.Sleep(telnetFailDelay)
 		fmt.Fprint(conn, "Login incorrect\r\n")
 	}
 	if !loggedIn {
@@ -199,6 +216,17 @@ type telnetReader struct {
 	lastCR bool
 
 	limit time.Time // the line must also arrive before this (the login's 60s); zero = no limit
+
+	// echo sends back what the client types, as the pty of a real telnetd does (it said WILL ECHO,
+	// so the client shows nothing by itself). Off while the password is typed (bb_ask_noecho).
+	echo bool
+}
+
+// echoBack writes text back to the client if echo is on (a failed write shows up at the next read).
+func (t *telnetReader) echoBack(text string) {
+	if t.echo {
+		io.WriteString(t.conn, text)
+	}
 }
 
 // readLine reads one line, without the trailing Enter. The whole line must arrive within
@@ -229,20 +257,23 @@ func (t *telnetReader) readLine() (string, error) {
 			if err := skipTelnetCommand(t.r); err != nil {
 				return "", err
 			}
-		case b == '\r':
-			t.lastCR = true
+		case b == '\r' || b == '\n': // Enter; some clients (e.g. nc on Linux) send only \n
+			t.lastCR = b == '\r'
+			t.echoBack("\r\n")
 			return string(line), nil
-		case b == '\n':
-			return string(line), nil // some clients (e.g. nc on Linux) send only \n
 		case b == 8 || b == 127: // backspace / delete
 			if len(line) > 0 {
 				line = line[:len(line)-1]
+				t.echoBack("\b \b") // back, blank, back: the character disappears from the screen
 			}
 		case b == 0:
 			// ignore NUL
 		default:
 			if len(line) < telnetMaxLine { // bytes past the limit are dropped
 				line = append(line, b)
+				if b >= ' ' { // control characters are kept but not shown (simplification)
+					t.echoBack(string([]byte{b})) // the byte itself; string(b) would be the rune b (2 bytes over 127)
+				}
 			}
 		}
 	}
