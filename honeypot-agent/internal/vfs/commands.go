@@ -24,33 +24,45 @@ const fakePS = `  PID USER       VSZ STAT COMMAND
   530 root      1296 R    ps
 `
 
-// command runs one command. Returns the output, the exit code
-// (0 = ok, 127 = command not found, other = error) and whether the session should end.
+// command runs one command (not one of the shell's own, see dispatch). Returns the output, the exit
+// code (0 = ok, 127 = command not found, other = error) and whether the session should end.
+// "/bin/cat" or "/usr/bin/wget" = "cat" / "wget" (busybox itself or one of its applet links); a name
+// without "/" must be a builtin or in a directory of $PATH.
 func (s *Shell) command(args []string, input string) (string, int, bool) {
-	name := args[0]
-	// "/bin/cat" or "/usr/bin/wget" = "cat" / "wget": busybox itself or one of its applet links
-	if strings.Contains(name, "/") {
-		if p := resolve(s.cwd, name); p == "/bin/busybox" || path.Base(fakeLinks[p]) == "busybox" {
-			name = path.Base(p)
+	name := s.appletName(args[0])
+	if name == "" { // "" (or an empty $X in quotes): ash tries to run it and the kernel refuses
+		return s.errorf("", ": Permission denied"), 127, false
+	}
+	if !strings.Contains(name, "/") && !builtins[name] && !s.inPath(name) {
+		return s.errorf("", name+": not found"), 127, false
+	}
+	return s.applet(name, args[1:], input)
+}
+
+// appletNames are the commands busybox itself runs ("busybox wget"), those in applets.
+var appletNames = func() map[string]bool {
+	names := map[string]bool{}
+	for _, a := range applets {
+		for _, n := range a.names {
+			names[n] = true
 		}
 	}
-	args = args[1:] // from here on, args holds only the arguments
+	return names
+}()
 
+// applet runs a command by name; args holds only its arguments.
+func (s *Shell) applet(name string, args []string, input string) (string, int, bool) {
 	switch name {
-	case "exit", "logout", "quit":
-		return "", 0, true
-
 	case "busybox":
 		// "busybox wget ..." = "wget ..." (on routers every command is a busybox applet)
 		if len(args) == 0 {
 			return busyboxHelp(), 0, false
 		}
-		out, code, exit := s.command(args, input)
-		if code == 127 {
+		if !appletNames[args[0]] {
 			// Mirai sends "/bin/busybox ECCHI" and expects exactly this reply
 			return args[0] + ": applet not found\n", 127, false
 		}
-		return out, code, exit
+		return s.applet(args[0], args[1:], input)
 
 	case "whoami":
 		return "root\n", 0, false
@@ -73,8 +85,8 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 		return s.ls(args)
 	case "cat":
 		return s.cat(args, input)
-	case "grep":
-		return s.grep(args, input)
+	case "grep", "egrep", "fgrep":
+		return s.grep(name, args, input)
 	case "touch":
 		return s.touch(args)
 	case "mkdir":
@@ -101,8 +113,53 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 		// No curl: BusyBox has none, so "curl" is "not found" below, like on a real router.
 		return name + ": can't connect to remote host: Connection timed out\n", 1, false
 
-	case "sh", "ash", "chmod", "mv", "kill", "killall", "export", "ulimit", "sleep", "true", "syslogd", "klogd":
-		// commands that print nothing on success on a real system (the daemons go to the background)
+	// the text tools bots pipe /proc and /etc through (text.go, sed.go, awk.go)
+	case "wc":
+		return s.wc(args, input)
+	case "head", "tail":
+		return s.headTail(name, args, input)
+	case "cut":
+		return s.cutApplet(args, input)
+	case "tr":
+		return s.tr(args, input)
+	case "sort":
+		return s.sortApplet(args, input)
+	case "uniq":
+		return s.uniq(args, input)
+	case "seq":
+		return seq(args)
+	case "sed":
+		return s.sed(args, input)
+	case "awk":
+		return s.awk(args, input)
+
+	// looking around (utils.go)
+	case "printf":
+		return s.printf(args)
+	case "test", "[", "[[":
+		return s.test(name, args)
+	case "which":
+		return s.which(args)
+	case "type":
+		return s.typeBuiltin(args)
+	case "read":
+		return s.read(args, input)
+	case "history":
+		return s.historyBuiltin()
+	case "help":
+		return helpText, 0, false
+	case "date":
+		return date(args)
+	case "sleep":
+		return sleep(args)
+	case "w":
+		return wHeader, 0, false
+	case "who":
+		return "", 0, false
+
+	case "sh", "ash", "chmod", "mv", "kill", "killall", "ulimit", "true", "syslogd", "klogd":
+		// commands that print nothing on success on a real system (the daemons go to the background;
+		// "sh" alone would start a new shell, see sh in builtins.go)
 		return "", 0, false
 	case "login":
 		return "", 0, false // simplification: a real one would ask "gateway login:" again
@@ -119,20 +176,45 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 
 	// a program in PATH that isn't an applet (dropbear, vsftpd, lighttpd) "runs" silently too
 	if !strings.Contains(name, "/") {
-		for _, dir := range []string{"/bin", "/sbin", "/usr/bin", "/usr/sbin"} {
-			if _, ok := fakeFiles[dir+"/"+name]; ok {
-				return "", 0, false
-			}
-		}
-	}
-
-	// ./bot or /tmp/x: if the file exists it "runs" silently (like malware started in the background)
-	if strings.Contains(name, "/") {
-		if _, ok := s.readFile(resolve(s.cwd, name)); ok {
+		if s.inPath(name) {
 			return "", 0, false
 		}
+		return s.errorf("", name+": not found"), 127, false
 	}
-	return "-sh: " + name + ": not found\n", 127, false
+
+	// ./bot or /tmp/x (a shell script never gets here: dispatch runs it, see script)
+	p := resolve(s.cwd, name)
+	content, ok := s.readFile(p)
+	switch {
+	case s.isDir(p):
+		return s.errorf("", name+": Permission denied"), 126, false
+	case !ok:
+		return s.errorf("", name+": not found"), 127, false
+	case s.files[p] == elfHeader:
+		// the attacker's copy of busybox (cp /bin/busybox x, cp /bin/echo x): it runs as the applet it
+		// is named after (the built-in programs, dropbear..., have the same header but run silently)
+		if base := path.Base(name); appletNames[base] {
+			return s.applet(base, args, input)
+		}
+		return path.Base(name) + ": applet not found\n", 127, false
+	case strings.HasPrefix(content, "#!"):
+		return s.errorf("", name+": not found"), 127, false // its interpreter (#!/bin/bash) doesn't exist
+	}
+	return "", 0, false // a program the attacker wrote: it "runs" silently (malware goes to the background)
+}
+
+// script reports whether running this file means running it as a shell script: text (ash runs a file
+// the kernel can't execute itself) or "#!/bin/sh".
+func (s *Shell) script(name string) bool {
+	content, ok := s.readFile(resolve(s.cwd, name))
+	if !ok || strings.HasPrefix(content, "\x7fELF") {
+		return false
+	}
+	interpreter, _, _ := strings.Cut(strings.TrimPrefix(content, "#!"), "\n")
+	if fields := strings.Fields(interpreter); strings.HasPrefix(content, "#!") {
+		return len(fields) > 0 && (s.appletName(fields[0]) == "sh" || s.appletName(fields[0]) == "ash")
+	}
+	return true
 }
 
 // busyboxHelp is what "busybox" alone prints: BusyBox 1.30.1's text (libbb/appletlib.c, with
@@ -264,19 +346,6 @@ func unescape(s string) string {
 	return out.String()
 }
 
-func (s *Shell) cd(args []string) (string, int, bool) {
-	if len(args) == 0 {
-		s.cwd = "/root" // cd with no argument = home
-		return "", 0, false
-	}
-	dir := resolve(s.cwd, args[0])
-	if !s.isDir(dir) {
-		return "-sh: cd: can't cd to " + args[0] + ": No such file or directory\n", 1, false
-	}
-	s.cwd = dir
-	return "", 0, false
-}
-
 func (s *Shell) cat(args []string, input string) (string, int, bool) {
 	if len(args) == 0 {
 		return input, 0, false // "... | cat" passes its input through
@@ -302,32 +371,6 @@ func (s *Shell) cat(args []string, input string) (string, int, bool) {
 		}
 	}
 	return out.String(), code, false
-}
-
-// grep TEXT [file] keeps only the lines containing TEXT (no regex, options are ignored).
-func (s *Shell) grep(args []string, input string) (string, int, bool) {
-	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		args = args[1:]
-	}
-	if len(args) == 0 {
-		return "Usage: grep [-HhnlLoqvsriwFE] PATTERN [FILE]...\n", 2, false
-	}
-
-	text := input // without a file, grep works on what comes through |
-	if len(args) > 1 {
-		text, _, _ = s.cat(args[1:], "")
-	}
-
-	var out strings.Builder
-	for _, row := range strings.SplitAfter(text, "\n") {
-		if row != "" && strings.Contains(row, args[0]) {
-			out.WriteString(row)
-		}
-	}
-	if out.Len() == 0 {
-		return "", 1, false // no match = exit code 1 (matters for && and ||)
-	}
-	return out.String(), 0, false
 }
 
 func (s *Shell) touch(args []string) (string, int, bool) {

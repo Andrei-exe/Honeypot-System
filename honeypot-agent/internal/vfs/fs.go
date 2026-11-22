@@ -125,11 +125,13 @@ var applets = []struct {
 	target string // /bin/busybox, relative to dir (the way BusyBox installs its links)
 	names  []string
 }{
-	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "df", "echo", "false", "grep", "hostname",
-		"kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sh", "sleep", "touch", "true", "uname"}},
+	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "date", "df", "echo", "egrep", "false", "fgrep",
+		"grep", "hostname", "kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sed", "sh", "sleep",
+		"touch", "true", "uname"}},
 	{"/sbin", "../bin/busybox", []string{"init", "klogd", "syslogd"}},
-	{"/usr/bin", "../../bin/busybox", []string{"crontab", "free", "ftpget", "id", "killall", "nproc",
-		"tftp", "uptime", "wget", "whoami"}},
+	{"/usr/bin", "../../bin/busybox", []string{"[", "[[", "awk", "crontab", "cut", "env", "free", "ftpget",
+		"head", "id", "killall", "nohup", "nproc", "printf", "seq", "sort", "tail", "test", "tftp", "tr", "uniq",
+		"uptime", "w", "wc", "wget", "which", "who", "whoami"}},
 	{"/usr/sbin", "../../bin/busybox", []string{"telnetd"}},
 }
 
@@ -228,7 +230,9 @@ var fakeFiles = map[string]string{
 		"mail:x:8:\nkmem:x:9:\nwheel:x:10:root\ncdrom:x:11:\ndialout:x:18:\nfloppy:x:19:\nvideo:x:28:\n" +
 		"audio:x:29:\ntape:x:32:\nwww-data:x:33:\noperator:x:37:\nutmp:x:43:\nplugdev:x:46:\nstaff:x:50:\n" +
 		"lock:x:54:\nnetdev:x:82:\nusers:x:100:\nnogroup:x:65534:\n",
-	"/etc/shells": "/bin/ash\n", // Buildroot's busybox package writes only this line
+	// Buildroot's finalize hooks write it: busybox.mk adds /bin/ash, skeleton-init-common.mk /bin/sh
+	// (Dropbear refuses a login whose shell isn't listed here)
+	"/etc/shells": "/bin/ash\n/bin/sh\n",
 	// Dropbear's host key (the SSH server's type: ECDSA)
 	"/etc/dropbear/dropbear_ecdsa_host_key": dropbearHostKey(),
 
@@ -236,12 +240,13 @@ var fakeFiles = map[string]string{
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
 	"/etc/resolv.conf": "nameserver 192.168.1.1\n",
 	// admin, support and user have uid 0 (common on IoT), so whoami says root for any login.
-	// Every user in weakCredentials must be here and in /etc/shadow.
-	"/etc/passwd": "root:x:0:0:root:/root:/bin/ash\n" +
+	// Every user in weakCredentials must be here and in /etc/shadow. The shell is /bin/sh, like root's
+	// in Buildroot's skeleton: login starts it as "-sh", the name in ps, $0 and the shell's errors.
+	"/etc/passwd": "root:x:0:0:root:/root:/bin/sh\n" +
 		"daemon:*:1:1:daemon:/var:/bin/false\n" +
-		"admin:x:0:0:admin:/root:/bin/ash\n" +
-		"support:x:0:0:support:/root:/bin/ash\n" +
-		"user:x:0:0:user:/root:/bin/ash\n" +
+		"admin:x:0:0:admin:/root:/bin/sh\n" +
+		"support:x:0:0:support:/root:/bin/sh\n" +
+		"user:x:0:0:user:/root:/bin/sh\n" +
 		"nobody:*:65534:65534:nobody:/var:/bin/false\n",
 	"/etc/shadow": "root:$1$Fz8sK2lQ$wE0bq3Yt1aRk9mVh7uXcN.:18417:0:99999:7:::\n" +
 		"daemon:*:0:0:99999:7:::\n" +

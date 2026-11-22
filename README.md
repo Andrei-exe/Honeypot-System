@@ -25,6 +25,8 @@ flowchart LR
   - The web server answers malformed requests and unusual methods (`FOO`, `DELETE`, `CONNECT`, `OPTIONS`, `HTTP/2.0`, a missing `Host` header) the way lighttpd 1.4.53 does, never with Go's own error pages, and still logs them.
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
   - The shell handles redirections like the router's BusyBox shell does: `>/dev/null 2>&1` (which bots append to almost every command), `2>&1 |`, `&>`, `<` and `>` written without spaces, with the same error messages.
+  - It also speaks the shell language the way BusyBox's `ash` does: variables (`$HOME`, `${X:-default}`, `${X#prefix}`), `$(...)` and backticks, `$((...))` arithmetic, `~`, `*` and `?` file patterns, `sh -c`, `eval`, `.`, scripts the attacker writes and runs, `export`, `set` and `unset`. 130 test lines were compared byte for byte with the real BusyBox 1.30.1 shell, error messages included.
+  - The text tools bots pipe `/proc` and `/etc` through behave like BusyBox's too: `grep` (with regular expressions and its options), `wc`, `head`, `tail`, `cut`, `tr`, `sort`, `uniq`, `seq`, `sed`, `awk`, plus `printf`, `test` / `[`, `which`, `type`, `command -v`, `env`, `read`, `history`, `date`, `w`. Typical recon pipelines such as `cat /proc/cpuinfo | grep name | wc -l` or `free -m | grep Mem | awk '{print $2}'` were checked against the real BusyBox on the same input.
   - The filesystem holds decoy secrets (honeytokens): the Wi-Fi password in `/etc/hostapd.conf` and the provider's PPPoE account in `/etc/ppp/chap-secrets`. They exist nowhere else. Reading the files is logged, and a later login with one of these strings proves that whoever sent it had read them, even from another IP.
   - It also answers what cryptominer bots check before installing (`free`, `nproc`, `df`, `uptime`, `crontab`) exactly like the router's BusyBox would. The numbers agree with `/proc`. A cron job a bot adds stays visible to it for the rest of its session.
   - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout. If the threat engine is down, the agent keeps up to 5000 events in memory and sends them when it is back, in requests of at most 200 events.
@@ -117,7 +119,8 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
   - limits on line length and number of commands;
   - size limits copied from the real servers: 8 KB of HTTP request headers (lighttpd), 9000 bytes for an SSH command and 100 bytes for an SSH username or password (Dropbear). No single request can turn into a huge event;
   - a bug that some attacker input triggers ends only that attacker's session: the agent recovers, logs it and keeps serving everyone else;
-  - 256 KB of fake disk space per shell session. Past that, writes fail the way they do on a full disk, with BusyBox's own error messages, and `df` shows the disk full. One session can no longer fill the agent's memory.
+  - 256 KB of fake disk space per shell session. Past that, writes fail the way they do on a full disk, with BusyBox's own error messages, and `df` shows the disk full. One session can no longer fill the agent's memory;
+  - 64 KB for a session's shell variables, and caps on what one command line can make the shell do (nesting, number of commands, pattern matching and arithmetic work), so endless `sh -c` / `eval` loops and fork bombs stop at once instead of keeping a CPU busy.
 - **No escape routes:**
   - FTP never opens data connections;
   - SSH allows no port forwarding;
