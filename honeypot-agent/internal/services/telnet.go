@@ -3,9 +3,11 @@ package services
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -28,11 +30,21 @@ const (
 )
 
 const (
-	telnetIdleTimeout   = 60 * time.Second
 	telnetMaxLine       = 1024
 	telnetMaxLoginTries = 3
 	telnetMaxCommands   = 50
 	telnetMaxEmptyNames = 10 // BusyBox login gives up after 10 empty user names (EMPTY_USERNAME_COUNT)
+)
+
+// Variables only so the tests can shorten them.
+var (
+	// telnetIdleTimeout: a whole line must arrive within it (not each byte: one byte every 59s
+	// would otherwise hold a connection, and its slot in limit.go, forever).
+	telnetIdleTimeout = 60 * time.Second
+
+	// telnetLoginTimeout is BusyBox login's TIMEOUT: all the tries together, from the first prompt
+	// (alarm(TIMEOUT) in login.c, cancelled only by a successful login).
+	telnetLoginTimeout = 60 * time.Second
 )
 
 // RunTelnet serves a fake BusyBox telnetd on address until ctx is cancelled.
@@ -83,22 +95,34 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 	// ---------- Phase 1: login ----------
 	fmt.Fprint(conn, "\r\nGateway Linux 4.14\r\n\r\n")
+	reader.limit = time.Now().Add(telnetLoginTimeout)
+	timedOut := func(err error) { // BusyBox login's alarm_handler, when its 60s run out
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			conn.SetWriteDeadline(time.Now().Add(time.Second)) // the old deadline (writes too) has passed
+			fmt.Fprint(conn, "\r\nLogin timed out after 60 seconds\r\n")
+		}
+	}
 	loggedIn := false
 	for try := 1; try <= telnetMaxLoginTries; try++ {
-		user, ok := readUsername(conn, reader)
-		if !ok {
+		user, err := readUsername(conn, reader)
+		if err != nil {
+			timedOut(err)
 			return
+		}
+		if user == "" {
+			return // the 10th empty name: BusyBox login exits
 		}
 
 		// WILL ECHO = the client stops echoing what it types -> hidden password
 		conn.Write([]byte{telnetIAC, telnetWILL, telnetOptEcho})
 		fmt.Fprint(conn, "Password: ")
 		pass, err := reader.readLine()
-		conn.Write([]byte{telnetIAC, telnetWONT, telnetOptEcho})
-		fmt.Fprint(conn, "\r\n")
 		if err != nil {
+			timedOut(err)
 			return
 		}
+		conn.Write([]byte{telnetIAC, telnetWONT, telnetOptEcho})
+		fmt.Fprint(conn, "\r\n")
 
 		success := weakCredentials[user+":"+pass]
 
@@ -120,6 +144,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	if !loggedIn {
 		return
 	}
+	reader.limit = time.Time{} // alarm(0): from now on only the per-line timeout
 
 	// ---------- Phase 2: fake shell ----------
 	// no banner: Buildroot builds BusyBox's shell "quiet" (FEATURE_SH_EXTRA_QUIET), the prompt comes right away
@@ -143,18 +168,19 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 // readUsername asks "gateway login: " like BusyBox login: an empty line only asks again (no
 // "Password:", not a login attempt), 10 times at most, and the name ends at the first space.
-func readUsername(conn net.Conn, reader *telnetReader) (string, bool) {
+// Returns "" and no error after the 10th empty name.
+func readUsername(conn net.Conn, reader *telnetReader) (string, error) {
 	for range telnetMaxEmptyNames {
 		fmt.Fprint(conn, "gateway login: ")
 		line, err := reader.readLine()
 		if err != nil {
-			return "", false
+			return "", err
 		}
 		if words := strings.Fields(line); len(words) > 0 {
-			return words[0], true
+			return words[0], nil
 		}
 	}
-	return "", false // the 10th empty name: BusyBox login exits
+	return "", nil
 }
 
 // toCRLF converts the shell's \n line endings to the \r\n that Telnet expects.
@@ -171,15 +197,21 @@ type telnetReader struct {
 	// Enter is "\r\n" or "\r\0", and the two bytes may arrive in separate packets.
 	// lastCR = the previous line ended with \r, so a \n or \0 right after it is dropped.
 	lastCR bool
+
+	limit time.Time // the line must also arrive before this (the login's 60s); zero = no limit
 }
 
-// readLine reads one line, without the trailing Enter.
+// readLine reads one line, without the trailing Enter. The whole line must arrive within
+// telnetIdleTimeout (and before limit): sending one byte now and then doesn't extend it.
 func (t *telnetReader) readLine() (string, error) {
+	deadline := time.Now().Add(telnetIdleTimeout)
+	if !t.limit.IsZero() && t.limit.Before(deadline) {
+		deadline = t.limit
+	}
+	t.conn.SetDeadline(deadline) // writes too: an attacker who stops reading our output is cut off as well
+
 	var line []byte
 	for {
-		// kick the attacker after 60s of silence (or if they stop reading our output)
-		t.conn.SetDeadline(time.Now().Add(telnetIdleTimeout))
-
 		b, err := t.r.ReadByte()
 		if err != nil {
 			return "", err

@@ -206,6 +206,99 @@ func TestTelnetCommandsArePaced(t *testing.T) {
 	}
 }
 
+// Like BusyBox login: all the tries together must be done within 60s (500ms here), whatever the
+// client sends meanwhile (here an empty name every 100ms). Then its message, and the end.
+func TestTelnetLoginTimeout(t *testing.T) {
+	old := telnetLoginTimeout
+	telnetLoginTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { telnetLoginTimeout = old })
+
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	start := time.Now()
+	go func() {
+		for range telnetMaxEmptyNames - 1 { // 900ms of empty names, fewer than BusyBox's limit of 10
+			time.Sleep(100 * time.Millisecond)
+			if _, err := fmt.Fprint(conn, "\r\n"); err != nil {
+				return
+			}
+		}
+	}()
+	all, _ := io.ReadAll(conn) // until the server hangs up
+	if took := time.Since(start); took > 800*time.Millisecond {
+		t.Errorf("the login lasted %v (expected cut after 500ms)", took)
+	}
+	if !strings.HasSuffix(string(all), "gateway login: \r\nLogin timed out after 60 seconds\r\n") {
+		t.Errorf("got %q", all)
+	}
+	waitDone(t, done)
+	checkSession(t, parseEvents(t, out.String()), "TELNET", 23)
+
+	// after a successful login the limit is gone (alarm(0)): a command after 700ms still runs
+	addr, done = serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+	conn2, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	conn2.SetDeadline(time.Now().Add(5 * time.Second))
+	r := bufio.NewReader(conn2)
+	fmt.Fprint(conn2, "root\r\nroot\r\n")
+	readUntil(t, r, "root@gateway:~# ")
+	time.Sleep(700 * time.Millisecond)
+	fmt.Fprint(conn2, "whoami\r\n")
+	if got := readUntil(t, r, "root@gateway:~# "); !strings.Contains(got, "root\r\n") {
+		t.Errorf("a command after the login's limit: %q", got)
+	}
+	fmt.Fprint(conn2, "exit\r\n")
+	waitDone(t, done)
+}
+
+// A line must arrive whole within the idle timeout (300ms here): one byte now and then (here every
+// 100ms, never an Enter) doesn't keep the connection, and its place in limit.go, forever.
+func TestTelnetTrickleIsCut(t *testing.T) {
+	old := telnetIdleTimeout
+	telnetIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { telnetIdleTimeout = old })
+
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleTelnet(c, "telnet-test", s) })
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	r := bufio.NewReader(conn)
+	fmt.Fprint(conn, "root\r\nroot\r\n")
+	readUntil(t, r, "root@gateway:~# ")
+
+	start := time.Now()
+	go func() {
+		for range 20 { // 2s of trickling, if nothing cut it
+			time.Sleep(100 * time.Millisecond)
+			if _, err := conn.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+	}()
+	io.ReadAll(r) // until the server hangs up
+	if took := time.Since(start); took > 700*time.Millisecond {
+		t.Errorf("one byte every 100ms kept the connection for %v (expected cut after 300ms)", took)
+	}
+	waitDone(t, done)
+	checkSession(t, parseEvents(t, out.String()), "TELNET", 23)
+}
+
 // Empty user names only ask again (no "Password:", no login_attempt). The 10th ends the session,
 // like BusyBox login (EMPTY_USERNAME_COUNT), so a bot can't keep us busy with empty lines.
 func TestTelnetEmptyNames(t *testing.T) {

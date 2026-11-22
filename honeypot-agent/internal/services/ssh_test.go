@@ -405,6 +405,48 @@ func TestSSHWrongPassword(t *testing.T) {
 	}
 }
 
+// Like Dropbear's AUTH_TIMEOUT (1s here): the login must be done in time from the connection,
+// whatever the client does meanwhile. Rejected public keys don't count as tries, so a client
+// offering a new key every 200ms would otherwise keep the connection forever.
+func TestSSHAuthTimeout(t *testing.T) {
+	old := sshAuthTimeout
+	sshAuthTimeout = time.Second
+	t.Cleanup(func() { sshAuthTimeout = old })
+
+	var out bytes.Buffer
+	s := shipper.NewShipper(&out, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+
+	slowKeys := ssh.RetryableAuthMethod(ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+		time.Sleep(200 * time.Millisecond)
+		return []ssh.Signer{newTestKey(t)}, nil // a new key every time
+	}), 50) // 10s of keys, if nothing cut it
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
+
+	start := time.Now()
+	_, _, _, err = ssh.NewClientConn(conn, addr, &ssh.ClientConfig{
+		User: "root", Auth: []ssh.AuthMethod{slowKeys}, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	})
+	if err == nil {
+		t.Fatal("logged in with a public key")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("offering keys kept the connection for %v (expected closed after 1s)", took)
+	}
+	waitDone(t, done)
+	events := parseEvents(t, out.String())
+	checkSession(t, events, "SSH", 22)
+	if logins := ofType(events, "login_attempt"); len(logins) != 0 {
+		t.Errorf("public keys were logged as login attempts: %+v", logins)
+	}
+}
+
 // In the interactive shell too, commands sent all at once are answered one by one, 200-300ms
 // apart (pacer), and none is lost.
 func TestSSHShellCommandsArePaced(t *testing.T) {

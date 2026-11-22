@@ -48,6 +48,11 @@ const (
 	sshHostKeyFile = "ssh_host_ecdsa_key"
 )
 
+// sshAuthTimeout is Dropbear's AUTH_TIMEOUT (sysoptions.h): from the connection to a successful login,
+// whatever the client does meanwhile (rejected public keys don't count as tries, so without it a
+// client offering one key a minute would hold the connection forever). A variable only for the tests.
+var sshAuthTimeout = 300 * time.Second
+
 // dropbearAlgorithms are the algorithms Dropbear 2019.78 offers when Buildroot 2019.05.3 builds it
 // with its defaults (no legacy crypto, no zlib), in Dropbear's order (common-algo.c). Scanners
 // fingerprint these lists (HASSH); x/crypto's defaults have algorithms Dropbear never had (mlkem,
@@ -110,6 +115,17 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	shipper.EmitEvent(newEvent("session_start"))
 	defer func() { shipper.EmitEvent(newEvent("session_end")) }()
 
+	// Until the login: 60s of silence at most, and all of it within Dropbear's AUTH_TIMEOUT
+	// ("Timeout before auth": the connection is just closed, like at the 10th wrong password).
+	authEnd := time.Now().Add(sshAuthTimeout)
+	keepAuthAlive := func() {
+		deadline := time.Now().Add(sshIdleTimeout)
+		if authEnd.Before(deadline) {
+			deadline = authEnd
+		}
+		conn.SetDeadline(deadline)
+	}
+
 	// wrongPassword answers a failed password like Dropbear: after ~300ms, and at the 10th one it just
 	// closes the connection (dropbear_exit: no disconnect message, the last failure isn't even sent).
 	// x/crypto's own limit would send OpenSSH's "too many authentication failures" instead.
@@ -129,8 +145,7 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 		ServerVersion: sshServerVersion,
 		MaxAuthTries:  -1, // no limit in x/crypto: wrongPassword counts, like Dropbear
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-			// keep the attacker connected while they keep trying passwords
-			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
+			keepAuthAlive() // the attacker is still trying passwords
 
 			user := meta.User()
 			pass := string(password)
@@ -155,14 +170,13 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 		// Dropbear offers exactly "publickey" and "password" (no keyboard-interactive).
 		// We offer publickey too but reject every key, so clients fall back to password.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			conn.SetDeadline(time.Now().Add(sshIdleTimeout))
+			keepAuthAlive()
 			return nil, errors.New("public key rejected")
 		},
 	}
 	config.AddHostKey(hostKey)
 
-	// drop the connection if the handshake isn't done within 60s
-	conn.SetDeadline(time.Now().Add(sshIdleTimeout))
+	keepAuthAlive() // the handshake itself must be done within 60s too
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -95,6 +96,61 @@ func startHTTP(t *testing.T, s *shipper.Shipper) (addr string, stop func()) {
 		case <-time.After(shutdownWait + time.Second):
 			t.Fatal("RunHTTP did not stop")
 		}
+	}
+}
+
+// Keep-alive like lighttpd (values shortened here): after max-keep-alive-requests the next answer
+// says "Connection: close" and ends the connection, and an idle keep-alive connection is closed
+// after max-keep-alive-idle. Otherwise one request now and then would hold a connection forever.
+func TestHTTPKeepAliveLikeLighttpd(t *testing.T) {
+	oldIdle, oldMax := httpKeepAliveIdle, httpMaxKeepAliveRequests
+	httpKeepAliveIdle, httpMaxKeepAliveRequests = 500*time.Millisecond, 2
+	t.Cleanup(func() { httpKeepAliveIdle, httpMaxKeepAliveRequests = oldIdle, oldMax })
+	addr, stop := startHTTP(t, shipper.NewShipper(io.Discard, "", ""))
+	defer stop()
+
+	get := func(conn net.Conn, r *bufio.Reader) *http.Response {
+		t.Helper()
+		fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: gateway\r\n\r\n")
+		resp, err := http.ReadResponse(r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	// 3 requests on one connection: the answer one past the limit of 2 closes it (lighttpd's ">")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+	for i := 1; i <= 3; i++ {
+		if resp := get(conn, r); resp.Close != (i == 3) {
+			t.Errorf("answer %d: Connection: close = %v (expected only on the 3rd)", i, resp.Close)
+		}
+	}
+	if _, err := r.ReadByte(); err != io.EOF {
+		t.Errorf("after the 3rd answer the connection is still open (%v)", err)
+	}
+
+	// an idle keep-alive connection is closed after 500ms
+	idle, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	idle.SetDeadline(time.Now().Add(10 * time.Second))
+	r = bufio.NewReader(idle)
+	get(idle, r)
+	start := time.Now()
+	_, err = r.ReadByte() // nothing more is sent: wait until the server hangs up
+	if took := time.Since(start); err != io.EOF || took > time.Second {
+		t.Errorf("idle keep-alive connection: %v after %v (expected closed after 500ms)", err, took)
 	}
 }
 

@@ -112,7 +112,7 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
 - **The dashboard** has no authentication, so it is only ever bound to `127.0.0.1`.
 - **Built-in limits:**
   - connections per service and per IP;
-  - an idle timeout;
+  - timeouts copied from the real servers, which sending a byte now and then cannot stretch: 60 seconds for the whole Telnet login (BusyBox), 300 seconds from connecting to logging in over SSH (Dropbear), 5 seconds for an idle HTTP keep-alive connection and 100 requests per connection (lighttpd), plus 60 seconds for each shell command line;
   - limits on line length and number of commands;
   - size limits copied from the real servers: 8 KB of HTTP request headers (lighttpd), 9000 bytes for an SSH command and 100 bytes for an SSH username or password (Dropbear). No single request can turn into a huge event;
   - a bug that some attacker input triggers ends only that attacker's session: the agent recovers, logs it and keeps serving everyone else;

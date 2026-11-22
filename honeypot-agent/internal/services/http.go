@@ -20,8 +20,22 @@ import (
 	"honeypot-agent/internal/vfs"
 )
 
-// sessionKey is the context key under which ConnContext stores a connection's session_id.
-type sessionKey struct{}
+// httpConn is what ConnContext remembers about one TCP connection (stored under connKey). Go serves
+// the requests of one connection one after the other, so the handler can change it without a mutex.
+type httpConn struct {
+	sessionID string // keep-alive requests on one connection share one session_id
+	requests  int    // requests so far on this connection
+}
+
+type connKey struct{}
+
+// lighttpd's keep-alive defaults (configfile.c): an idle keep-alive connection is closed after
+// server.max-keep-alive-idle; after server.max-keep-alive-requests the next answer ends it
+// ("Connection: close", response.c). Variables only so the tests can shorten them.
+var (
+	httpKeepAliveIdle        = 5 * time.Second
+	httpMaxKeepAliveRequests = 100
+)
 
 const (
 	// lighttpdMaxHeader is lighttpd's server.max-request-field-size (default 8192, server.c): a
@@ -46,7 +60,8 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			ip = r.RemoteAddr
 		}
 		port, _ := strconv.Atoi(portText)
-		sessionID, _ := r.Context().Value(sessionKey{}).(string) // set by ConnContext below
+		c := r.Context().Value(connKey{}).(*httpConn) // set by ConnContext below
+		c.requests++
 
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096)) // read at most 4KB of the body
 
@@ -58,7 +73,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			SourcePort: port,
 			TargetPort: 80,
 			Protocol:   "HTTP",
-			SessionID:  sessionID,
+			SessionID:  c.sessionID,
 			PayloadDetails: &models.PayloadDetails{
 				HTTPMethod:    r.Method,
 				HTTPPath:      r.URL.RequestURI(),
@@ -115,6 +130,9 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		// (a fake that answers 200 to any path is a classic tell), login.cgi is a program.
 		w.Header().Set("Server", "lighttpd/1.4.53") // the version in Buildroot 2019.05.3 (see vfs/fs.go)
 		w.Header().Set("Content-Type", "text/html") // mimetype.assign for .html; the CGI says the same
+		if c.requests > httpMaxKeepAliveRequests {
+			w.Header().Set("Connection", "close") // Go then closes the connection after this answer
+		}
 		file, exists := vfs.WebFile(r.URL.Path)
 		switch {
 		case isBasic:
@@ -142,13 +160,13 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       30 * time.Second,
+		IdleTimeout:       httpKeepAliveIdle,
 		// Go's default is 1MB (a 1MB path would go into one event). Over this + 4KB, Go answers its own
 		// 431 and the handler never runs; between lighttpdMaxHeader and that, the handler answers like lighttpd.
 		MaxHeaderBytes: lighttpdMaxHeader,
 		// called once per new TCP connection: keep-alive requests on it share one session_id
 		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-			return context.WithValue(ctx, sessionKey{}, newSessionID())
+			return context.WithValue(ctx, connKey{}, &httpConn{sessionID: newSessionID()})
 		},
 	}
 
