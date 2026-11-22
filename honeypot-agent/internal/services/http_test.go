@@ -442,6 +442,49 @@ func TestHTTPRefusesLikeLighttpd(t *testing.T) {
 	}
 }
 
+// http_path is the target exactly as sent (minus passwords): a proxy check keeps its destination,
+// an encoded path keeps its encoding. Before, CONNECT 203.0.113.5:443 was logged as "/".
+func TestHTTPPathAsSent(t *testing.T) {
+	var out bytes.Buffer
+	addr, stop := startHTTP(t, shipper.NewShipper(&out, "", ""))
+	for _, target := range []string{
+		"CONNECT 203.0.113.5:443",          // a proxy check, through to 405
+		"CONNECT www.example.com:443",      // refused while parsing (400), logged all the same
+		"GET http://www.example.com/check", // a proxy check with an absolute URI
+		"GET http://www.example.com/login.cgi?user=admin&pwd=s3cr3t",
+		"GET /cgi-bin/.%2e/.%2e/bin/sh", // CVE-2021-41773: the encoding is part of the attack
+		"GET /x?pwd=s3cr3t",             // nothing left of the query: no "?"
+	} {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(conn, "%s HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n", target)
+		io.ReadAll(conn)
+		conn.Close()
+		time.Sleep(150 * time.Millisecond) // limit.go: 10 new connections per second per IP
+	}
+	stop()
+
+	var paths []string
+	for _, e := range parseEvents(t, out.String()) {
+		paths = append(paths, e.PayloadDetails.HTTPPath)
+		if strings.Contains(e.PayloadDetails.HTTPPath, "s3cr3t") {
+			t.Errorf("the password is in http_path: %q", e.PayloadDetails.HTTPPath)
+		}
+		if e.Credentials != nil && (e.Credentials.Username != "admin" && e.Credentials.Username != "" ||
+			e.Credentials.Password != "s3cr3t") {
+			t.Errorf("credentials: %+v", e.Credentials)
+		}
+	}
+	want := []string{"203.0.113.5:443", "www.example.com:443", "http://www.example.com/check",
+		"http://www.example.com/login.cgi?user=admin", "/cgi-bin/.%2e/.%2e/bin/sh", "/x"}
+	if !slices.Equal(paths, want) {
+		t.Errorf("http_path: %q\n     want %q", paths, want)
+	}
+}
+
 // lighttpd's verdict on a request line, in its order (method, protocol, target), from request.c.
 func TestLighttpdRejects(t *testing.T) {
 	tests := []struct{ line, status, proto string }{

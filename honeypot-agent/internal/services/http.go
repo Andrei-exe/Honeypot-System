@@ -70,8 +70,10 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			Protocol:   "HTTP",
 			SessionID:  c.sessionID,
 			PayloadDetails: &models.PayloadDetails{
-				HTTPMethod:    r.Method,
-				HTTPPath:      r.URL.RequestURI(),
+				HTTPMethod: r.Method,
+				// the target exactly as sent: "CONNECT 203.0.113.5:443" and proxy checks
+				// ("GET http://example.com/") keep their destination (r.URL.RequestURI() drops it)
+				HTTPPath:      r.RequestURI,
 				HTTPUserAgent: r.UserAgent(),
 				RawData:       string(body),
 			},
@@ -87,11 +89,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			event.PayloadDetails.RawData = withoutPasswords(string(body))
 		case formValue(query, passwordFields...) != "":
 			user, pass = formValue(query, userFields...), formValue(query, passwordFields...)
-			path := r.URL.EscapedPath() // = http_path without the password
-			if rest := withoutPasswords(r.URL.RawQuery); rest != "" {
-				path += "?" + rest
-			}
-			event.PayloadDetails.HTTPPath = path
+			event.PayloadDetails.HTTPPath = targetWithoutPasswords(r.RequestURI)
 		}
 
 		basicUser, basicPass, isBasic := r.BasicAuth()
@@ -243,6 +241,19 @@ func formValue(v url.Values, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// targetWithoutPasswords returns a request target, as sent, without the password fields of its query
+// (and without the "?" if nothing is left).
+func targetWithoutPasswords(target string) string {
+	path, query, found := strings.Cut(target, "?")
+	if !found {
+		return target
+	}
+	if rest := withoutPasswords(query); rest != "" {
+		return path + "?" + rest
+	}
+	return path
 }
 
 // withoutPasswords returns a form body without its password fields; the other fields stay as sent.
