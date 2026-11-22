@@ -89,6 +89,7 @@ def session_summary(session_id, session_events):
     commands = []
     downloads = []
     passwords = []
+    usernames = []
 
     for event in session_events:
         event_type = event.get("event_type")
@@ -100,6 +101,9 @@ def session_summary(session_id, session_events):
             password = creds.get("password", "")
             if password and password not in passwords:
                 passwords.append(password)
+            username = creds.get("username", "")
+            if username and username not in usernames:
+                usernames.append(username)
             if creds.get("success") and successful_login is None:
                 successful_login = f"{creds.get('username', '')}:{creds.get('password', '')}"
 
@@ -126,6 +130,7 @@ def session_summary(session_id, session_events):
         "login_attempts": login_attempts,
         "successful_login": successful_login,
         "passwords": passwords,
+        "usernames": usernames,
         "commands": commands,
         "downloads": downloads,
         "stages": stages_in_order,

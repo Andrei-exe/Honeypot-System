@@ -11,6 +11,8 @@ from collections import Counter
 
 # (cuvant cheie din motivul alertei, cod ATT&CK, numele tehnicii)
 TECHNIQUES = [
+    ("fisier-momeala", "T1552.001", "Credentials In Files"),
+    ("secret-momeala", "T1078", "Valid Accounts"),
     ("login REUSIT", "T1078", "Valid Accounts"),
     ("brute-force", "T1110", "Brute Force"),
     ("login pe cont critic", "T1110", "Brute Force"),

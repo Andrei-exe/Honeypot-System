@@ -4,11 +4,15 @@
 #   - descarca de pe acelasi server de malware
 #   - descarca exact acelasi fisier
 #   - incearca liste de parole foarte asemanatoare (acelasi dictionar / acelasi botnet)
+#   - unul a citit un fisier-momeala si celalalt i-a folosit secretul la login
+#     (sau amandoi au folosit secretul aceluiasi fisier): l-au primit de la cine l-a citit
 #
 # Apoi grupam toate IP-urile legate intre ele: un grup = o campanie.
 # Asa recuperezi un botnet chiar daca vine de pe sute de IP-uri diferite.
 
 from urllib.parse import urlparse
+
+from filters import honeytoken_files_read, honeytokens_used
 
 # cat de asemanatoare trebuie sa fie doua liste de parole ca sa le consideram "acelasi botnet"
 PASSWORD_SIMILARITY = 0.6
@@ -24,12 +28,14 @@ def download_host(url):
 
 
 def gather_indicators(summaries):
-    """Pentru fiecare IP, aduna: serverele de malware, fisierele exacte, parolele incercate."""
+    """Pentru fiecare IP, aduna: serverele de malware, fisierele exacte, parolele incercate,
+    fisierele-momeala citite (read) si fisierele din care vin secretele folosite la login (used)."""
     indicators = {}
     for summary in summaries:
         ip = summary["source_ip"]
         if ip not in indicators:
-            indicators[ip] = {"servers": set(), "malware": set(), "passwords": set()}
+            indicators[ip] = {"servers": set(), "malware": set(), "passwords": set(),
+                              "read": set(), "used": set()}
         for url in summary.get("downloads", []):
             host = download_host(url)
             if host:
@@ -37,6 +43,11 @@ def gather_indicators(summaries):
             indicators[ip]["malware"].add(url)
         for password in summary.get("passwords", []):
             indicators[ip]["passwords"].add(password)
+        for command in summary.get("commands", []):
+            indicators[ip]["read"].update(honeytoken_files_read(command))
+        for text in summary.get("passwords", []) + summary.get("usernames", []):
+            for _, file_name, _ in honeytokens_used(text):
+                indicators[ip]["used"].add(file_name)
     return indicators
 
 
@@ -51,6 +62,15 @@ def jaccard(a, b):
 
 def link_reason(ind_a, ind_b):
     """Daca doi atacatori au ceva comun, intoarce motivul. Altfel None."""
+    # cea mai sigura legatura: secretul-momeala exista doar in fisier, deci a trecut de la unul la altul
+    passed_on = (ind_a["read"] & ind_b["used"]) | (ind_b["read"] & ind_a["used"])
+    if passed_on:
+        return "un IP a citit fisierul-momeala, altul i-a folosit secretul (" + sorted(passed_on)[0] + ")"
+
+    shared_secret = ind_a["used"] & ind_b["used"]
+    if shared_secret:
+        return "acelasi secret-momeala folosit la login (" + sorted(shared_secret)[0] + ")"
+
     shared_servers = ind_a["servers"] & ind_b["servers"]
     if shared_servers:
         return "acelasi server de malware (" + sorted(shared_servers)[0] + ")"

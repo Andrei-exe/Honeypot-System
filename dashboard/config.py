@@ -53,6 +53,7 @@ TECHNIQUE_TACTIC = {
     "T1078": "Initial Access",
     "T1110": "Credential Access",
     "T1003.008": "Credential Access",
+    "T1552.001": "Credential Access",
     "T1059": "Execution",
     "T1059.004": "Execution",
     "T1053.003": "Persistence",

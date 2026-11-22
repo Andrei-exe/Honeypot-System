@@ -1,6 +1,8 @@
 DEFAULT_RECOMMENDATION = "Urmareste IP-ul si blocheaza-l in firewall daca revine."
 
 RECOMMENDATIONS = [
+    ("fisier-momeala", "Tine parolele (Wi-Fi, PPPoE) in fisiere citibile doar de root si schimba-le daca cineva a avut shell."),
+    ("secret-momeala", "Parolele furate din fisiere sunt refolosite: schimba-le peste tot unde apar, nu doar pe acest aparat."),
     ("login REUSIT", "Schimba parolele implicite; nu lasa conturi root sau admin cu parole simple."),
     ("brute-force", "Dezactiveaza login-ul cu parola pe SSH (doar chei) si pune fail2ban."),
     ("login pe cont critic", "Interzice login-ul direct ca root (PermitRootLogin no) si foloseste chei SSH."),

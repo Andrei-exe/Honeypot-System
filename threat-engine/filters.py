@@ -52,6 +52,10 @@ COMMAND_WORDS = [
 # (text cautat in adresa web decodata, puncte, ce inseamna)
 HTTP_RULES = [
     ("${jndi:", 50, "Log4Shell"),
+    # comanda de descarcare injectata in adresa: /cgi-bin/;wget http://..., /shell?cd /tmp;wget ...
+    ("wget", 30, "incearca sa ruleze comenzi"),
+    ("curl", 30, "incearca sa ruleze comenzi"),
+    ("tftp", 30, "incearca sa ruleze comenzi"),
     ("union select", 25, "SQL injection"),
     ("' or '", 25, "SQL injection"),
     ("or 1=1", 25, "SQL injection"),
@@ -75,6 +79,24 @@ POINTS_CRITICAL_USER = 8      # a incercat un cont ca root (o singura incercare)
 POINTS_PORT_PROBE = 2         # o atingere de port
 BRUTE_BASE = 20               # brute force: 20 + numarul de parole gresite, maxim 50
 BRUTE_MAX = 50
+POINTS_HONEYTOKEN_READ = 20   # citeste un fisier-momeala (MEDIUM)
+POINTS_HONEYTOKEN_LOGIN = 50  # foloseste un secret-momeala: cineva a citit fisierul inainte (CRITICAL)
+
+# Honeytokens: secrete care exista DOAR in fisierele agentului (honeypot-agent/internal/vfs/fs.go).
+# Cine le trimite la un login le-a citit de acolo (el sau alt IP din aceeasi campanie).
+# Daca se schimba in fs.go, schimba-le si aici (test_honeytokens_match_the_agent verifica).
+# (secretul, fisierul in care e, ce e)
+HONEYTOKENS = [
+    ("w7Kq2mVx9pLz", "hostapd.conf", "parola Wi-Fi"),    # wifiPassphrase
+    ("Rp4tHx92kQ", "chap-secrets", "parola PPPoE"),      # pppoePassword
+    ("2210417553", "chap-secrets", "contul PPPoE"),      # pppoeUser
+]
+
+# Fisierele cu secretele. Cautam doar numele, nu calea: "cd /etc/ppp; cat chap-secrets".
+HONEYTOKEN_FILES = [
+    ("hostapd.conf", "parola Wi-Fi"),
+    ("chap-secrets", "contul PPPoE"),
+]
 
 
 def is_internal(event):
@@ -105,6 +127,33 @@ def unquote_deep(text):
     once = unquote(text)
     twice = unquote(once)
     return twice.lower()
+
+
+def honeytoken_files_read(command):
+    """Fisierele-momeala pe care le citeste o comanda: 'cat /etc/ppp/chap-secrets' -> ['chap-secrets']"""
+    low = command.lower()
+    found = []
+    for name, _ in HONEYTOKEN_FILES:
+        if name in low:
+            found.append(name)
+    return found
+
+
+def honeytokens_used(text):
+    """Secretele-momeala dintr-un user sau o parola: [(secret, fisier, ce e)].
+    Le cautam in tot textul: unii le copiaza cu tot cu ghilimele ("Rp4tHx92kQ")."""
+    found = []
+    for token in HONEYTOKENS:
+        if token[0] in text:
+            found.append(token)
+    return found
+
+
+def stronger(first, second):
+    """Dintre doua verdicte (e_periculos, scor, motiv) il pastreaza pe cel cu mai multe puncte."""
+    if second[1] > first[1]:
+        return second
+    return first
 
 
 def parse_time(timestamp):
@@ -184,7 +233,19 @@ def check_command(event):
     payload = event.get("payload_details") or {}
     cmd = payload.get("command", "").lower().strip()
     url = payload.get("extracted_url", "")
+    # citirea unui fisier-momeala nu se pierde in spatele unei reguli mai slabe (uname, id),
+    # dar nici nu acopera una mai grava (cat chap-secrets | nc ... ramane netcat)
+    return stronger(command_rules(cmd, url), check_honeytoken_read(cmd))
 
+
+def check_honeytoken_read(cmd):
+    for name, secret in HONEYTOKEN_FILES:
+        if name in cmd:
+            return True, POINTS_HONEYTOKEN_READ, f"citeste fisier-momeala ({secret} din {name}): {cmd}"
+    return NOT_A_THREAT
+
+
+def command_rules(cmd, url):
     if url:
         return True, POINTS_DOWNLOAD, f"incercare de descarcare: {url}"
 
@@ -204,6 +265,18 @@ def check_login(event, tracker):
     creds = event.get("credentials") or {}
     user = creds.get("username", "").strip().lower()
     password = creds.get("password", "")
+    ip = event.get("source_ip", "?")
+    when = parse_time(event.get("timestamp")) or datetime.now(timezone.utc)
+
+    # inaintea regulilor de brute force: altfel s-ar pierde printre parolele gresite
+    used = honeytokens_used(creds.get("username", "")) + honeytokens_used(password)
+    if used:
+        if tracker is not None and not creds.get("success"):
+            tracker.add_failure(ip, when)   # tot o parola gresita: se numara la brute force
+        _, file_name, secret = used[0]
+        return (True, POINTS_HONEYTOKEN_LOGIN,
+                f"login cu secret-momeala ({secret} din {file_name}): {user}:{password}"
+                f" - cineva a citit fisierul inainte")
 
     if creds.get("success"):
         return True, POINTS_SUCCESS_LOGIN, f"login REUSIT cu {user}:{password}"
@@ -213,8 +286,6 @@ def check_login(event, tracker):
             return True, POINTS_CRITICAL_USER, f"login pe cont critic: {user}"
         return NOT_A_THREAT
 
-    ip = event.get("source_ip", "?")
-    when = parse_time(event.get("timestamp")) or datetime.now(timezone.utc)
     count = tracker.add_failure(ip, when)
 
     if count >= tracker.threshold and tracker.should_report(ip, when):
@@ -248,7 +319,11 @@ def check_event(event, tracker=None):
         return check_command(event)
 
     if event_type == "login_attempt":
-        return check_login(event, tracker)
+        verdict = check_login(event, tracker)
+        if (event.get("protocol") or "").upper() == "HTTP":
+            # o logare web poate aduce si un exploit in cale (/login.cgi?user=admin;wget http://...)
+            verdict = stronger(verdict, check_http(event))
+        return verdict
 
     if event_type == "http_request":
         return check_http(event)
