@@ -22,6 +22,7 @@ flowchart LR
 
 - **honeypot-agent:**
   - Four fake services with one consistent persona, a router called `gateway`: SSH (Dropbear), Telnet (BusyBox), FTP (vsFTPd) and HTTP (a lighttpd login page).
+  - The web server answers malformed requests and unusual methods (`FOO`, `DELETE`, `CONNECT`, `OPTIONS`, `HTTP/2.0`, a missing `Host` header) the way lighttpd 1.4.53 does, never with Go's own error pages, and still logs them.
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
   - The shell handles redirections like the router's BusyBox shell does: `>/dev/null 2>&1` (which bots append to almost every command), `2>&1 |`, `&>`, `<` and `>` written without spaces, with the same error messages.
   - The filesystem holds decoy secrets (honeytokens): the Wi-Fi password in `/etc/hostapd.conf` and the provider's PPPoE account in `/etc/ppp/chap-secrets`. They exist nowhere else. Reading the files is logged, and a later login with one of these strings proves that whoever sent it had read them, even from another IP.

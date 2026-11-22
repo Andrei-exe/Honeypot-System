@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,7 +294,8 @@ func TestHTTP(t *testing.T) {
 }
 
 // Like lighttpd (max-request-field-size 8192): a request line + headers of 8192 bytes is served,
-// 8193 gets lighttpd's own 431, byte for byte. Far over the limit Go stops reading: no huge event.
+// 8193 gets lighttpd's own 431, byte for byte. Far over the limit Go stops reading and refuses it
+// itself: lighttpd's 431 again (httpConn.Write), and an event with only the first line, not 20KB.
 func TestHTTPHeaderLimit(t *testing.T) {
 	var out bytes.Buffer
 	addr, stop := startHTTP(t, shipper.NewShipper(&out, "", ""))
@@ -326,15 +328,160 @@ func TestHTTPHeaderLimit(t *testing.T) {
 		t.Errorf("8193 bytes of headers, not lighttpd's 431:\n%s", answer)
 	}
 
-	huge := send(strings.Repeat("c", 20000)) // over MaxHeaderBytes + Go's 4KB: Go's own 431
-	if huge != "" && !strings.HasPrefix(huge, "HTTP/1.1 431 ") {
-		t.Errorf("20000 bytes of headers: %.60q (expected Go's 431)", huge)
+	huge := send(strings.Repeat("c", 20000)) // over MaxHeaderBytes + Go's 4KB: refused by Go itself
+	if !strings.HasPrefix(huge, "HTTP/1.0 431 \r\nContent-Type: text/html\r\nContent-Length: 323\r\n") {
+		t.Errorf("20000 bytes of headers: %.60q (expected lighttpd's 431)", huge)
 	}
 
 	stop()
 	events := parseEvents(t, out.String())
-	if len(events) != 2 || len(events[0].PayloadDetails.HTTPUserAgent) != 8192-60 ||
-		len(events[1].PayloadDetails.HTTPUserAgent) != 8193-60 {
-		t.Fatalf("%d events (expected the 8192 and 8193 requests, not the huge one)", len(events))
+	if len(events) != 3 || len(events[0].PayloadDetails.HTTPUserAgent) != 8192-60 ||
+		len(events[1].PayloadDetails.HTTPUserAgent) != 8193-60 || events[2].PayloadDetails.RawData != "GET / HTTP/1.1" {
+		t.Fatalf("%d events (expected the 8192 and 8193 requests, then only the first line of the huge one): %+v",
+			len(events), events)
+	}
+}
+
+// Requests lighttpd refuses or doesn't serve (src/request.c, response.c in 1.4.53) get lighttpd's
+// answers, never net/http's own text/plain errors: malformed requests, odd methods, odd versions.
+// The expected status lines are written here from the source, not taken from lighttpdRejects.
+func TestHTTPRefusesLikeLighttpd(t *testing.T) {
+	var out bytes.Buffer
+	addr, stop := startHTTP(t, shipper.NewShipper(&out, "", ""))
+	send := func(request string) string { // exact bytes; read until the server closes
+		t.Helper()
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		io.WriteString(conn, request)
+		answer, _ := io.ReadAll(conn)
+		time.Sleep(150 * time.Millisecond) // limit.go: 10 new connections per second per IP
+		return string(answer)
+	}
+
+	const end = "Connection: close\r\n\r\n" // the keep-alive cases end the connection with this
+	tests := []struct{ request, status, page string }{
+		// refused while parsing (net/http refuses these itself): HTTP/1.0 until the version is read
+		{"HELP\r\n\r\n", "HTTP/1.0 400 Bad Request", "400 Bad Request"},
+		{"\r\n\r\n", "HTTP/1.0 400 Bad Request", "400 Bad Request"},
+		{"OPTIONS / RTSP/1.0\r\n\r\n", "HTTP/1.0 400 Bad Request", "400 Bad Request"},
+		{"GET / HTTP/2.0\r\nHost: g\r\n\r\n", "HTTP/1.0 505 HTTP Version Not Supported", "505 HTTP Version Not Supported"},
+		{"GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 Bad Request", "400 Bad Request"}, // HTTP/1.1 without Host
+		{"GET / HTTP/1.1\r\nHost: g\r\nBad Header\r\n\r\n", "HTTP/1.1 400 Bad Request", "400 Bad Request"},
+		// refused while parsing (net/http accepts them, the handler refuses)
+		{"FOO / HTTP/1.1\r\nHost: g\r\n\r\n", "HTTP/1.0 501 Not Implemented", "501 Not Implemented"},
+		{"GET / HTTP/1.2\r\nHost: g\r\n\r\n", "HTTP/1.0 505 HTTP Version Not Supported", "505 HTTP Version Not Supported"},
+		{"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n", "HTTP/1.1 400 Bad Request", "400 Bad Request"},
+		{"GET * HTTP/1.1\r\nHost: g\r\n\r\n", "HTTP/1.1 400 Bad Request", "400 Bad Request"},
+		// parsed, then not served
+		{"CONNECT 203.0.113.5:443 HTTP/1.1\r\nHost: 203.0.113.5:443\r\n" + end, "HTTP/1.1 405 Method Not Allowed", "405 Method Not Allowed"},
+		{"DELETE /index.html HTTP/1.1\r\nHost: g\r\n" + end, "HTTP/1.1 403 Forbidden", "403 Forbidden"},
+		{"PUT /x.php HTTP/1.1\r\nHost: g\r\nContent-Length: 0\r\n" + end, "HTTP/1.1 404 Not Found", "404 Not Found"},
+		{"OPTIONS * HTTP/1.1\r\nHost: g\r\n" + end, "HTTP/1.1 200 OK", ""},
+		{"OPTIONS /index.html HTTP/1.1\r\nHost: g\r\n" + end, "HTTP/1.1 200 OK", ""},
+		{"GET http://example.com/index.html HTTP/1.1\r\nHost: example.com\r\n" + end, "HTTP/1.1 200 OK", "file"},
+	}
+	for _, tt := range tests {
+		answer := send(tt.request)
+		head, body, _ := strings.Cut(answer, "\r\n\r\n")
+		if !strings.HasPrefix(head, tt.status+"\r\n") || !strings.Contains(head+"\r\n", "\r\nServer: lighttpd/1.4.53\r\n") ||
+			strings.Contains(head, "text/plain") {
+			t.Errorf("%q:\n got %q\nwant %q + Server: lighttpd", tt.request, head, tt.status)
+			continue
+		}
+		switch tt.page {
+		case "": // OPTIONS: lighttpd's list of methods, no body
+			if !strings.Contains(head, "\r\nAllow: OPTIONS, GET, HEAD, POST") || body != "" {
+				t.Errorf("%q: %q", tt.request, answer)
+			}
+		case "file":
+			if body != vfs.LoginPage(false) {
+				t.Errorf("%q: body %.80q", tt.request, body)
+			}
+		default:
+			if body != lighttpdErrorPage(tt.page) {
+				t.Errorf("%q: body %.80q", tt.request, body)
+			}
+		}
+	}
+
+	// keep-alive: a good request, its answer, then a malformed one on the same connection: the
+	// malformed one's own line is used (not pipelined: see the limitation in httpConn)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	r := bufio.NewReader(conn)
+	io.WriteString(conn, "GET /index.html HTTP/1.1\r\nHost: g\r\n\r\n")
+	if resp, err := http.ReadResponse(r, nil); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("first request: %v %v", resp, err)
+	} else {
+		io.Copy(io.Discard, resp.Body)
+	}
+	io.WriteString(conn, "GET /x HTTP/1.1\r\nBad Header\r\n\r\n")
+	if answer, _ := io.ReadAll(r); !strings.HasPrefix(string(answer), "HTTP/1.1 400 Bad Request\r\n") {
+		t.Errorf("keep-alive, then a malformed request: %.80q", answer)
+	}
+
+	// every request is logged: the ones net/http refused only with their first line
+	stop()
+	var rejected []string
+	for _, e := range parseEvents(t, out.String()) {
+		if e.PayloadDetails != nil && e.PayloadDetails.HTTPMethod == "" {
+			rejected = append(rejected, e.PayloadDetails.RawData)
+		}
+	}
+	want := []string{"HELP", "", "OPTIONS / RTSP/1.0", "GET / HTTP/2.0", "GET / HTTP/1.1", "GET / HTTP/1.1", "GET /x HTTP/1.1"}
+	if !slices.Equal(rejected, want) {
+		t.Errorf("requests refused by net/http, logged: %q\n                                    want %q", rejected, want)
+	}
+}
+
+// lighttpd's verdict on a request line, in its order (method, protocol, target), from request.c.
+func TestLighttpdRejects(t *testing.T) {
+	tests := []struct{ line, status, proto string }{
+		{"GET / HTTP/1.1", "", "HTTP/1.1"},
+		{"HEAD /x HTTP/1.0", "", "HTTP/1.0"},
+		{"PROPFIND / HTTP/1.1", "", "HTTP/1.1"},               // WebDAV: known to lighttpd (http_kv.c)
+		{"GET /", "400 Bad Request", "HTTP/1.0"},              // incomplete request line
+		{"GET  / HTTP/1.1", "400 Bad Request", "HTTP/1.0"},    // two spaces: overlong
+		{"GET / HTTP/1.1 x", "400 Bad Request", "HTTP/1.0"},   // overlong
+		{"", "400 Bad Request", "HTTP/1.0"},                   // a blank line first
+		{"get / HTTP/1.1", "501 Not Implemented", "HTTP/1.0"}, // methods are case-sensitive
+		{"FOO / RTSP/1.0", "501 Not Implemented", "HTTP/1.0"}, // the method is checked first
+		{"OPTIONS / RTSP/1.0", "400 Bad Request", "HTTP/1.0"}, // unknown protocol
+		{"GET / HTTP/1.2", "505 HTTP Version Not Supported", "HTTP/1.0"},
+		{"GET / HTTP/0.9", "505 HTTP Version Not Supported", "HTTP/1.0"},
+		{"GET http://example.com/a HTTP/1.1", "", "HTTP/1.1"},              // absolute URI with a path
+		{"GET HTTPS://example.com/ HTTP/1.1", "", "HTTP/1.1"},              // scheme in any case
+		{"GET http://example.com HTTP/1.1", "400 Bad Request", "HTTP/1.1"}, // no path
+		{"CONNECT 203.0.113.5:443 HTTP/1.1", "", "HTTP/1.1"},               // then 405, in the handler
+		{"CONNECT example.com:443 HTTP/1.0", "400 Bad Request", "HTTP/1.0"},
+		{"OPTIONS * HTTP/1.1", "", "HTTP/1.1"},
+		{"GET * HTTP/1.1", "400 Bad Request", "HTTP/1.1"},
+	}
+	for _, tt := range tests {
+		if status, proto := lighttpdRejects(tt.line); status != tt.status || proto != tt.proto {
+			t.Errorf("lighttpdRejects(%q) = %q, %q; want %q, %q", tt.line, status, proto, tt.status, tt.proto)
+		}
+	}
+}
+
+// A refused request's line is logged without its password, like http_path.
+func TestLineWithoutPasswords(t *testing.T) {
+	tests := []struct{ line, want string }{
+		{"GET /login.cgi?user=admin&pwd=s3cr3t HTTP/9.9", "GET /login.cgi?user=admin HTTP/9.9"},
+		{"GET /x?password=1", "GET /x?"},
+		{"HELP", "HELP"},
+	}
+	for _, tt := range tests {
+		if got := lineWithoutPasswords(tt.line); got != tt.want {
+			t.Errorf("lineWithoutPasswords(%q) = %q, want %q", tt.line, got, tt.want)
+		}
 	}
 }

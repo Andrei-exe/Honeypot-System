@@ -20,13 +20,7 @@ import (
 	"honeypot-agent/internal/vfs"
 )
 
-// httpConn is what ConnContext remembers about one TCP connection (stored under connKey). Go serves
-// the requests of one connection one after the other, so the handler can change it without a mutex.
-type httpConn struct {
-	sessionID string // keep-alive requests on one connection share one session_id
-	requests  int    // requests so far on this connection
-}
-
+// connKey is the context key under which ConnContext stores a request's *httpConn (lighttpd.go).
 type connKey struct{}
 
 // lighttpd's keep-alive defaults (configfile.c): an idle keep-alive connection is closed after
@@ -62,6 +56,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		port, _ := strconv.Atoi(portText)
 		c := r.Context().Value(connKey{}).(*httpConn) // set by ConnContext below
 		c.requests++
+		c.takeLine() // this request was parsed: its first line isn't needed, start over for the next one
 
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096)) // read at most 4KB of the body
 
@@ -122,7 +117,15 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		time.Sleep(routerAnswerTime()) // routerDelay in common.go
 
 		if headerSize(r) > lighttpdMaxHeader {
-			lighttpdTooLarge(w) // lighttpd doesn't even parse it: no 404, no Basic Auth
+			// lighttpd doesn't even parse it: no 404, no Basic Auth. "431 " with no text: http_kv.c in
+			// 1.4.53 has none for 431; HTTP/1.0 because the request's version wasn't read.
+			answerAndClose(w, "HTTP/1.0", "431 ")
+			return
+		}
+		// a request line net/http accepts but lighttpd refuses: an unknown method (FOO), HTTP/1.2,
+		// CONNECT to a host name, a target that isn't a path (lighttpd.go)
+		if status, proto := lighttpdRejects(r.Method + " " + r.RequestURI + " " + r.Proto); status != "" {
+			answerAndClose(w, proto, status)
 			return
 		}
 
@@ -134,6 +137,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			w.Header().Set("Connection", "close") // Go then closes the connection after this answer
 		}
 		file, exists := vfs.WebFile(r.URL.Path)
+		cgi := strings.HasSuffix(r.URL.Path, ".cgi")
 		switch {
 		case isBasic:
 			// ask for Basic Auth only from clients that already sent it. Any path: lighttpd checks
@@ -141,13 +145,25 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 			w.Header().Set("WWW-Authenticate", `Basic realm="Gateway"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprint(w, lighttpdErrorPage("401 Unauthorized"))
+		case r.Method == "CONNECT": // one lighttpd parsed (to an IP:port): http_response_prepare says 405
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprint(w, lighttpdErrorPage("405 Method Not Allowed"))
+		case r.Method == "OPTIONS" && (r.RequestURI == "*" || exists):
+			// lighttpd answers it itself: the methods it serves, and no body
+			w.Header().Del("Content-Type")
+			w.Header().Set("Allow", "OPTIONS, GET, HEAD, POST")
 		case !exists:
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, lighttpdErrorPage("404 Not Found"))
+		case !cgi && r.Method != "GET" && r.Method != "HEAD" && r.Method != "POST":
+			// DELETE, PUT...: mod_staticfile serves only GET, HEAD and POST, and when no module wants
+			// the file lighttpd says 403 ("status 403 is ok I think", response.c). The CGI takes any method.
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, lighttpdErrorPage("403 Forbidden"))
 		case event.EventType == "login_attempt":
 			w.WriteHeader(http.StatusUnauthorized) // what login.cgi answers to a wrong password
 			fmt.Fprint(w, vfs.LoginPage(true))
-		case strings.HasSuffix(r.URL.Path, ".cgi"):
+		case cgi:
 			fmt.Fprint(w, vfs.LoginPage(false)) // login.cgi without a password shows the form
 		default:
 			fmt.Fprint(w, file) // a static file (index.html), exactly as it is in the filesystem
@@ -164,10 +180,33 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 		// Go's default is 1MB (a 1MB path would go into one event). Over this + 4KB, Go answers its own
 		// 431 and the handler never runs; between lighttpdMaxHeader and that, the handler answers like lighttpd.
 		MaxHeaderBytes: lighttpdMaxHeader,
-		// called once per new TCP connection: keep-alive requests on it share one session_id
-		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-			return context.WithValue(ctx, connKey{}, &httpConn{sessionID: newSessionID()})
+		// "OPTIONS *" comes to the handler too (net/http would answer it itself, without our headers)
+		DisableGeneralOptionsHandler: true,
+		// called once per new TCP connection (an *httpConn, see httpListener): the handler finds it there
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			return context.WithValue(ctx, connKey{}, conn.(*httpConn))
 		},
+	}
+
+	// A request net/http refused before the handler saw it (answered like lighttpd in httpConn.Write):
+	// logged with the line it started with (no method and path: it couldn't be parsed).
+	rejected := func(c *httpConn, line string) {
+		ip, portText, err := net.SplitHostPort(c.RemoteAddr().String())
+		if err != nil {
+			ip = c.RemoteAddr().String()
+		}
+		port, _ := strconv.Atoi(portText)
+		shipper.EmitEvent(models.HoneypotEvent{
+			Timestamp:      models.Now(),
+			NodeID:         nodeID,
+			EventType:      "http_request",
+			SourceIP:       ip,
+			SourcePort:     port,
+			TargetPort:     80,
+			Protocol:       "HTTP",
+			SessionID:      c.sessionID,
+			PayloadDetails: &models.PayloadDetails{RawData: lineWithoutPasswords(line)},
+		})
 	}
 
 	listener, err := net.Listen("tcp", address)
@@ -187,7 +226,7 @@ func RunHTTP(ctx context.Context, address string, nodeID string, shipper *shippe
 	})
 	defer stop()
 
-	err = server.Serve(limitConnections(listener, "HTTP"))
+	err = server.Serve(httpListener{Listener: limitConnections(listener, "HTTP"), rejected: rejected})
 	if errors.Is(err, http.ErrServerClosed) {
 		<-shutdownDone // Serve returns as soon as Shutdown starts; wait until it has finished
 		return nil
@@ -233,21 +272,6 @@ func headerSize(r *http.Request) int {
 		}
 	}
 	return size + 2
-}
-
-// lighttpdTooLarge answers like lighttpd 1.4.53 to a too-large header: HTTP/1.0 (the request was
-// never parsed), "431 " with no text (http_kv.c has none for 431), then it closes the connection.
-// Written by hand (Hijack): net/http would add its own status text and header order.
-func lighttpdTooLarge(w http.ResponseWriter) {
-	conn, buf, err := http.NewResponseController(w).Hijack()
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	page := lighttpdErrorPage("431 ")
-	fmt.Fprintf(buf, "HTTP/1.0 431 \r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n"+
-		"Date: %s\r\nServer: lighttpd/1.4.53\r\n\r\n%s", len(page), time.Now().UTC().Format(http.TimeFormat), page)
-	buf.Flush()
 }
 
 // lighttpdErrorPage is the page lighttpd 1.4.53 builds itself for an error (src/connections.c), for
