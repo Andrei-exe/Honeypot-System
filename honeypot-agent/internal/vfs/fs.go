@@ -108,6 +108,8 @@ var fakeDirs = map[string]bool{
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 	"/var/spool": true, "/var/spool/cron": true, crontabDir: true, // crontab's (Buildroot: FEATURE_CROND_DIR)
 	"/etc/ppp": true, "/etc/ppp/peers": true, "/usr/lib/pppd": true, "/usr/lib/pppd/2.4.7": true,
+	// vsftpd.mk: ftp's home (anonymous FTP's chroot, empty) and vsftpd's secure_chroot_dir
+	"/home": true, "/home/ftp": true, "/usr/share": true, "/usr/share/empty": true,
 	// the kernel settings (kernelSettings in system.go); the directories a 4.14 ARM kernel has, some empty here
 	"/proc/sys": true, "/proc/sys/debug": true, "/proc/sys/dev": true, "/proc/sys/fs": true, "/proc/sys/kernel": true,
 	"/proc/sys/net": true, "/proc/sys/net/ipv4": true, "/proc/sys/user": true, "/proc/sys/vm": true,
@@ -202,6 +204,7 @@ var fakeFiles = map[string]string{
 	"/usr/lib/lighttpd/mod_indexfile.so":  elfHeader,
 	"/usr/lib/lighttpd/mod_staticfile.so": elfHeader,
 	"/etc/lighttpd/lighttpd.conf":         lighttpdConf,
+	"/etc/vsftpd.conf":                    vsftpdConf,
 	"/var/www/index.html":                 LoginPage(false),
 	"/var/www/login.cgi":                  elfHeader, // the form's target: a compiled CGI, like on real routers
 
@@ -235,7 +238,7 @@ var fakeFiles = map[string]string{
 	"/etc/group": "root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:\ntty:x:5:\ndisk:x:6:\nlp:x:7:\n" +
 		"mail:x:8:\nkmem:x:9:\nwheel:x:10:root\ncdrom:x:11:\ndialout:x:18:\nfloppy:x:19:\nvideo:x:28:\n" +
 		"audio:x:29:\ntape:x:32:\nwww-data:x:33:\noperator:x:37:\nutmp:x:43:\nplugdev:x:46:\nstaff:x:50:\n" +
-		"lock:x:54:\nnetdev:x:82:\nusers:x:100:\nnogroup:x:65534:\n",
+		"lock:x:54:\nnetdev:x:82:\nusers:x:100:\nnogroup:x:65534:\nftp:x:1000:\n",
 	// Buildroot's finalize hooks write it: busybox.mk adds /bin/ash, skeleton-init-common.mk /bin/sh
 	// (Dropbear refuses a login whose shell isn't listed here)
 	"/etc/shells": "/bin/ash\n/bin/sh\n",
@@ -253,13 +256,15 @@ var fakeFiles = map[string]string{
 		"admin:x:0:0:admin:/root:/bin/sh\n" +
 		"support:x:0:0:support:/root:/bin/sh\n" +
 		"user:x:0:0:user:/root:/bin/sh\n" +
-		"nobody:*:65534:65534:nobody:/var:/bin/false\n",
+		"nobody:*:65534:65534:nobody:/var:/bin/false\n" +
+		"ftp:x:1000:1000:Anonymous FTP User:/home/ftp:/bin/false\n", // vsftpd.mk's user, added by Buildroot's mkusers
 	"/etc/shadow": "root:$1$Fz8sK2lQ$wE0bq3Yt1aRk9mVh7uXcN.:18417:0:99999:7:::\n" +
 		"daemon:*:0:0:99999:7:::\n" +
 		"admin:$1$Qw3rT9pZ$Lm2vX8cB1nK7dF4hJ6sA0.:18417:0:99999:7:::\n" +
 		"support:$1$Hy6uJ1kL$Pq9wE3rT5yU7iO2aS4dF6.:18417:0:99999:7:::\n" +
 		"user:$1$Zx8cV2bN$Mk1lO3pI5uY7tR9eW0qA2.:18417:0:99999:7:::\n" +
-		"nobody:*:0:0:99999:7:::\n",
+		"nobody:*:0:0:99999:7:::\n" +
+		"ftp:*:::::::\n",
 
 	"/proc/version": linuxVersion + "\n",
 	"/proc/meminfo": meminfo(),

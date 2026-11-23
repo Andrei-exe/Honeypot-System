@@ -51,7 +51,8 @@ var weakCredentials = map[string]bool{
 
 // routerDelay is how long the cheap router takes to answer, at least: an HTTP request (http.go) or
 // the next command of a session (pacer). Plus up to half of it at random, like a real device.
-const routerDelay = 200 * time.Millisecond
+// A variable only so the long oracle sessions in the tests can shorten it.
+var routerDelay = 200 * time.Millisecond
 
 // routerAnswerTime is one answer time: 200-300ms.
 func routerAnswerTime() time.Duration {

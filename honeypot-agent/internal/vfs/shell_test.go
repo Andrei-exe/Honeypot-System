@@ -45,7 +45,7 @@ func TestRun(t *testing.T) {
 		{`cd /tmp; echo -ne '\x7fELF\x01\x01\x01bot' > x; ./x && echo started`, "started\n"}, // malware: runs
 		{"ls /etc", "dropbear      hostname      lighttpd      ppp           shadow\n" + // columns as wide as
 			"group         hosts         os-release    profile       shells\n" + // the longest name + 2
-			"hostapd.conf  issue.net     passwd        resolv.conf\n"},
+			"hostapd.conf  issue.net     passwd        resolv.conf   vsftpd.conf\n"},
 		{"ps | grep lighttpd", "  349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf\n"}, // port 80 = a running web server
 		{"cat /var/run/lighttpd.pid", "349\n"}, // its PID, in the pid-file from its config
 		{"ls /var/www", "index.html  login.cgi\n"},
@@ -435,7 +435,7 @@ func TestBotSequences(t *testing.T) {
 		{`awk '/MemTotal/ {print $2}' /proc/meminfo`, "124520\n", 0},
 		{`grep MemTotal /proc/meminfo | awk '{print $2/1024}'`, "121.602\n", 0},
 		{`awk -F: '$3 == 0 {print $1}' /etc/passwd`, "root\nadmin\nsupport\nuser\n", 0},
-		{`cut -d: -f1 /etc/passwd | sort | tr '\n' ' '`, "admin daemon nobody root support user ", 0},
+		{`cut -d: -f1 /etc/passwd | sort | tr '\n' ' '`, "admin daemon ftp nobody root support user ", 0},
 		{`ps | grep -v grep | grep -c sh`, "1\n", 0},
 		{`ps | awk 'NR>1 {print $1}' | sort -n | tail -3`, "402\n517\n530\n", 0},
 		{`cat /proc/cpuinfo | grep -i 'features' | tr ' ' '\n' | grep -c .`, "15\n", 0},
@@ -730,7 +730,7 @@ func TestLs(t *testing.T) {
 	fixedClock(t)
 	const nippon = "cd /tmp; echo kami > .nippon; mkdir d; " // a bot's hidden file + a directory
 	tests := []struct{ line, want string }{
-		{"ls /", "bin   dev   etc   lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"},
+		{"ls /", "bin   dev   etc   home  lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"},
 		{"ls -1 /var", "log\nrun\nspool\ntmp\nwww\n"},
 		{"ls --color=auto /var", "log    run    spool  tmp    www\n"},
 		{"ls /nope /etc/hostname", "ls: /nope: No such file or directory\n/etc/hostname\n"},
@@ -746,7 +746,7 @@ func TestLs(t *testing.T) {
 		// -l: firmware files from 2020 (older than 6 months -> year), /tmp /var /dev /proc from boot,
 		// the attacker's files from "now"
 		{"ls -la", "drwxr-xr-x    2 root     root            40 Jun  4  2020 .\n" +
-			"drwxr-xr-x   14 root     root           280 Jun  4  2020 ..\n"},
+			"drwxr-xr-x   15 root     root           300 Jun  4  2020 ..\n"},
 		{"ls -l /var/run", "-rw-r--r--    1 root     root             4 Nov 18 09:15 dropbear.pid\n" +
 			"-rw-r--r--    1 root     root             4 Nov 18 09:15 lighttpd.pid\n"},
 		{"ls -l /bin/sh /bin/busybox /dev/null",
@@ -761,7 +761,7 @@ func TestLs(t *testing.T) {
 				"drwxrwxrwt    2 root     root            40 Nov 18 09:15 /tmp\n"},
 		{nippon + "ls -la",
 			"drwxrwxrwt    3 root     root            80 Nov 18 09:15 .\n" +
-				"drwxr-xr-x   14 root     root           280 Jun  4  2020 ..\n" +
+				"drwxr-xr-x   15 root     root           300 Jun  4  2020 ..\n" +
 				"-rw-r--r--    1 root     root             5 Nov 20 10:30 .nippon\n" +
 				"drwxr-xr-x    2 root     root            40 Nov 20 10:30 d\n"},
 		{"ls -l /var/www/login.cgi", // a program; /var/www is on the firmware, not in RAM like /var/run
@@ -769,7 +769,7 @@ func TestLs(t *testing.T) {
 		{"ls -l /etc/dropbear", // a key file in Dropbear's format, 141 bytes like a real ECDSA P-256 one
 			"-rw-------    1 root     root           141 Jun  4  2020 dropbear_ecdsa_host_key\n"},
 		{"echo x >> /etc/shadow; ls -l /etc/shadow", // overwriting keeps the mode, the date changes
-			"-rw-------    1 root     root           290 Nov 20 10:30 /etc/shadow\n"},
+			"-rw-------    1 root     root           303 Nov 20 10:30 /etc/shadow\n"},
 	}
 	for _, tt := range tests {
 		got, _, _ := NewShell().Run(tt.line)

@@ -19,6 +19,8 @@ const terminalWidth = 79
 var specialModes = map[string]string{
 	"/tmp": "drwxrwxrwt", "/var/tmp": "drwxrwxrwt", "/dev/shm": "drwxrwxrwt", // anyone can write, sticky bit
 	"/proc": "dr-xr-xr-x", "/sys": "dr-xr-xr-x",
+	"/home/ftp": "dr-xr-xr-x", "/usr/share/empty": "drwx------", // vsftpd refuses a writable chroot
+
 	"/etc/shadow": "-rw-------", "/etc/dropbear/dropbear_ecdsa_host_key": "-rw-------",
 	"/etc/ppp/chap-secrets": "-rw-------", // pppd warns when its secrets can be read by everyone
 }
