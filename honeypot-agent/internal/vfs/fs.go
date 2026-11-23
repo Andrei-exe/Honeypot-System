@@ -1,8 +1,6 @@
 package vfs
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"path"
@@ -242,8 +240,6 @@ var fakeFiles = map[string]string{
 	// Buildroot's finalize hooks write it: busybox.mk adds /bin/ash, skeleton-init-common.mk /bin/sh
 	// (Dropbear refuses a login whose shell isn't listed here)
 	"/etc/shells": "/bin/ash\n/bin/sh\n",
-	// Dropbear's host key (the SSH server's type: ECDSA)
-	"/etc/dropbear/dropbear_ecdsa_host_key": dropbearHostKey(),
 
 	"/etc/hostname":    "gateway\n",
 	"/etc/hosts":       "127.0.0.1 localhost\n192.168.1.1 gateway\n",
@@ -347,25 +343,6 @@ func bootLog() string {
 		out.WriteString(t.Format("Jan _2 15:04:05") + " gateway " + l.text + "\n")
 	}
 	return out.String()
-}
-
-// dropbearHostKey is a key file in Dropbear's format: type, curve, public point, private number
-// (141 bytes, like a real ECDSA P-256 one). The numbers are made up from a hash of a fixed text:
-// the real SSH host key is never put where an attacker can read it.
-func dropbearHostKey() string {
-	var key []byte
-	field := func(b []byte) { // Dropbear writes each part as length (4 bytes) + bytes
-		key = binary.BigEndian.AppendUint32(key, uint32(len(b)))
-		key = append(key, b...)
-	}
-	x := sha256.Sum256([]byte("gateway dropbear x"))
-	y := sha256.Sum256(x[:])
-	d := sha256.Sum256(y[:])
-	field([]byte("ecdsa-sha2-nistp256"))
-	field([]byte("nistp256"))
-	field(append(append([]byte{4}, x[:]...), y[:]...)) // the point: 04 | X | Y
-	field(append([]byte{0}, d[:]...))                  // the private number
-	return string(key)
 }
 
 // resolve turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path.

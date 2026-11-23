@@ -766,8 +766,8 @@ func TestLs(t *testing.T) {
 				"drwxr-xr-x    2 root     root            40 Nov 20 10:30 d\n"},
 		{"ls -l /var/www/login.cgi", // a program; /var/www is on the firmware, not in RAM like /var/run
 			"-rwxr-xr-x    1 root     root         13764 Jun  4  2020 /var/www/login.cgi\n"},
-		{"ls -l /etc/dropbear", // a key file in Dropbear's format, 141 bytes like a real ECDSA P-256 one
-			"-rw-------    1 root     root           141 Jun  4  2020 dropbear_ecdsa_host_key\n"},
+		{"ls -l /etc/dropbear", // Dropbear's format: 140 bytes, 141 for a private number with its top bit set
+			"-rw-------    1 root     root           140 Jun  4  2020 dropbear_ecdsa_host_key\n"},
 		{"echo x >> /etc/shadow; ls -l /etc/shadow", // overwriting keeps the mode, the date changes
 			"-rw-------    1 root     root           303 Nov 20 10:30 /etc/shadow\n"},
 	}

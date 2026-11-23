@@ -77,6 +77,7 @@ func RunSSH(ctx context.Context, address string, nodeID string, shipper *shipper
 	if err != nil {
 		return err
 	}
+	showHostKey(hostKey)
 
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -396,6 +397,14 @@ func endCommand(channel ssh.Channel, code int) {
 	channel.CloseWrite()
 	status := struct{ Status uint32 }{uint32(code)}
 	channel.SendRequest("exit-status", false, ssh.Marshal(&status))
+}
+
+// showHostKey puts the served key's public part in the shell's /etc/dropbear/dropbear_ecdsa_host_key,
+// so its fingerprint is the one clients see. Only the public part: the file's private number is made up.
+func showHostKey(hostKey ssh.Signer) {
+	if public := hostKey.PublicKey(); public.Type() == ssh.KeyAlgoECDSA256 { // the file's type
+		vfs.SetHostKey(public.Marshal())
+	}
 }
 
 // loadOrCreateHostKey reads the host key from disk, or generates and saves it the first time.

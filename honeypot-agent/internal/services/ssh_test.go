@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/binary"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"honeypot-agent/internal/shipper"
+	"honeypot-agent/internal/vfs"
 )
 
 // newTestKey makes a throwaway ECDSA key in memory (RunSSH would write the host key to disk).
@@ -594,6 +596,63 @@ func TestSSHShellWithPTY(t *testing.T) {
 }
 
 // exec without a pty (ssh host CMD): sh -c CMD, without /etc/profile; the errors apart, with "line N:".
+// The host key file in the shell starts with the public key the client was really served (its
+// fingerprint matches), and ends with a private number that is not the server's.
+func TestSSHHostKeyFileMatchesServedKey(t *testing.T) {
+	t.Cleanup(func() { vfs.SetHostKey(nil) })
+	hostKey := newTestKey(t)
+	showHostKey(hostKey)
+
+	s := shipper.NewShipper(io.Discard, "", "")
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
+	var seen []byte
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User: "root",
+		Auth: []ssh.AuthMethod{ssh.Password("root")},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			seen = key.Marshal() // what ssh-keyscan and the fingerprint come from
+			return nil
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := session.Output("cat /etc/dropbear/dropbear_ecdsa_host_key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close()
+	waitDone(t, done)
+
+	if len(seen) == 0 || !bytes.HasPrefix(file, seen) {
+		t.Errorf("the key file starts with %x\n           served key %x", file[:min(len(file), len(seen))], seen)
+	}
+	if len(file) < len(seen)+4+31 || len(file) > len(seen)+4+33 { // + the private number: an mpint of 31-33 bytes
+		t.Errorf("key file of %d bytes", len(file))
+	}
+
+	// a key of another type never goes in the ECDSA file: it keeps its made-up ECDSA key
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edSigner, err := ssh.NewSignerFromKey(edKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vfs.SetHostKey(nil)
+	before, _, _ := vfs.NewShell().Run("cat /etc/dropbear/dropbear_ecdsa_host_key")
+	showHostKey(edSigner)
+	if after, _, _ := vfs.NewShell().Run("cat /etc/dropbear/dropbear_ecdsa_host_key"); after != before {
+		t.Errorf("an ed25519 key went into the ECDSA key file: %x", after)
+	}
+}
+
 func TestSSHExecWithoutPTY(t *testing.T) {
 	stdout, stderr, code, _ := sshRun(t, func(session *ssh.Session, _ io.WriteCloser) error {
 		return session.Start("echo $0 $-; nosuch; cd /nope; echo $PS1; exit 5")

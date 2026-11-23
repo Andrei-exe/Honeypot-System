@@ -21,7 +21,7 @@ var specialModes = map[string]string{
 	"/proc": "dr-xr-xr-x", "/sys": "dr-xr-xr-x",
 	"/home/ftp": "dr-xr-xr-x", "/usr/share/empty": "drwx------", // vsftpd refuses a writable chroot
 
-	"/etc/shadow": "-rw-------", "/etc/dropbear/dropbear_ecdsa_host_key": "-rw-------",
+	"/etc/shadow": "-rw-------", hostKeyFile: "-rw-------",
 	"/etc/ppp/chap-secrets": "-rw-------", // pppd warns when its secrets can be read by everyone
 }
 
@@ -196,7 +196,7 @@ func (s *Shell) stat(p string) (mode string, links int, size string, target stri
 	case p == "/dev/null":
 		mode, links, size = "crw-rw-rw-", 1, "1,   3" // a device shows "major, minor" instead of a size
 	default:
-		content := fakeFiles[p]
+		content, _ := readBuiltin(p) // a computed file's size too (/proc's are 0, below)
 		mode, links, size = "-rw-r--r--", 1, strconv.Itoa(len(content))
 		if strings.HasPrefix(content, "\x7fELF") {
 			mode = "-rwxr-xr-x"
