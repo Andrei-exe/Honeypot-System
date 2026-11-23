@@ -69,9 +69,11 @@ func (s *Shell) applet(name string, args []string, input string) (string, int, b
 	case "id":
 		return "uid=0(root) gid=0(root) groups=0(root)\n", 0, false
 	case "hostname":
-		return "gateway\n", 0, false
+		return s.hostnameApplet(args)
 	case "uname":
-		return uname(args), 0, false
+		return s.uname(args)
+	case "sysctl":
+		return s.sysctl(args)
 	case "pwd":
 		return s.cwd + "\n", 0, false
 	case "ps":
@@ -108,10 +110,14 @@ func (s *Shell) applet(name string, args []string, input string) (string, int, b
 	case "crontab":
 		return s.crontab(args, input)
 
-	case "wget", "tftp", "ftpget":
-		// nothing is downloaded: pretend the network is down (the URL is already logged).
-		// No curl: BusyBox has none, so "curl" is "not found" below, like on a real router.
-		return name + ": can't connect to remote host: Connection timed out\n", 1, false
+	// nothing is ever downloaded (network.go); the URL is already logged. No curl: BusyBox has
+	// none, so "curl" is "not found" below, like on a real router.
+	case "wget":
+		return s.wget(args)
+	case "tftp":
+		return s.tftp(args)
+	case "ftpget":
+		return s.ftpget(args)
 
 	// the text tools bots pipe /proc and /etc through (text.go, sed.go, awk.go)
 	case "wc":
@@ -258,26 +264,111 @@ func busyboxHelp() string {
 	return out.String() + "\n"
 }
 
-// uname answers the flags bots usually ask for; -a agrees with /proc/version.
-func uname(args []string) string {
-	if len(args) == 0 {
-		return "Linux\n"
+const unameUsage = " [-amnrspvio]\n\nPrint system information\n\n\t-a\tPrint all\n\t-m\tThe machine (hardware) type\n" +
+	"\t-n\tHostname\n\t-r\tKernel release\n\t-s\tKernel name (default)\n\t-p\tProcessor type\n" +
+	"\t-v\tKernel version\n\t-i\tThe hardware platform\n\t-o\tOS name"
+
+// unameLong are uname's long options (Buildroot: LONG_OPTS).
+var unameLong = map[string]byte{"all": 'a', "kernel-name": 's', "nodename": 'n', "kernel-release": 'r',
+	"release": 'r', "kernel-version": 'v', "machine": 'm', "processor": 'p', "hardware-platform": 'i',
+	"operating-system": 'o'}
+
+// uname prints the fields asked for, always in the order s n r v m p i o (coreutils/uname.c);
+// -a agrees with /proc/version. Bots ask for -m to pick which binary to download.
+func (s *Shell) uname(args []string) (string, int, bool) {
+	opts, rest, complaint := getopt("uname", args, "snrvmpioa", unameLong)
+	if complaint != "" || len(rest) > 0 {
+		return usageAfter(complaint, "uname", unameUsage)
 	}
-	switch args[0] {
-	case "-a":
-		return "Linux gateway " + kernelRelease + " " + kernelVersion + " armv7l GNU/Linux\n"
-	case "-m":
-		return "armv7l\n" // bots ask this to pick which binary to download
-	case "-r":
-		return kernelRelease + "\n"
-	case "-v":
-		return kernelVersion + "\n"
-	case "-n":
-		return "gateway\n"
-	case "-o":
-		return "GNU/Linux\n"
+	unknown := "unknown" // -p and -i: what the kernel doesn't say
+	if opts['a'] != nil {
+		unknown = "" // -a leaves them out
 	}
-	return "Linux\n"
+	fields := []struct {
+		letter byte
+		value  string
+	}{{'s', "Linux"}, {'n', s.hostname()}, {'r', kernelRelease}, {'v', kernelVersion}, {'m', "armv7l"},
+		{'p', unknown}, {'i', unknown}, {'o', "GNU/Linux"}}
+	var out []string
+	for _, f := range fields {
+		if (opts[f.letter] != nil || opts['a'] != nil) && f.value != "" {
+			out = append(out, f.value)
+		}
+	}
+	if len(opts) == 0 {
+		out = []string{"Linux"} // no option = -s
+	}
+	return strings.Join(out, " ") + "\n", 0, false
+}
+
+// hostname is the router's name now: "gateway", unless the attacker changed it (hostname NAME,
+// /proc/sys/kernel/hostname). The prompt keeps the old one: ash reads it once, like $HOSTNAME.
+func (s *Shell) hostname() string {
+	name, _ := s.readFile("/proc/sys/kernel/hostname")
+	return strings.TrimSuffix(name, "\n")
+}
+
+const hostnameUsage = " [OPTIONS] [HOSTNAME | -F FILE]\n\nGet or set hostname or DNS domain name\n\n" +
+	"\t-s\tShort\n\t-i\tAddresses for the hostname\n\t-d\tDNS domain name\n\t-f\tFully qualified domain name\n" +
+	"\t-F FILE\tUse FILE's content as hostname"
+
+// hostnameApplet prints or sets the name (networking/hostname.c). -d, -f and -i look the name up in
+// /etc/hosts, where "gateway" is 192.168.1.1.
+func (s *Shell) hostnameApplet(args []string) (string, int, bool) {
+	opts, rest, complaint := getopt("hostname", args, "dfisF:v", nil)
+	if complaint != "" {
+		return usageAfter(complaint, "hostname", hostnameUsage)
+	}
+	name := s.hostname()
+	short, _, _ := strings.Cut(name, ".")
+	switch {
+	case opts['d'] != nil || opts['f'] != nil || opts['i'] != nil:
+		ip, canonical := s.lookupHost(name)
+		if ip == "" {
+			return "hostname: " + name + ": Unknown host\n", 1, false
+		}
+		first, domain, _ := strings.Cut(canonical, ".")
+		switch {
+		case opts['f'] != nil:
+			return canonical + "\n", 0, false
+		case opts['s'] != nil:
+			return first + "\n", 0, false
+		case opts['d'] != nil:
+			if domain == "" {
+				return "", 0, false
+			}
+			return domain + "\n", 0, false
+		}
+		return ip + "\n", 0, false
+	case opts['s'] != nil:
+		return short + "\n", 0, false
+	case opts['F'] != nil: // the first word of each line that isn't a comment; the last one stays
+		file := opts['F'][len(opts['F'])-1]
+		text, ok := s.readFile(resolve(s.cwd, file))
+		if !ok {
+			return "hostname: can't open '" + file + "': No such file or directory\n", 1, false
+		}
+		for _, line := range splitLines(text) {
+			if f := strings.Fields(line); len(f) > 0 && f[0][0] != '#' {
+				if out, code, exit := s.setHostname(f[0]); code != 0 {
+					return out, code, exit
+				}
+			}
+		}
+		return "", 0, false
+	case len(rest) > 0:
+		return s.setHostname(rest[0])
+	}
+	return name + "\n", 0, false
+}
+
+// setHostname is sethostname(): at most 64 bytes, like the kernel.
+func (s *Shell) setHostname(name string) (string, int, bool) {
+	if len(name) > 64 {
+		return "hostname: sethostname: Invalid argument\n", 1, false
+	}
+	s.writeFile("/proc/sys/kernel/hostname", name, false)
+	return "", 0, false
 }
 
 // echo [-n] [-e] text. -n = no trailing newline, -e = interpret \n, \t, \xHH.
@@ -357,6 +448,9 @@ func (s *Shell) cat(args []string, input string) (string, int, bool) {
 		p := resolve(s.cwd, a)
 		content, ok := s.readFile(p)
 		switch {
+		case unreadable(p):
+			out.WriteString("cat: can't open '" + a + "': Permission denied\n")
+			code = 1
 		case ok:
 			out.WriteString(content)
 		case s.isDir(p):
@@ -393,8 +487,11 @@ func (s *Shell) mkdir(args []string) (string, int, bool) {
 			continue // -p
 		}
 		p := resolve(s.cwd, a)
-		if !s.isDir(path.Dir(p)) {
+		if !s.isDir(path.Dir(p)) || under(p, "/proc") { // procfs makes no directories: ENOENT
 			return "mkdir: can't create directory '" + a + "': No such file or directory\n", 1, false
+		}
+		if under(p, "/sys") {
+			return "mkdir: can't create directory '" + a + "': Operation not permitted\n", 1, false
 		}
 		if s.room(p) < 0 {
 			return "mkdir: can't create directory '" + a + "': " + errNoSpace.Error() + "\n", 1, false
@@ -436,12 +533,12 @@ func (s *Shell) cp(args []string) (string, int, bool) {
 	if s.isDir(resolve(s.cwd, dst)) {
 		dst = dst + "/" + path.Base(src) // cp x /tmp -> /tmp/x
 	}
-	full, err := s.writeFile(dst, content, false)
+	failed, err := s.writeFile(dst, content, false)
 	if err != nil { // libbb/copy_file.c
 		return "cp: can't create '" + dst + "': " + err.Error() + "\n", 1, false
 	}
-	if full {
-		return writeError("cp", errNoSpace), 1, false
+	if failed != nil {
+		return writeError("cp", failed), 1, false
 	}
 	return "", 0, false
 }

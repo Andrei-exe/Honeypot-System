@@ -23,10 +23,13 @@ const sessionQuota = 256 * 1024
 // Why a file can't be written: the kernel's texts (strerror), capitalized as the user sees them.
 // Each command puts them in its own message ("touch: x: ...", "cp: can't create 'x': ...").
 var (
-	errIsDir   = errors.New("Is a directory")
-	errNoDir   = errors.New("No such file or directory")
-	errNoSpace = errors.New("No space left on device")
-	errBadFD   = errors.New("Bad file descriptor") // writing to a descriptor closed with >&-
+	errIsDir    = errors.New("Is a directory")
+	errNoDir    = errors.New("No such file or directory")
+	errNoSpace  = errors.New("No space left on device")
+	errBadFD    = errors.New("Bad file descriptor") // writing to a descriptor closed with >&-
+	errNoAccess = errors.New("Permission denied")   // a read-only /proc/sys setting, a new file in /sys
+	errInvalid  = errors.New("Invalid argument")    // a value a /proc/sys setting doesn't take
+	errIO       = errors.New("Input/output error")  // writing to a /proc file that takes no writes
 )
 
 // diskCost is what a file or directory takes from sessionQuota: its content in whole 4KB pages (like
@@ -105,6 +108,9 @@ var fakeDirs = map[string]bool{
 	"/var": true, "/var/log": true, "/var/run": true, "/var/tmp": true,
 	"/var/spool": true, "/var/spool/cron": true, crontabDir: true, // crontab's (Buildroot: FEATURE_CROND_DIR)
 	"/etc/ppp": true, "/etc/ppp/peers": true, "/usr/lib/pppd": true, "/usr/lib/pppd/2.4.7": true,
+	// the kernel settings (kernelSettings in system.go); the directories a 4.14 ARM kernel has, some empty here
+	"/proc/sys": true, "/proc/sys/debug": true, "/proc/sys/dev": true, "/proc/sys/fs": true, "/proc/sys/kernel": true,
+	"/proc/sys/net": true, "/proc/sys/net/ipv4": true, "/proc/sys/user": true, "/proc/sys/vm": true,
 }
 
 // Honeytokens: secrets that exist only in the files below (the Wi-Fi password, the provider's
@@ -128,7 +134,7 @@ var applets = []struct {
 	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "date", "df", "echo", "egrep", "false", "fgrep",
 		"grep", "hostname", "kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sed", "sh", "sleep",
 		"touch", "true", "uname"}},
-	{"/sbin", "../bin/busybox", []string{"init", "klogd", "syslogd"}},
+	{"/sbin", "../bin/busybox", []string{"init", "klogd", "sysctl", "syslogd"}},
 	{"/usr/bin", "../../bin/busybox", []string{"[", "[[", "awk", "crontab", "cut", "env", "free", "ftpget",
 		"head", "id", "killall", "nohup", "nproc", "printf", "seq", "sort", "tail", "test", "tftp", "tr", "uniq",
 		"uptime", "w", "wc", "wget", "which", "who", "whoami"}},
@@ -391,6 +397,9 @@ func readBuiltin(p string) (string, bool) {
 	if gen, ok := dynamicFiles[p]; ok {
 		return gen(), true // /proc/uptime: computed now
 	}
+	if k, ok := kernelSettings[p]; ok {
+		return k.read(), true
+	}
 	content, ok := fakeFiles[p]
 	return content, ok
 }
@@ -414,6 +423,9 @@ func (s *Shell) list(dir string) []string {
 	for p := range dynamicFiles {
 		add(p)
 	}
+	for p := range kernelSettings {
+		add(p)
+	}
 	for p := range fakeLinks {
 		add(p)
 	}
@@ -435,22 +447,27 @@ func (s *Shell) list(dir string) []string {
 	return names
 }
 
-// writeFile writes (or appends, for >>) to a session file. err says why the file can't be created
-// (nil if it was). full = the disk filled up: only the whole pages that fit were written, where a
-// real write stops with ENOSPC, and the caller prints the command's own write error.
-func (s *Shell) writeFile(name, content string, appendTo bool) (full bool, err error) {
+// writeFile writes (or appends, for >>) to a session file. err says why the file can't be opened or
+// created (nil if it was). failed = it was opened, but writing failed and the caller prints its own write
+// error: the disk filled up (errNoSpace: only the whole pages that fit were written, where a real write
+// stops with ENOSPC), or the kernel refused what was written to /proc (see writeProc).
+func (s *Shell) writeFile(name, content string, appendTo bool) (failed, err error) {
 	p := resolve(s.cwd, name)
 	switch {
 	case p == "/dev/null":
-		return false, nil // anything written here disappears, like on a real system
+		return nil, nil // anything written here disappears, like on a real system
 	case s.isDir(p):
-		return false, errIsDir
+		return nil, errIsDir
 	case !s.isDir(path.Dir(p)):
-		return false, errNoDir
+		return nil, errNoDir
+	case under(p, "/proc"):
+		return s.writeProc(p, content)
+	case under(p, "/sys"):
+		return nil, errNoAccess // sysfs makes no new files (and none of its own are simulated)
 	}
 	room := s.room(p)
 	if room < 0 {
-		return false, errNoSpace // not even an empty file fits (like running out of inodes)
+		return nil, errNoSpace // not even an empty file fits (like running out of inodes)
 	}
 
 	if appendTo {
@@ -461,11 +478,37 @@ func (s *Shell) writeFile(name, content string, appendTo bool) (full bool, err e
 		content = content[:maxSize]
 	}
 	if fits := room / 4096 * 4096; len(content) > fits {
-		content, full = content[:fits], true
+		content, failed = content[:fits], errNoSpace
 	}
 	// a copy: a cut string still holds all of the original's memory (even cut to ""), which the
 	// quota wouldn't see (measured: 2x the quota in RAM, from the empty files of a cat that didn't fit)
 	s.files[p] = strings.Clone(content)
 	s.mtimes[p] = now().UTC()
-	return full, nil
+	return failed, nil
+}
+
+// writeProc writes to /proc like the kernel: nothing new can be created there (ENOENT, which ash
+// calls "nonexistent directory"), a /proc/sys setting takes only what its handler accepts, the other
+// files take no writes (EIO). Each write is checked by itself, like one write(); opening ("") changes nothing.
+func (s *Shell) writeProc(p, content string) (failed, err error) {
+	k, isSetting := kernelSettings[p]
+	_, exists := readBuiltin(p)
+	switch {
+	case !exists:
+		return nil, errNoDir
+	case isSetting && k.mode == settingRO:
+		return nil, errNoAccess // even for root (proc_sys_permission)
+	case content == "":
+		return nil, nil
+	case !isSetting:
+		return errIO, nil
+	}
+	value, ok := k.set(content)
+	if !ok {
+		return errInvalid, nil
+	}
+	if k.mode != settingWO {
+		s.files[p] = value // read back from here (readFile looks at the session's files first)
+	}
+	return nil, nil
 }

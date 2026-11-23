@@ -147,7 +147,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			event := newEvent("command_exec")
 			event.PayloadDetails = &models.PayloadDetails{
 				Command:      line,
-				ExtractedURL: urlRegex.FindString(line),
+				ExtractedURL: downloadURL(line),
 			}
 			shipper.EmitEvent(event)
 

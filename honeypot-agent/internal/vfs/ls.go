@@ -212,6 +212,11 @@ func (s *Shell) stat(p string) (mode string, links int, size string, target stri
 	}
 	if under(p, "/proc") {
 		size = "0" // files in /proc are generated when read: their size is always 0
+		if k, ok := kernelSettings[p]; ok {
+			mode = k.mode
+		} else if s.isDir(p) {
+			mode = "dr-xr-xr-x"
+		}
 	}
 	return mode, links, size, target
 }

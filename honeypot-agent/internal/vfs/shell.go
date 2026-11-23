@@ -569,18 +569,19 @@ type sink struct {
 // was exit.
 func (s *Shell) exec(args []string, redirs []redir, input string) (res output, code int, exit bool) {
 	fds := map[int]sink{0: {orig: 2}, 1: {orig: 1}, 2: {orig: 2}} // 0 = the terminal, writable too
-	// write sends text to a sink; full / closed = the write failed (the command reports it, see below)
-	write := func(to sink, text string) (full, closed bool) {
+	// write sends text to a sink; an error = the write failed (the command reports it, see below)
+	write := func(to sink, text string) error {
 		switch {
 		case text == "":
 		case to.orig == 1 || to.orig == 2:
 			res.add(to.orig, text)
 		case to.orig == -1:
-			closed = true
+			return errBadFD
 		default:
-			full, _ = s.writeFile(to.file, text, true) // the file was opened (created) by its redirection
+			failed, _ := s.writeFile(to.file, text, true) // the file was opened (created) by its redirection
+			return failed
 		}
-		return full, closed
+		return nil
 	}
 	// fail: a redirection that can't be done stops the command; ash's message goes where 2 points now
 	fail := func(msg string) (output, int, bool) {
@@ -636,6 +637,8 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 			p := resolve(s.cwd, r.target)
 			content, ok := s.readFile(p)
 			switch {
+			case unreadable(p):
+				return fail("can't open " + r.target + ": Permission denied")
 			case ok || s.isDir(p): // a directory opens fine; reading it gives nothing here
 			case r.op == "<>": // read and write: created if missing
 				if _, ok := open(r.target, true); !ok {
@@ -661,14 +664,10 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 			write(fds[2], c.text)
 			continue
 		}
-		// the output's write failed: the disk filled up, or the descriptor was closed (>&-)
-		if full, closed := write(fds[1], c.text); (full || closed) && !failed {
+		// the output's write failed: the disk filled up, the descriptor was closed (>&-), /proc refused it
+		if err := write(fds[1], c.text); err != nil && !failed {
 			failed, code = true, 1
-			reason := errNoSpace
-			if closed {
-				reason = errBadFD
-			}
-			write(fds[2], writeError(args[0], reason))
+			write(fds[2], writeError(args[0], err))
 		}
 	}
 	return res, code, exit

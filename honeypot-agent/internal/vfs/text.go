@@ -41,6 +41,9 @@ func (s *Shell) sources(files []string, input string, msg func(file, reason stri
 		p := resolve(s.cwd, f)
 		text, found := s.readFile(p)
 		switch {
+		case unreadable(p):
+			s.warn(msg(f, "Permission denied"))
+			ok = false
 		case s.isDir(p):
 			s.warn(msg(f, "Is a directory"))
 			ok = false
@@ -96,6 +99,88 @@ func options(args []string, letters, takesValue string) (opts map[byte][]string,
 		}
 	}
 	return opts, rest, 0
+}
+
+// getopt parses arguments like BusyBox's getopt32 over uClibc's getopt_long, for the applets whose
+// messages for a wrong option were measured. spec is BusyBox's: a letter, "x:" takes a value, "x::" an
+// optional one stuck to it ("-nv"). long maps "--name" to its letter ("--name=value", "--name value",
+// a unique start of the name is enough). complaint = getopt's message; the caller adds its usage.
+func getopt(applet string, args []string, spec string, long map[string]byte) (opts map[byte][]string, rest []string, complaint string) {
+	kinds := map[byte]int{} // 0 = no value, 1 = a value, 2 = an optional value
+	for i := 0; i < len(spec); i++ {
+		c := spec[i]
+		for i+1 < len(spec) && spec[i+1] == ':' {
+			kinds[c]++
+			i++
+		}
+		if _, ok := kinds[c]; !ok {
+			kinds[c] = 0
+		}
+	}
+	opts = map[byte][]string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return opts, append(rest, args[i+1:]...), ""
+		case strings.HasPrefix(a, "--"):
+			name, value, hasValue := strings.Cut(a[2:], "=")
+			var full string
+			letters := map[byte]bool{}
+			for n, c := range long {
+				if n == name { // an exact name always wins
+					full, letters = n, map[byte]bool{c: true}
+					break
+				}
+				if strings.HasPrefix(n, name) {
+					full = n
+					letters[c] = true
+				}
+			}
+			switch {
+			case len(letters) == 0:
+				return opts, rest, applet + ": unrecognized option `" + a + "'\n"
+			case len(letters) > 1: // starts more than one name (two names of one letter are fine)
+				return opts, rest, applet + ": option `" + a + "' is ambiguous\n"
+			}
+			c := long[full]
+			switch {
+			case kinds[c] == 0 && hasValue:
+				return opts, rest, applet + ": option `--" + full + "' doesn't allow an argument\n"
+			case kinds[c] > 0 && !hasValue:
+				if i+1 == len(args) {
+					return opts, rest, applet + ": option `" + a + "' requires an argument\n"
+				}
+				i++
+				value = args[i]
+			}
+			opts[c] = append(opts[c], value)
+		case len(a) > 1 && a[0] == '-':
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				kind, ok := kinds[c]
+				switch {
+				case !ok:
+					return opts, rest, applet + ": invalid option -- " + string(c) + "\n"
+				case kind == 0:
+					opts[c] = append(opts[c], "")
+					continue
+				case kind == 1 && j+1 == len(a):
+					if i+1 == len(args) {
+						return opts, rest, applet + ": option requires an argument -- " + string(c) + "\n"
+					}
+					i++
+					opts[c] = append(opts[c], args[i])
+				default: // the rest of the word is the value
+					opts[c] = append(opts[c], a[j+1:])
+				}
+				break
+			}
+		default:
+			rest = append(rest, a) // "-" alone too
+		}
+	}
+	return opts, rest, ""
 }
 
 // compileRegex compiles a grep / sed pattern the way POSIX regcomp reads it: basic (BRE: \( \) \{ \}
@@ -419,6 +504,10 @@ func (s *Shell) wc(args []string, input string) (string, int, bool) {
 			var found bool
 			text, found = s.readFile(p)
 			switch {
+			case unreadable(p):
+				s.warn("wc: " + f + ": Permission denied\n")
+				code = 1
+				continue
 			case s.isDir(p): // BusyBox still prints its (zero) counts
 				s.warn("wc: " + f + ": Is a directory\n")
 				code = 1

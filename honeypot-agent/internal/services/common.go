@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	mrand "math/rand/v2" // rand is crypto/rand here (the session IDs)
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -73,6 +74,98 @@ func (p *pacer) wait() {
 // urlRegex finds download URLs in commands (wget http://..., tftp://...) for extracted_url.
 var urlRegex = regexp.MustCompile(`(?:https?|ftp|tftp)://[^\s'";|&<>()]+`)
 
+// downloadURL is the URL for extracted_url: the first one with a scheme in the line, else what a wget,
+// tftp -g or ftpget in it would fetch: BusyBox's wget takes "1.2.3.4/x" as http://1.2.3.4/x, tftp and
+// ftpget take a host and a file name (-> tftp://host/file, ftp://host/file).
+func downloadURL(line string) string {
+	if url := urlRegex.FindString(line); url != "" {
+		return url
+	}
+	commands := strings.FieldsFunc(line, func(r rune) bool { return strings.ContainsRune(";&|\n()`", r) })
+	for _, command := range commands {
+		words := strings.Fields(command)
+		for i := range words {
+			words[i] = strings.Trim(words[i], `'"`)
+		}
+		for len(words) > 0 && (path.Base(words[0]) == "busybox" || words[0] == "nohup") {
+			words = words[1:] // "busybox wget ...", "nohup wget ..."
+		}
+		if len(words) > 0 {
+			if url := commandURL(path.Base(words[0]), words[1:]); url != "" {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
+// commandURL is the URL a download command without "scheme://" would fetch ("" = none). The options
+// that take a value are skipped with it, so "wget -O /tmp/x 1.2.3.4/y" gives http://1.2.3.4/y.
+func commandURL(name string, args []string) string {
+	withValue := map[string]string{"wget": "OPYUTt", "tftp": "lrb", "ftpget": "upP"}[name]
+	if withValue == "" {
+		return ""
+	}
+	opts := map[byte]string{}
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case strings.HasPrefix(a, "--"): // wget's long options: those with a value take the next word
+			long, _, hasValue := strings.Cut(a[2:], "=")
+			if !hasValue && strings.Contains(" output-document directory-prefix proxy user-agent timeout tries header post-data ", " "+long+" ") {
+				i++
+			}
+		case len(a) > 1 && a[0] == '-':
+			for j := 1; j < len(a); j++ {
+				opts[a[j]] = ""
+				if strings.IndexByte(withValue, a[j]) >= 0 {
+					value := a[j+1:]
+					if value == "" && i+1 < len(args) {
+						i++
+						value = args[i]
+					}
+					opts[a[j]] = value
+					break
+				}
+			}
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) == 0 || rest[0] == "" || strings.ContainsAny(rest[0], "$`") {
+		return "" // nothing to fetch, or an address the shell would only know when it runs
+	}
+	host := rest[0]
+	switch name {
+	case "wget":
+		if strings.Contains(host, "://") {
+			return "" // a scheme the regex doesn't know: BusyBox's wget refuses it
+		}
+		return "http://" + host
+	case "tftp":
+		remote := opts['r']
+		if remote == "" {
+			remote = opts['l']
+		}
+		if _, get := opts['g']; !get || remote == "" {
+			return "" // -p sends a file, it doesn't fetch one
+		}
+		if len(rest) > 1 {
+			host += ":" + rest[1]
+		}
+		return "tftp://" + host + "/" + strings.TrimPrefix(remote, "/")
+	default: // ftpget HOST [LOCAL] REMOTE
+		if len(rest) < 2 {
+			return ""
+		}
+		if port := opts['P']; port != "" {
+			host += ":" + port
+		}
+		return "ftp://" + host + "/" + strings.TrimPrefix(rest[len(rest)-1], "/")
+	}
+}
+
 // newSessionID returns 8 random bytes as 16 hex characters.
 func newSessionID() string {
 	b := make([]byte, 8)
@@ -94,7 +187,7 @@ func runShellLine(sh *vfs.Shell, line string,
 	event := newEvent("command_exec")
 	event.PayloadDetails = &models.PayloadDetails{
 		Command:      line,
-		ExtractedURL: urlRegex.FindString(line),
+		ExtractedURL: downloadURL(line),
 	}
 	shipper.EmitEvent(event)
 
