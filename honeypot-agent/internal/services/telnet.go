@@ -42,7 +42,6 @@ const telnetGreeting = "\xff\xfd\x01\xff\xfd\x1f\xff\xfb\x01\xff\xfb\x03" + "\r\
 const (
 	telnetMaxLine       = 1024
 	telnetMaxLoginTries = 3
-	telnetMaxCommands   = 50
 	telnetMaxEmptyNames = 10 // BusyBox login gives up after 10 empty user names (EMPTY_USERNAME_COUNT)
 
 	// telnetFailDelay is BusyBox login's wait after a wrong password: bb_do_delay(LOGIN_FAIL_DELAY),
@@ -169,7 +168,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 	// no banner: Buildroot builds BusyBox's shell "quiet" (FEATURE_SH_EXTRA_QUIET), the prompt comes right away
 	sh := vfs.NewLoginShell(user) // one shell per connection (its own cwd and files)
 	var pace pacer                // commands sent all at once are answered one by one (common.go)
-	for i := 0; i < telnetMaxCommands; i++ {
+	for i := 0; i < maxSessionCommands; i++ {
 		fmt.Fprint(conn, sh.Prompt())
 		line, err := reader.readLine()
 		if err != nil {
@@ -184,6 +183,7 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			return
 		}
 	}
+	commandLimitReached("TELNET", ip)
 }
 
 // readUsername asks "gateway login: " like BusyBox login: an empty line only asks again (no

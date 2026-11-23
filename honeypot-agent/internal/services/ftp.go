@@ -21,9 +21,8 @@ import (
 
 const (
 	ftpMaxLine       = 4096 // vsftpd's VSFTP_MAX_COMMAND_LINE, the \r\n included
-	ftpMaxCommands   = 50
-	ftpMaxLoginTries = 3   // max_login_fails
-	vsftpdMaxLogin   = 128 // VSFTP_PASSWORD_MAX
+	ftpMaxLoginTries = 3    // max_login_fails
+	vsftpdMaxLogin   = 128  // VSFTP_PASSWORD_MAX
 )
 
 // ftpIdleTimeout is vsftpd's idle_session_timeout (300s); after it vsftpd says "421 Timeout."
@@ -89,7 +88,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 	reply("220 (vsFTPd 3.0.3)")
 
-	for i := 0; i < ftpMaxCommands; i++ {
+	for i := 0; i < maxSessionCommands; i++ {
 		conn.SetDeadline(time.Now().Add(ftpIdleTimeout))
 		raw, err := r.ReadSlice('\n') // a last line without \n is dropped, like vsftpd does
 		switch {
@@ -171,6 +170,7 @@ func handleFTP(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 			}
 		}
 	}
+	commandLimitReached("FTP", ip)
 }
 
 // ftpLoginOK is vsftpd's handle_login: "ftp" and "anonymous" (any case) log in with any password,

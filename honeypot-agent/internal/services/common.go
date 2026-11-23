@@ -4,10 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"log"
 	mrand "math/rand/v2" // rand is crypto/rand here (the session IDs)
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"honeypot-agent/internal/models"
@@ -71,6 +73,31 @@ type pacer struct {
 func (p *pacer) wait() {
 	time.Sleep(time.Until(p.next)) // a time already past = no wait at all
 	p.next = time.Now().Add(routerAnswerTime())
+}
+
+// maxSessionCommands is how many lines one session (Telnet, the SSH shell, FTP) may send. Real servers have
+// no such limit, but a session that trickles a line a minute would grow forever in the threat engine's
+// memory. 1000 is far above any bot script (decided 23.11). A variable only so the tests can shorten it.
+var maxSessionCommands = 1000
+
+// commandLimit counts the sessions closed at maxSessionCommands, to log them at most once per limitLogEvery.
+var commandLimit struct {
+	sync.Mutex // sessions of all services end at the same time
+	closed     int
+	lastLog    time.Time
+}
+
+// commandLimitReached is called when a session from ip reaches maxSessionCommands and is closed.
+func commandLimitReached(service, ip string) {
+	commandLimit.Lock()
+	defer commandLimit.Unlock()
+	commandLimit.closed++
+	if time.Since(commandLimit.lastLog) < limitLogEvery { // an attacker repeating it can't flood the log
+		return
+	}
+	log.Printf("%s: session from %s reached %d commands - closed (%d sessions since the last message)",
+		service, ip, maxSessionCommands, commandLimit.closed)
+	commandLimit.closed, commandLimit.lastLog = 0, time.Now()
 }
 
 // urlRegex finds download URLs in commands (wget http://..., tftp://...) for extracted_url.

@@ -1,13 +1,93 @@
 package services
 
 import (
+	"bytes"
 	"encoding/hex"
+	"fmt"
+	"io"
+	"log"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"honeypot-agent/internal/shipper"
 	"honeypot-agent/internal/vfs"
 )
+
+// Every session loop (Telnet, the SSH shell with and without a pty, FTP) ends after maxSessionCommands
+// lines (3 here, 1000 for real), and the agent logs it at most once per limitLogEvery.
+func TestSessionCommandLimit(t *testing.T) {
+	oldMax, oldDelay, oldLog := maxSessionCommands, routerDelay, log.Writer()
+	if oldMax != 1000 { // written here, like TestPacer's numbers: decided 23.11
+		t.Errorf("maxSessionCommands = %d", oldMax)
+	}
+	maxSessionCommands, routerDelay = 3, time.Millisecond
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	commandLimit.Lock()
+	commandLimit.closed, commandLimit.lastLog = 0, time.Time{}
+	commandLimit.Unlock()
+	t.Cleanup(func() { maxSessionCommands, routerDelay = oldMax, oldDelay; log.SetOutput(oldLog) })
+
+	session := func(handle func(net.Conn), send string) string { // everything the server sent until it hung up
+		addr, done := serveOne(t, handle)
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		fmt.Fprint(conn, send)
+		all, _ := io.ReadAll(conn)
+		waitDone(t, done)
+		return string(all)
+	}
+	s := shipper.NewShipper(io.Discard, "", "")
+
+	got := session(func(c net.Conn) { handleTelnet(c, "telnet-test", s) }, "root\r\nroot\r\necho 1\r\necho 2\r\necho 3\r\necho 4\r\n")
+	if !strings.Contains(got, "\r\n3\r\n") || strings.Contains(got, "\r\n4\r\n") {
+		t.Errorf("Telnet: %q", got)
+	}
+	got = session(func(c net.Conn) { handleFTP(c, "ftp-test", s) }, strings.Repeat("NOOP\r\n", 4))
+	if strings.Count(got, "530 Please login with USER and PASS.\r\n") != 3 {
+		t.Errorf("FTP: %q", got)
+	}
+	stdout, _, _, _ := sshRun(t, func(session *ssh.Session, stdin io.WriteCloser) error {
+		if err := session.Shell(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprint(stdin, "echo 1\necho 2\necho 3\necho 4\n")
+		return err
+	})
+	if stdout != "1\n2\n3\n" {
+		t.Errorf("SSH without a pty: %q", stdout)
+	}
+	stdout, _, _, _ = sshRun(t, func(session *ssh.Session, stdin io.WriteCloser) error {
+		if err := session.RequestPty("vt100", 24, 80, ssh.TerminalModes{}); err != nil {
+			return err
+		}
+		if err := session.Shell(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprint(stdin, "echo 1\recho 2\recho 3\recho 4\r")
+		return err
+	})
+	if !strings.Contains(stdout, "\r\n3\r\n") || strings.Contains(stdout, "\r\n4\r\n") {
+		t.Errorf("SSH with a pty: %q", stdout)
+	}
+
+	// 4 sessions closed within limitLogEvery: one message (the first), the other 3 counted for the next
+	if n := strings.Count(logged.String(), "reached 3 commands - closed"); n != 1 ||
+		!strings.Contains(logged.String(), "TELNET: session from 127.0.0.1 reached 3 commands - closed (1 sessions since the last message)") {
+		t.Errorf("log: %q", logged.String())
+	}
+	if commandLimit.closed != 3 {
+		t.Errorf("%d sessions counted since the message (expected 3)", commandLimit.closed)
+	}
+}
 
 // The pacer makes only a command that comes too soon wait. The numbers are written here, not taken
 // from routerDelay, so a changed constant fails the test too.

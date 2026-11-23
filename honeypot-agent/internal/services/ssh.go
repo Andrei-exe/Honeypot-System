@@ -27,7 +27,6 @@ import (
 
 const (
 	sshIdleTimeout = 60 * time.Second
-	sshMaxCommands = 50
 
 	// Dropbear's MAX_AUTH_TRIES (Buildroot's S50dropbear passes no -T): wrong passwords per connection.
 	// Rejected public keys don't count (svr-authpubkey.c).
@@ -327,7 +326,7 @@ func runSSHTerminal(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 
 	code := 0
 	var pace pacer // commands sent all at once are answered one by one (common.go)
-	for i := 0; i < sshMaxCommands; i++ {
+	for i := 0; i < maxSessionCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 
 		terminal.SetPrompt(sh.Prompt()) // the prompt changes after cd
@@ -343,6 +342,7 @@ func runSSHTerminal(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 			return code
 		}
 	}
+	commandLimitReached("SSH", remoteIP(conn))
 	return code
 }
 
@@ -355,7 +355,7 @@ func runSSHPlain(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 	reader := bufio.NewReader(channel)
 	code := 0
 	var pace pacer
-	for i := 0; i < sshMaxCommands; i++ {
+	for i := 0; i < maxSessionCommands; i++ {
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout)) // the whole line within it, like Telnet
 		line, err := readPlainLine(reader)
 		if err != nil {
@@ -369,6 +369,7 @@ func runSSHPlain(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 			return code
 		}
 	}
+	commandLimitReached("SSH", remoteIP(conn))
 	return code
 }
 
