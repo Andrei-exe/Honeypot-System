@@ -587,7 +587,7 @@ func trSet(set string) []byte {
 		"[:alnum:]": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
 		"[:punct:]": "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "[:xdigit:]": "0123456789ABCDEFabcdef",
 	}
-	set = cEscapes(set)
+	set = cEscapes(set, false)
 	var out []byte
 	for i := 0; i < len(set); i++ {
 		if strings.HasPrefix(set[i:], "[:") {

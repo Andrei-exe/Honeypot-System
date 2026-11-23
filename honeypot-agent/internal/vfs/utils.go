@@ -26,21 +26,24 @@ func printfFormat(format string, args []string) (string, string) {
 		args = args[1:]
 		return a, true
 	}
-	number := func(a string) int64 {
+	// number, like BusyBox: %d %i read it signed; %o %u %x unsigned, then signed (-1 = 2^64-1).
+	// Out of range or not a number = "invalid number" and 0.
+	number := func(a string, signed bool) (int64, uint64) {
 		t := strings.TrimSpace(a)
 		if len(t) > 1 && (t[0] == '\'' || t[0] == '"') { // 'a = the character's code
-			return int64(t[1])
+			return int64(t[1]), uint64(t[1])
+		}
+		if u, err := strconv.ParseUint(t, 0, 64); err == nil && !signed {
+			return 0, u
 		}
 		v, err := strconv.ParseInt(t, 0, 64)
-		if err != nil && t != "" {
-			if u, uerr := strconv.ParseUint(t, 0, 64); uerr == nil {
-				return int64(u)
-			}
-			if errMsg == "" {
+		if err != nil {
+			if t != "" && errMsg == "" {
 				errMsg = "invalid number '" + a + "'"
 			}
+			return 0, 0
 		}
-		return v
+		return v, uint64(v)
 	}
 	for {
 		used := len(args)
@@ -58,7 +61,7 @@ func printfFormat(format string, args []string) (string, string) {
 						j++
 					}
 				}
-				out.WriteString(cEscapes(format[i:j]))
+				out.WriteString(cEscapes(format[i:j], false))
 				i = j - 1
 				continue
 			}
@@ -84,7 +87,8 @@ func printfFormat(format string, args []string) (string, string) {
 			}
 			for strings.Contains(spec, "*") { // a width or precision from the arguments
 				a, _ := next()
-				spec = strings.Replace(spec, "*", strconv.FormatInt(number(a), 10), 1)
+				n, _ := number(a, true)
+				spec = strings.Replace(spec, "*", strconv.FormatInt(n, 10), 1)
 			}
 			spec = capWidths(spec)
 			a, _ := next()
@@ -92,17 +96,22 @@ func printfFormat(format string, args []string) (string, string) {
 			case 's':
 				fmt.Fprintf(&out, "%"+spec+"s", a)
 			case 'b':
-				text, _, _ := strings.Cut(cEscapes(a), `\c`)
+				text, stop := unescape(a)
 				fmt.Fprintf(&out, "%"+spec+"s", text)
+				if stop { // \c ends the whole printf
+					return out.String(), errMsg
+				}
 			case 'c':
 				if a != "" {
 					fmt.Fprintf(&out, "%"+spec+"s", a[:1])
 				}
 			case 'd', 'i':
-				fmt.Fprintf(&out, "%"+spec+"d", number(a))
+				n, _ := number(a, true)
+				fmt.Fprintf(&out, "%"+spec+"d", n)
 			case 'o', 'u', 'x', 'X':
 				verb := map[byte]string{'o': "o", 'u': "d", 'x': "x", 'X': "X"}[conv]
-				fmt.Fprintf(&out, "%"+spec+verb, uint64(number(a)))
+				_, u := number(a, false)
+				fmt.Fprintf(&out, "%"+spec+verb, u)
 			default:
 				f, err := strconv.ParseFloat(strings.TrimSpace(a), 64)
 				if err != nil && a != "" && errMsg == "" {

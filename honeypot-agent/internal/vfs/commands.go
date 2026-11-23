@@ -386,7 +386,10 @@ func echo(args []string) string {
 
 	text := strings.Join(args, " ")
 	if escapes {
-		text = unescape(text)
+		var stop bool
+		if text, stop = unescape(text); stop {
+			return text // \c: nothing more, not even the newline
+		}
 	}
 	if newline {
 		text += "\n"
@@ -399,9 +402,10 @@ func isEchoFlag(a string) bool {
 	return len(a) > 1 && a[0] == '-' && strings.Trim(a[1:], "neE") == ""
 }
 
-// unescape turns \n, \t, \r, \\ and \xHH into the real characters. Bots often send
-// "echo -e '\x6b\x61\x6d\x69'" and check for "kami" to tell if the shell is real.
-func unescape(s string) string {
+// unescape = the escapes of echo -e and printf %b (the same code in BusyBox): \a \b \e \f \n \r
+// \t \v \\, \xHH, \NNN and \0NNN; stop = a \c (the text ends there). Bots often send
+// "echo -e '\x6b\x61\x6d\x69'" and check for "kami".
+func unescape(s string) (text string, stop bool) {
 	var out strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' || i+1 == len(s) {
@@ -409,15 +413,11 @@ func unescape(s string) string {
 			continue
 		}
 		i++
+		if j := strings.IndexByte(`abefnrtv\`, s[i]); j >= 0 {
+			out.WriteByte("\a\b\x1b\f\n\r\t\v\\"[j])
+			continue
+		}
 		switch s[i] {
-		case 'n':
-			out.WriteByte('\n')
-		case 't':
-			out.WriteByte('\t')
-		case 'r':
-			out.WriteByte('\r')
-		case '\\':
-			out.WriteByte('\\')
 		case 'x':
 			// \x6b -> two hex digits after x -> one byte
 			if i+2 < len(s) {
@@ -428,12 +428,21 @@ func unescape(s string) string {
 				}
 			}
 			out.WriteString(`\x`)
+		case 'c':
+			return out.String(), true
+		case '0', '1', '2', '3', '4', '5', '6', '7': // \NNN, and \0NNN (the leading 0 is skipped)
+			if s[i] == '0' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+				i++
+			}
+			v, n := octalEscape(s[i:])
+			out.WriteByte(v)
+			i += n - 1
 		default:
 			out.WriteByte('\\')
 			out.WriteByte(s[i])
 		}
 	}
-	return out.String()
+	return out.String(), false
 }
 
 func (s *Shell) cat(args []string, input string) (string, int, bool) {

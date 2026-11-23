@@ -223,7 +223,7 @@ func (e *expander) dollar(raw string, i int, dq bool) int {
 	if raw[i+1] == '\'' && !dq { // $'a\tb': quoted text with C escapes
 		end, _ := partEnd(raw, i)
 		e.cur().keep = true
-		text := cEscapes(raw[i+2 : max(end-1, i+2)])
+		text := cEscapes(raw[i+2:max(end-1, i+2)], true)
 		for j := 0; j < len(text); j++ {
 			e.char(text[j], true)
 		}
@@ -263,8 +263,20 @@ func (e *expander) dollar(raw string, i int, dq bool) int {
 	return i + 1
 }
 
-// cEscapes turns the escapes of $'...' into characters: \n \t \r \a \b \e \f \v \\ \' \" \xHH \NNN.
-func cEscapes(s string) string {
+// octalEscape reads \NNN like BusyBox's bb_process_escape_sequence: max 3 octal digits, stopping
+// before the value goes over 255 (\777 = \77 + "7"). Returns the byte and the digits used.
+func octalEscape(s string) (byte, int) {
+	v, n := 0, 0
+	for n < 3 && n < len(s) && s[n] >= '0' && s[n] <= '7' && v*8+int(s[n]-'0') <= 255 {
+		v = v*8 + int(s[n]-'0')
+		n++
+	}
+	return byte(v), n
+}
+
+// cEscapes turns C escapes into characters: \n \t \r \a \b \e \f \v \\ \' \" \xHH \NNN.
+// dollar = inside $'...' (ash drops the octal digits left over).
+func cEscapes(s string, dollar bool) string {
 	var out strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' || i+1 == len(s) {
@@ -285,13 +297,12 @@ func cEscapes(s string) string {
 			v, _ := strconv.ParseUint(s[i+1:i+1+n], 16, 8)
 			out.WriteByte(byte(v))
 			i += n
-		case s[i] >= '0' && s[i] <= '7': // \NNN: one to three octal digits
-			n := 1
-			for n < 3 && i+n < len(s) && s[i+n] >= '0' && s[i+n] <= '7' {
-				n++
+		case s[i] >= '0' && s[i] <= '7': // \NNN
+			v, n := octalEscape(s[i:])
+			out.WriteByte(v)
+			for dollar && n < 3 && i+n < len(s) && s[i+n] >= '0' && s[i+n] <= '7' {
+				n++ // ash's $'...' reads 3 digits and drops the ones left over ($'\777' = "?")
 			}
-			v, _ := strconv.ParseUint(s[i:i+n], 8, 16)
-			out.WriteByte(byte(v))
 			i += n - 1
 		default:
 			out.WriteByte('\\')

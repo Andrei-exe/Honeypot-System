@@ -364,7 +364,7 @@ func (p *awkParser) primary() *awkExpr {
 		for p.pos++; p.pos < len(p.src) && p.src[p.pos] != '"'; p.pos++ {
 			if p.src[p.pos] == '\\' && p.pos+1 < len(p.src) {
 				p.pos++
-				b.WriteString(cEscapes("\\" + string(p.src[p.pos])))
+				b.WriteString(cEscapes("\\"+string(p.src[p.pos]), false))
 				continue
 			}
 			b.WriteByte(p.src[p.pos])
@@ -751,10 +751,10 @@ func (s *Shell) awk(args []string, input string) (string, int, bool) {
 				files = append(files, a)
 			}
 		case strings.HasPrefix(a, "-F"):
-			fs = cEscapes(value())
+			fs = cEscapes(value(), false)
 		case strings.HasPrefix(a, "-v"):
 			if name, v, ok := strings.Cut(value(), "="); ok {
-				vars[name] = awkStr(cEscapes(v))
+				vars[name] = awkStr(cEscapes(v, false))
 			}
 		case strings.HasPrefix(a, "-f"):
 			f := value()
