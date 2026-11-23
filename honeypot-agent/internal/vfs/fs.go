@@ -133,7 +133,7 @@ var applets = []struct {
 }{
 	{"/bin", "busybox", []string{"ash", "cat", "chmod", "cp", "date", "df", "echo", "egrep", "false", "fgrep",
 		"grep", "hostname", "kill", "login", "ls", "mkdir", "mv", "ps", "pwd", "rm", "sed", "sh", "sleep",
-		"touch", "true", "uname"}},
+		"sync", "touch", "true", "uname"}},
 	{"/sbin", "../bin/busybox", []string{"init", "klogd", "sysctl", "syslogd"}},
 	{"/usr/bin", "../../bin/busybox", []string{"[", "[[", "awk", "crontab", "cut", "env", "free", "ftpget",
 		"head", "id", "killall", "nohup", "nproc", "printf", "seq", "sort", "tail", "test", "tftp", "tr", "uniq",

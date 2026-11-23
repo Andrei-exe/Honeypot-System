@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,11 @@ func (s *Shell) applet(name string, args []string, input string) (string, int, b
 		return s.touch(args)
 	case "mkdir":
 		return s.mkdir(args)
+	case "sync": // cryptominers: "sync; echo 3 > /proc/sys/vm/drop_caches"
+		if len(args) > 0 { // Buildroot's BusyBox has no FEATURE_SYNC_FANCY: no options, no files
+			s.warn("sync: ignoring all arguments\n")
+		}
+		return "", 0, false
 	case "rm":
 		return s.rm(args)
 	case "cp":
@@ -481,25 +487,102 @@ func (s *Shell) touch(args []string) (string, int, bool) {
 	return "", 0, false
 }
 
+const mkdirUsage = " [OPTIONS] DIRECTORY...\n\nCreate DIRECTORY\n\n\t-m MODE\tMode\n\t-p\tNo error if exists; make parent directories as needed"
+
+// symbolicMode is what bb_parse_mode takes besides an octal number: u+x, go=rx, a-w,o+t...
+var symbolicMode = regexp.MustCompile(`^[ugoa]*[-+=]([rwxXst]*|[ugo])([-+=]([rwxXst]*|[ugo]))*(,[ugoa]*[-+=]([rwxXst]*|[ugo])([-+=]([rwxXst]*|[ugo]))*)*$`)
+
+// mkdir [-p] [-v] [-m MODE] DIRECTORY... like BusyBox's (coreutils/mkdir.c, libbb/make_directory.c):
+// one that exists is an error unless -p, -p makes the parents, -v tells each one made; an error doesn't
+// stop the others (exit code 1 at the end). The mode is checked, not kept (simplification).
 func (s *Shell) mkdir(args []string) (string, int, bool) {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			continue // -p
-		}
-		p := resolve(s.cwd, a)
-		if !s.isDir(path.Dir(p)) || under(p, "/proc") { // procfs makes no directories: ENOENT
-			return "mkdir: can't create directory '" + a + "': No such file or directory\n", 1, false
-		}
-		if under(p, "/sys") {
-			return "mkdir: can't create directory '" + a + "': Operation not permitted\n", 1, false
-		}
-		if s.room(p) < 0 {
-			return "mkdir: can't create directory '" + a + "': " + errNoSpace.Error() + "\n", 1, false
-		}
-		s.dirs[p] = true
-		s.mtimes[p] = now().UTC()
+	opts, dirs, complaint := getopt("mkdir", args, "m:pv", map[string]byte{"mode": 'm', "parents": 'p', "verbose": 'v'})
+	if complaint != "" {
+		return usageAfter(complaint, "mkdir", mkdirUsage)
 	}
-	return "", 0, false
+	for _, m := range opts['m'] {
+		if octal, err := strconv.ParseUint(m, 8, 32); (err != nil || octal > 07777) && !symbolicMode.MatchString(m) {
+			return "mkdir: invalid mode '" + m + "'\n", 1, false
+		}
+	}
+	if len(dirs) == 0 {
+		return usage("mkdir", mkdirUsage)
+	}
+	_, parents := opts['p']
+	_, verbose := opts['v']
+	var out strings.Builder
+	code := 0
+	for _, dir := range dirs {
+		if dir == "/" || dir == "." {
+			continue // nothing to make
+		}
+		// with -p, each part in turn ("a/", "a/b/", "a/b/c"), like make_directory: the parts that exist are fine
+		for end := 0; ; {
+			last := true
+			if parents {
+				if i := strings.IndexByte(dir[end:], '/'); i >= 0 {
+					end += i
+					for end < len(dir) && dir[end] == '/' {
+						end++
+					}
+					last = end == len(dir)
+				} else {
+					end = len(dir)
+				}
+			} else {
+				end = len(dir)
+			}
+			part := dir[:end]
+			reason := s.makeDir(part)
+			if reason == "File exists" && parents && s.isDir(resolve(s.cwd, part)) {
+				reason = "" // already there
+			} else if reason == "" && verbose {
+				out.WriteString("created directory: '" + part + "'\n")
+			}
+			if reason != "" {
+				s.warn("mkdir: can't create directory '" + part + "': " + reason + "\n")
+				code = 1
+				break
+			}
+			if last {
+				break
+			}
+		}
+	}
+	return out.String(), code, false
+}
+
+// makeDir makes one directory, whose parent must exist. Returns the kernel's reason if it can't ("" = made).
+func (s *Shell) makeDir(name string) string {
+	p := resolve(s.cwd, name)
+	_, isFile := s.readFile(p)
+	switch {
+	case name == "":
+		return "No such file or directory"
+	case isFile && strings.HasSuffix(name, "/"): // "file/"
+		return "Not a directory"
+	case isFile || s.isDir(p):
+		return "File exists"
+	}
+	if dir := path.Dir(p); !s.isDir(dir) {
+		for d := dir; d != "/"; d = path.Dir(d) {
+			if _, isFile := s.readFile(d); isFile { // a file on the way: /etc/passwd/x
+				return "Not a directory"
+			}
+		}
+		return "No such file or directory"
+	}
+	switch {
+	case under(p, "/proc"): // procfs makes no directories
+		return "No such file or directory"
+	case under(p, "/sys"):
+		return "Operation not permitted"
+	case s.room(p) < 0:
+		return errNoSpace.Error()
+	}
+	s.dirs[p] = true
+	s.mtimes[p] = now().UTC()
+	return ""
 }
 
 // rm only deletes what the attacker created; built-in files stay (simplification).

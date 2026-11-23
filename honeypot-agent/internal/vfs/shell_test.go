@@ -857,9 +857,9 @@ func TestBusyboxHelp(t *testing.T) {
 		"\t[, [[, ash, awk, cat, chmod, cp, crontab, cut, date, df, echo, egrep,\n" +
 		"\tenv, false, fgrep, free, ftpget, grep, head, hostname, id, init, kill,\n" +
 		"\tkillall, klogd, login, ls, mkdir, mv, nohup, nproc, printf, ps, pwd,\n" +
-		"\trm, sed, seq, sh, sleep, sort, sysctl, syslogd, tail, telnetd, test,\n" +
-		"\ttftp, touch, tr, true, uname, uniq, uptime, w, wc, wget, which, who,\n" +
-		"\twhoami\n"
+		"\trm, sed, seq, sh, sleep, sort, sync, sysctl, syslogd, tail, telnetd,\n" +
+		"\ttest, tftp, touch, tr, true, uname, uniq, uptime, w, wc, wget, which,\n" +
+		"\twho, whoami\n"
 	if !strings.HasSuffix(out, want) {
 		t.Errorf("applet list:\n%s\nwant:\n%s", out[strings.Index(out, "Currently"):], want)
 	}
