@@ -431,6 +431,19 @@ func envHash(name string) int {
 	return h % 39
 }
 
+// environOrder: in one bucket, ash keeps the variables in the order they were made (findvar appends).
+// First come those the shell got from its parent, in the order Dropbear sets them (USER before
+// SSH_CLIENT, both in bucket 2); those made later follow (HOME before OLDPWD), here alphabetically.
+var environOrder = []string{"USER", "LOGNAME", "HOME", "SHELL", "PATH", "TERM", "SSH_TTY", "SSH_CONNECTION", "SSH_CLIENT"}
+
+// envRank is a variable's place in its bucket: its index in environOrder, or after all of them.
+func envRank(name string) int {
+	if i := slices.Index(environOrder, name); i >= 0 {
+		return i
+	}
+	return len(environOrder)
+}
+
 // env [-i] [-u NAME] [NAME=VALUE]... [PROG ARGS]: prints the exported variables, or runs PROG with
 // those changes (in a child shell, like any program).
 func (s *Shell) env(args []string, input string, o *output) (int, bool) {
@@ -466,6 +479,9 @@ run:
 		names := slices.Collect(maps.Keys(vars))
 		slices.SortFunc(names, func(a, b string) int {
 			if d := envHash(a) - envHash(b); d != 0 {
+				return d
+			}
+			if d := envRank(a) - envRank(b); d != 0 {
 				return d
 			}
 			return strings.Compare(a, b)

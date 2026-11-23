@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"io"
 	"maps"
 	"path"
 	"strconv"
@@ -42,9 +43,11 @@ type Shell struct {
 	// "sh: cd: line 1: ..." (sh -c), "x.sh: line 3: ..." (a script).
 	arg0        string // $0: "-sh", "sh", a script's name
 	commandname string // ash's commandname: the script or "." file, or "eval"; shown after arg0 if different
-	interactive bool   // the login shell (ash's iflag): its errors have no "line N:"
+	interactive bool   // the login shell on a terminal (ash's iflag): its errors have no "line N:"
+	fromStdin   bool   // reading its commands from its input (ash's -s): the login shell, "echo cmd | sh"
 	inFile      bool   // reading a file (sh FILE, . FILE): "line N:" even in the login shell
 	lineno      int    // the line being run: $LINENO and "line N:"
+	execCommand bool   // started as sh -c COMMAND (an SSH exec): Run gets the whole command
 
 	depth       int    // how deep in sh -c / $(...) / eval / . we are
 	budget      int    // commands the current line may still run (maxCommands at each Run)
@@ -71,8 +74,34 @@ var (
 	}
 )
 
-// NewShell returns a fresh login shell that starts in /root.
+// NewShell returns a fresh login shell that starts in /root: root's, after a Telnet login.
 func NewShell() *Shell {
+	return NewLoginShell("root")
+}
+
+// NewLoginShell is the shell of a Telnet login as user ($USER, $LOGNAME; every user here has uid 0,
+// so whoami still says root). TERM comes from init through telnetd and login, which keep it: vt102,
+// what BusyBox's init sets on a serial console (init.c, console_init).
+func NewLoginShell(user string) *Shell {
+	return newShell(user, map[string]string{"TERM": "vt102"}, true)
+}
+
+// NewSSHShell is the shell Dropbear starts for an SSH session (svr-chansession.c, execchild): a clean
+// environment plus vars (SSH_CLIENT, SSH_CONNECTION; TERM and SSH_TTY with a pty). exec ("ssh host CMD")
+// = sh -c, which Run gives the whole command, without /etc/profile; else the login shell "-sh", which
+// is interactive only on a pty (ash's iflag needs a terminal).
+func NewSSHShell(user string, vars map[string]string, pty, exec bool) *Shell {
+	s := newShell(user, vars, pty && !exec)
+	if exec {
+		s.arg0, s.execCommand, s.fromStdin = "sh", true, false
+		s.vars["PS1"] = `\w \$ ` // ash's own (no /etc/profile): not exported
+		delete(s.exported, "PS1")
+	}
+	return s
+}
+
+// newShell is a login shell with the login environment, plus extra (exported).
+func newShell(user string, extra map[string]string, interactive bool) *Shell {
 	s := &Shell{
 		cwd:         "/root",
 		files:       map[string]string{},
@@ -82,10 +111,15 @@ func NewShell() *Shell {
 		exported:    map[string]bool{},
 		readonly:    map[string]bool{},
 		arg0:        "-sh",
-		interactive: true,
+		interactive: interactive,
+		fromStdin:   true,
 		work:        maxWork,
 	}
 	for name, value := range loginVars {
+		s.vars[name], s.exported[name] = value, true
+	}
+	s.vars["USER"], s.vars["LOGNAME"] = user, user
+	for name, value := range extra {
 		s.vars[name], s.exported[name] = value, true
 	}
 	maps.Copy(s.vars, ashVars)
@@ -167,16 +201,34 @@ func (o *output) add(fd int, text string) {
 // Returns what appears on screen (lines end in \n), the exit code of the last command that ran
 // (like $?: 0 = ok, 127 = not found; SSH sends it to the client) and whether the attacker typed exit.
 func (s *Shell) Run(line string) (string, int, bool) {
-	s.budget, s.work, s.raised = maxCommands, maxWork, false
-	s.lineno++ // the login shell counts the lines it read ($LINENO)
-	s.remember(line)
-	var o output
-	exit := s.run(line, &o)
 	var screen strings.Builder
-	for _, c := range o.chunks {
-		screen.WriteString(c.text)
+	code, exit := s.RunTo(line, &screen, &screen)
+	return screen.String(), code, exit
+}
+
+// RunTo is Run with the output and the errors written apart, in the order they come (an SSH session
+// without a pty sends the errors as a stream of their own). A shell that isn't interactive (SSH without
+// a pty, exec) ends at the first error that ends a line, like ash's main loop: exit is true then.
+func (s *Shell) RunTo(line string, out, errs io.Writer) (code int, exit bool) {
+	s.budget, s.work, s.raised = maxCommands, maxWork, false
+	var o output
+	if s.execCommand {
+		exit = s.runLines(line, &o) // sh -c: the whole command, counting its lines
+	} else {
+		s.lineno++ // the login shell counts the lines it read ($LINENO)
+		if s.interactive {
+			s.remember(line) // the history is line editing's: only on a terminal
+		}
+		exit = s.run(line, &o)
 	}
-	return screen.String(), s.status, exit
+	for _, c := range o.chunks {
+		if c.fd == 2 {
+			io.WriteString(errs, c.text)
+		} else {
+			io.WriteString(out, c.text)
+		}
+	}
+	return s.status, exit || s.raised && !s.interactive
 }
 
 // run executes one line in this shell, writing to o. Returns whether exit ran.

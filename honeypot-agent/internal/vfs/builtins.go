@@ -59,23 +59,24 @@ func (s *Shell) setVar(name, value string) string {
 
 // state is what a subshell changes without the parent seeing it: ( ), $(...), sh -c, sh FILE.
 type state struct {
-	cwd                 string
-	vars                map[string]string
-	exported, readonly  map[string]bool
-	params              []string
-	arg0, commandname   string
-	interactive, inFile bool
-	lineno              int
+	cwd                            string
+	vars                           map[string]string
+	exported, readonly             map[string]bool
+	params                         []string
+	arg0, commandname              string
+	interactive, fromStdin, inFile bool
+	lineno                         int
 }
 
 func (s *Shell) save() state {
 	return state{s.cwd, maps.Clone(s.vars), maps.Clone(s.exported), maps.Clone(s.readonly), s.params,
-		s.arg0, s.commandname, s.interactive, s.inFile, s.lineno}
+		s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno}
 }
 
 func (s *Shell) restore(v state) {
 	s.cwd, s.vars, s.exported, s.readonly, s.params = v.cwd, v.vars, v.exported, v.readonly, v.params
-	s.arg0, s.commandname, s.interactive, s.inFile, s.lineno = v.arg0, v.commandname, v.interactive, v.inFile, v.lineno
+	s.arg0, s.commandname, s.interactive, s.fromStdin = v.arg0, v.commandname, v.interactive, v.fromStdin
+	s.inFile, s.lineno = v.inFile, v.lineno
 }
 
 // child runs f as a subshell: what it changes in the shell is undone after, and its errors and exit
@@ -265,6 +266,7 @@ func (s *Shell) sh(args []string, input string, o *output) int {
 	s.child(o, func() {
 		s.arg0, s.commandname, s.params = name, commandname, args
 		s.interactive, s.inFile = false, !command && commandname != ""
+		s.fromStdin = !command && commandname == "" // "echo cmd | sh" reads its commands from its input
 		if command {
 			s.stdin = input // sh -c 'cat' reads what came through |
 		}

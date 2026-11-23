@@ -119,8 +119,10 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 		}
 	}
 	loggedIn := false
+	var user string
 	for try := 1; try <= telnetMaxLoginTries; try++ {
-		user, err := readUsername(conn, reader)
+		var err error
+		user, err = readUsername(conn, reader)
 		if err != nil {
 			timedOut(err)
 			return
@@ -165,8 +167,8 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 
 	// ---------- Phase 2: fake shell ----------
 	// no banner: Buildroot builds BusyBox's shell "quiet" (FEATURE_SH_EXTRA_QUIET), the prompt comes right away
-	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
-	var pace pacer       // commands sent all at once are answered one by one (common.go)
+	sh := vfs.NewLoginShell(user) // one shell per connection (its own cwd and files)
+	var pace pacer                // commands sent all at once are answered one by one (common.go)
 	for i := 0; i < telnetMaxCommands; i++ {
 		fmt.Fprint(conn, sh.Prompt())
 		line, err := reader.readLine()
@@ -175,8 +177,9 @@ func handleTelnet(conn net.Conn, nodeID string, shipper *shipper.Shipper) {
 		}
 
 		pace.wait()
-		output, _, exit := runShellLine(sh, line, newEvent, shipper)
-		fmt.Fprint(conn, toCRLF(output))
+		var screen strings.Builder // output and errors both go to the pty
+		_, exit := runShellLine(sh, line, &screen, &screen, newEvent, shipper)
+		fmt.Fprint(conn, toCRLF(screen.String()))
 		if exit {
 			return
 		}

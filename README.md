@@ -22,6 +22,7 @@ flowchart LR
 
 - **honeypot-agent:**
   - Four fake services with one consistent persona, a router called `gateway`: SSH (Dropbear), Telnet (BusyBox), FTP (vsFTPd) and HTTP (a lighttpd login page).
+  - SSH sessions start the shell the way Dropbear does: an interactive login shell when the client asks for a terminal, a shell without prompt or echo that reads commands from its input when it does not (like most bots), and `sh -c` for a single command (`ssh host CMD`). Without a terminal, errors arrive separately from the output, as they would from a real router, and the environment (`TERM`, `SSH_TTY`, `SSH_CLIENT`, `USER`) matches. These sessions were compared with the real BusyBox shell started like Dropbear starts it.
   - The web server answers malformed requests and unusual methods (`FOO`, `DELETE`, `CONNECT`, `OPTIONS`, `HTTP/2.0`, a missing `Host` header) the way lighttpd 1.4.53 does, never with Go's own error pages, and still logs them.
   - After login, attackers get a fake shell with an in-memory filesystem. It passes the checks Mirai-style bots run, so they go on to reveal their malware URL. Nothing is ever executed or downloaded.
   - The shell handles redirections like the router's BusyBox shell does: `>/dev/null 2>&1` (which bots append to almost every command), `2>&1 |`, `&>`, `<` and `>` written without spaces, with the same error messages.
@@ -85,6 +86,7 @@ All settings live in `.env`; see `.env.example` for every option. Apply changes 
 |---|---|---|
 | `AGENT_TOKEN` | empty | Shared secret between the agent and the threat engine |
 | `BIND_IP` | `127.0.0.1` | Set to `0.0.0.0` to expose the honeypot |
+| `PUBLIC_IP` | empty | The server's public IP address, shown in an SSH session's `SSH_CONNECTION` like Dropbear does; empty leaves `SSH_CONNECTION` and `SSH_CLIENT` out |
 | `FTP_PORT`, `SSH_PORT`, `TELNET_PORT`, `HTTP_PORT` | `2121`, `2222`, `2323`, `8080` | Honeypot ports on the host |
 | `DASHBOARD_PORT` | `8050` | Dashboard port, always bound to `127.0.0.1` |
 | `INCLUDE_INTERNAL` | `true` | Also alert on private IPs (needed for local testing) |
@@ -150,6 +152,7 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
 3. Clone the repository and create `.env` with:
    - a long `AGENT_TOKEN`;
    - `BIND_IP=0.0.0.0`;
+   - `PUBLIC_IP=` the server's public IP address;
    - `FTP_PORT=21`, `SSH_PORT=22`, `TELNET_PORT=23`, `HTTP_PORT=80`.
 4. Run `docker compose up -d --build`.
 5. Block outbound connections from the containers. The rules are applied now and again after every reboot or Docker restart:

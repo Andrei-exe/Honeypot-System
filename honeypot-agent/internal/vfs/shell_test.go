@@ -476,9 +476,10 @@ func TestLoginEnvironment(t *testing.T) {
 	tests := []struct{ line, want string }{
 		{"set", "HOME='/root'\nHOSTNAME='gateway'\nIFS=' \t\n'\nLINENO=''\nLOGNAME='root'\nOPTIND='1'\n" +
 			"PATH='/bin:/sbin:/usr/bin:/usr/sbin'\nPPID='356'\nPS1='\\u@\\h:\\w\\$ '\nPS2='> '\nPS4='+ '\n" +
-			"PWD='/root'\nSHELL='/bin/sh'\nSHLVL='1'\nUSER='root'\n"},
+			"PWD='/root'\nSHELL='/bin/sh'\nSHLVL='1'\nTERM='vt102'\nUSER='root'\n"},
 		{"export", "export HOME='/root'\nexport LOGNAME='root'\nexport PATH='/bin:/sbin:/usr/bin:/usr/sbin'\n" +
-			"export PS1='\\u@\\h:\\w\\$ '\nexport PWD='/root'\nexport SHELL='/bin/sh'\nexport SHLVL='1'\nexport USER='root'\n"},
+			"export PS1='\\u@\\h:\\w\\$ '\nexport PWD='/root'\nexport SHELL='/bin/sh'\nexport SHLVL='1'\n" +
+			"export TERM='vt102'\nexport USER='root'\n"}, // TERM: init's on a serial console, kept by telnetd and login
 		{"set -o", "errexit         off\nnoglob          off\nignoreeof       off\ninteractive     on\n" +
 			"monitor         on\nnoexec          off\nstdin           on\nxtrace          off\nverbose         off\n" +
 			"noclobber       off\nallexport       off\nnotify          off\nnounset         off\nvi              off\n" +
@@ -486,8 +487,9 @@ func TestLoginEnvironment(t *testing.T) {
 		{"echo $- $$ $PPID $SHLVL $LINENO", "smi 517 356 1 1\n"}, // $$ = -sh in ps
 		// env: in the order of ash's variable table (the real env -i ... gave USER SHLVL HOME OLDPWD
 		// PS1 LOGNAME TERM PATH SHELL PWD: hashvar buckets 2 5 6 6 10 15 18 21 27 33)
-		{"env", "USER=root\nSHLVL=1\nHOME=/root\nPS1=\\u@\\h:\\w\\$ \nLOGNAME=root\nPATH=/bin:/sbin:/usr/bin:/usr/sbin\n" +
+		{"env", "USER=root\nSHLVL=1\nHOME=/root\nPS1=\\u@\\h:\\w\\$ \nLOGNAME=root\nTERM=vt102\nPATH=/bin:/sbin:/usr/bin:/usr/sbin\n" +
 			"SHELL=/bin/sh\nPWD=/root\n"},
+		{"echo 'echo $-' | sh; sh -c 'echo $-'", "s\n\n"}, // sh reading its input has -s
 	}
 	for _, tt := range tests {
 		if got, _, _ := NewShell().Run(tt.line); got != tt.want {
@@ -644,6 +646,9 @@ func FuzzRun(f *testing.F) {
 		if used := varsUsed(sh); used > varsQuota {
 			t.Errorf("Run(%q): %d bytes of variables, quota %d", line, used, varsQuota)
 		}
+		// the SSH shells: sh -c with the whole input (it may hold newlines), the login shell without a pty
+		NewSSHShell("root", nil, false, true).Run(line)
+		NewSSHShell("root", nil, false, false).Run(line)
 	})
 }
 

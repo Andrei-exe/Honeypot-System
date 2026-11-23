@@ -31,6 +31,9 @@ services:
       SHIPPER_URL: ${SHIPPER_URL:-http://threat-engine:8000/api/events}
       # aceeasi parola ca la threat-engine (AGENT_TOKEN din .env)
       SHIPPER_TOKEN: ${AGENT_TOKEN:-}
+      # IP-ul public al serverului (pe VPS): apare in SSH_CONNECTION, ca la Dropbear. Gol = fara SSH_CONNECTION /
+      # SSH_CLIENT (agentul vede doar IP-ul intern al containerului, care ne-ar da de gol)
+      PUBLIC_IP: ${PUBLIC_IP:-}
       # Go nu stie singur de mem_limit. Cu asta, GC-ul strange mai des cand heap-ul se apropie
       # de 200MiB (~80% din 256m), in loc sa-l lase sa creasca pana il omoara kernelul.
       GOMEMLIMIT: 200MiB

@@ -3,6 +3,7 @@ package services
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	mrand "math/rand/v2" // rand is crypto/rand here (the session IDs)
 	"path"
 	"regexp"
@@ -173,23 +174,21 @@ func newSessionID() string {
 	return hex.EncodeToString(b)
 }
 
-// runShellLine logs the line as command_exec and runs it in the fake shell (Telnet and SSH).
-// Returns the output (lines end in \n), the exit code of the last command and whether the session should end.
-func runShellLine(sh *vfs.Shell, line string,
-	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) (string, int, bool) {
+// runShellLine logs the line as command_exec and runs it in the fake shell (Telnet and SSH), writing
+// its output to out and its errors to errs (lines end in \n). An empty line isn't logged, but the shell
+// still counts it ($LINENO). Returns the exit code ($?) and whether the shell ended.
+func runShellLine(sh *vfs.Shell, line string, out, errs io.Writer,
+	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) (int, bool) {
 
 	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", 0, false
+	if line != "" {
+		// log the whole line exactly as sent (including ; && |)
+		event := newEvent("command_exec")
+		event.PayloadDetails = &models.PayloadDetails{
+			Command:      line,
+			ExtractedURL: downloadURL(line),
+		}
+		shipper.EmitEvent(event)
 	}
-
-	// log the whole line exactly as sent (including ; && |)
-	event := newEvent("command_exec")
-	event.PayloadDetails = &models.PayloadDetails{
-		Command:      line,
-		ExtractedURL: downloadURL(line),
-	}
-	shipper.EmitEvent(event)
-
-	return sh.Run(line)
+	return sh.RunTo(line, out, errs)
 }

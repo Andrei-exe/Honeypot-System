@@ -111,7 +111,7 @@ func readServerKexInit(t *testing.T, addr string) []string {
 func TestSSHAlgorithmsLikeDropbear(t *testing.T) {
 	s := shipper.NewShipper(io.Discard, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	lists := readServerKexInit(t, addr)
 	want := []string{
@@ -149,7 +149,7 @@ func TestSSHExitCodes(t *testing.T) {
 	for _, tt := range tests {
 		s := shipper.NewShipper(io.Discard, "", "")
 		hostKey := newTestKey(t)
-		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 		client, _, err := sshDial(addr, "root")
 		if err != nil {
@@ -180,7 +180,7 @@ func TestSSHLongCommand(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, _, err := sshDial(addr, "root")
 	if err != nil {
@@ -224,7 +224,7 @@ func TestSSHLongLogin(t *testing.T) {
 		var out bytes.Buffer
 		s := shipper.NewShipper(&out, "", "")
 		hostKey := newTestKey(t)
-		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+		addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 		config := &ssh.ClientConfig{
 			User:            tt.user,
@@ -253,7 +253,7 @@ func TestSSHWaitsForClientToClose(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, _, err := sshDial(addr, "root")
 	if err != nil {
@@ -283,7 +283,7 @@ func TestSSHMaxAuthTries(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	var keys []ssh.Signer // more keys than the limit: if they counted, no password would be tried
 	for range 12 {
@@ -329,7 +329,7 @@ func TestSSHMaxAuthTries(t *testing.T) {
 func TestSSHRequestsLikeDropbear(t *testing.T) {
 	s := shipper.NewShipper(io.Discard, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, _, err := sshDial(addr, "root")
 	if err != nil {
@@ -340,22 +340,32 @@ func TestSSHRequestsLikeDropbear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pty := func(term string) []byte { // what ssh -t sends: TERM, columns, rows, pixels, terminal modes
+		return ssh.Marshal(struct {
+			Term                         string
+			Columns, Rows, Width, Height uint32
+			Modes                        string
+		}{term, 80, 24, 0, 0, "\x00"})
+	}
 	for _, tt := range []struct {
 		request string
+		payload []byte
 		want    bool
 	}{
-		{"env", false},
-		{"pty-req", true},
-		{"window-change", true},
-		{"x11-req", true},                    // ssh -X: accepted, nothing is ever forwarded
-		{"auth-agent-req@openssh.com", true}, // ssh -A: the same
-		{"break", false},
+		{"env", nil, false},
+		{"pty-req", pty(strings.Repeat("x", 201)), false}, // Dropbear's MAX_TERM_LEN is 200
+		{"pty-req", pty("xterm"), true},
+		{"window-change", nil, true},
+		{"x11-req", nil, true},                    // ssh -X: accepted, nothing is ever forwarded
+		{"auth-agent-req@openssh.com", nil, true}, // ssh -A: the same
+		{"break", nil, false},
 	} {
-		if ok, err := session.SendRequest(tt.request, true, nil); err != nil || ok != tt.want {
+		if ok, err := session.SendRequest(tt.request, true, tt.payload); err != nil || ok != tt.want {
 			t.Errorf("%s: accepted %v, %v (expected %v)", tt.request, ok, err, tt.want)
 		}
 	}
-	if output, err := session.Output("echo ok"); err != nil || string(output) != "ok\n" {
+	// a command on the pty: one stream with \r\n, TERM from the request; sh -c isn't interactive ($- empty)
+	if output, err := session.Output("echo $TERM $SSH_TTY $-"); err != nil || string(output) != "xterm /dev/pts/0\r\n" {
 		t.Errorf("exec after the requests: %q, %v", output, err)
 	}
 	client.Close()
@@ -386,7 +396,7 @@ func TestSSHWrongPassword(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, offered, err := sshDial(addr, "wrong")
 	if err == nil {
@@ -416,7 +426,7 @@ func TestSSHAuthTimeout(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	slowKeys := ssh.RetryableAuthMethod(ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
 		time.Sleep(200 * time.Millisecond)
@@ -453,7 +463,7 @@ func TestSSHShellCommandsArePaced(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, _, err := sshDial(addr, "root")
 	if err != nil {
@@ -477,7 +487,7 @@ func TestSSHShellCommandsArePaced(t *testing.T) {
 	}
 
 	start := time.Now()
-	fmt.Fprint(stdin, strings.Repeat("echo x\r", 5)+"exit\r")     // 6 lines in one write (Enter = \r)
+	fmt.Fprint(stdin, strings.Repeat("echo x\n", 5)+"exit\n")     // 6 lines in one write (no pty: \n)
 	io.ReadAll(stdout)                                            // until the shell exits
 	if took := time.Since(start); took < 5*200*time.Millisecond { // the first runs at once, then 5 waits
 		t.Errorf("6 commands sent at once took %v (expected at least 1s)", took)
@@ -489,13 +499,118 @@ func TestSSHShellCommandsArePaced(t *testing.T) {
 	}
 }
 
+// sshRun opens a session on a new connection to the honeypot (PUBLIC_IP 198.51.100.7), lets setup start it,
+// and returns what came on stdout and stderr and the exit status. The client's port goes in for "PORT".
+func sshRun(t *testing.T, setup func(*ssh.Session, io.WriteCloser) error) (stdout, stderr string, code int, port string) {
+	t.Helper()
+	s := shipper.NewShipper(io.Discard, "", "")
+	hostKey := newTestKey(t)
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "198.51.100.7", s) })
+	client, _, err := sshDial(addr, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errs bytes.Buffer
+	session.Stdout, session.Stderr = &out, &errs
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup(session, stdin); err != nil {
+		t.Fatal(err)
+	}
+	err = session.Wait()
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitStatus()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ = net.SplitHostPort(client.LocalAddr().String())
+	client.Close()
+	waitDone(t, done)
+	return out.String(), errs.String(), code, port
+}
+
+// No pty (ssh -T, bots that skip pty-req): Dropbear's login shell "-sh" reads its input, without prompt
+// or echo; the errors come apart (extended data). It ends at EOF with the last command's code, at exit,
+// or by itself at an error that ends a line (ash isn't interactive). Measured on the real ash.
+func TestSSHShellWithoutPTY(t *testing.T) {
+	for _, tt := range []struct {
+		input          string
+		eof            bool // the client closes its side after the input
+		stdout, stderr string
+		code           int
+	}{
+		{"echo $0 $- $LINENO $SSH_CONNECTION\nnosuch\n\ncd /nope\necho y\nfalse", true, // no \n at the end
+			"-sh s 1 127.0.0.1 PORT 198.51.100.7 22\ny\n",
+			"-sh: nosuch: not found\n-sh: cd: line 4: can't cd to /nope: No such file or directory\n", 1},
+		{"echo a\necho ${x?unset}\necho never\n", false, "a\n", "-sh: x: unset\n", 2},
+		{"echo a; exit 3\necho never\n", false, "a\n", "", 3},
+		{"echo $TERM$SSH_TTY. $PS1 $SSH_CLIENT; history", true, ". \\u@\\h:\\w\\$ 127.0.0.1 PORT 22\n", "", 0},
+	} {
+		stdout, stderr, code, port := sshRun(t, func(session *ssh.Session, stdin io.WriteCloser) error {
+			if err := session.Shell(); err != nil {
+				return err
+			}
+			fmt.Fprint(stdin, tt.input)
+			if tt.eof {
+				stdin.Close()
+			}
+			return nil
+		})
+		if want := strings.ReplaceAll(tt.stdout, "PORT", port); stdout != want || stderr != tt.stderr || code != tt.code {
+			t.Errorf("%q\n got: %q %q, exit %d\nwant: %q %q, exit %d", tt.input, stdout, stderr, code, want, tt.stderr, tt.code)
+		}
+	}
+}
+
+// With a pty (ssh, ssh -t): the interactive login shell, prompt and echo, one stream with \r\n,
+// TERM from the request and SSH_TTY; exit N ends it with N.
+func TestSSHShellWithPTY(t *testing.T) {
+	stdout, stderr, code, _ := sshRun(t, func(session *ssh.Session, stdin io.WriteCloser) error {
+		if err := session.RequestPty("vt100", 24, 80, ssh.TerminalModes{}); err != nil {
+			return err
+		}
+		if err := session.Shell(); err != nil {
+			return err
+		}
+		fmt.Fprint(stdin, "echo $TERM $SSH_TTY $-\rnosuch\rexit 4\r")
+		return nil
+	})
+	for _, want := range []string{"root@gateway:~# ", "vt100 /dev/pts/0 smi\r\n", "-sh: nosuch: not found\r\n"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("no %q in %q", want, stdout)
+		}
+	}
+	if stderr != "" || code != 4 {
+		t.Errorf("stderr %q, exit %d (expected none, 4)", stderr, code)
+	}
+}
+
+// exec without a pty (ssh host CMD): sh -c CMD, without /etc/profile; the errors apart, with "line N:".
+func TestSSHExecWithoutPTY(t *testing.T) {
+	stdout, stderr, code, _ := sshRun(t, func(session *ssh.Session, _ io.WriteCloser) error {
+		return session.Start("echo $0 $-; nosuch; cd /nope; echo $PS1; exit 5")
+	})
+	if stdout != "sh\n\\w \\$\n" || code != 5 ||
+		stderr != "sh: nosuch: not found\nsh: cd: line 1: can't cd to /nope: No such file or directory\n" {
+		t.Errorf("got %q %q, exit %d", stdout, stderr, code)
+	}
+}
+
 // Right password: Dropbear banner, port forwarding refused (we must never be a proxy),
 // and an exec command (ssh root@host "...") runs in the fake shell.
 func TestSSHSession(t *testing.T) {
 	var out bytes.Buffer
 	s := shipper.NewShipper(&out, "", "")
 	hostKey := newTestKey(t)
-	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", s) })
+	addr, done := serveOne(t, func(c net.Conn) { handleSSH(c, hostKey, "ssh-test", "", s) })
 
 	client, offered, err := sshDial(addr, "root")
 	if err != nil {

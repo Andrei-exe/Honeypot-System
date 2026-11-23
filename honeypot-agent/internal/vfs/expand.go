@@ -353,11 +353,14 @@ func (s *Shell) param(name string) (string, bool) {
 		return "", false // nothing ever ran in the background
 	case "#":
 		return strconv.Itoa(len(s.params)), true
-	case "-":
-		if s.interactive {
-			return "smi", true // ash's option letters for a login shell: stdin, monitor, interactive
+	case "-": // ash's option letters: s = commands from its input, m = job control, i = interactive
+		switch {
+		case s.interactive:
+			return "smi", true // the login shell on a terminal
+		case s.fromStdin:
+			return "s", true // SSH without a pty, "echo cmd | sh"
 		}
-		return "", true
+		return "", true // sh -c, sh FILE
 	case "*", "@":
 		return strings.Join(s.params, " "), len(s.params) > 0
 	case "0":

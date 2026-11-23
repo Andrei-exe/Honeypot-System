@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -37,8 +38,11 @@ const (
 
 	// Dropbear's limits (MAX_USERNAME_LEN, DROPBEAR_MAX_PASSWORD_LEN, MAX_CMD_LEN): longer is refused.
 	// They also keep events small: an SSH packet could carry ~256KB into one event.
-	dropbearMaxLogin  = 100 // username or password, in bytes
-	dropbearMaxCmdLen = 9000
+	dropbearMaxLogin   = 100 // username or password, in bytes
+	dropbearMaxCmdLen  = 9000
+	dropbearMaxTermLen = 200 // MAX_TERM_LEN: the terminal type in a pty request
+
+	sshMaxLine = 1024 // a line of a session without a pty; the rest of it is dropped (like Telnet)
 
 	// BusyBox routers run Dropbear, not OpenSSH -> same persona as Telnet.
 	sshServerVersion = "SSH-2.0-dropbear_2019.78"
@@ -82,12 +86,26 @@ func RunSSH(ctx context.Context, address string, nodeID string, shipper *shipper
 	listener = limitConnections(listener, "SSH")
 	defer listener.Close()
 
+	publicIP := sshPublicIP()
 	log.Println("SSH node running")
-	return serve(ctx, listener, func(conn net.Conn) { handleSSH(conn, hostKey, nodeID, shipper) })
+	return serve(ctx, listener, func(conn net.Conn) { handleSSH(conn, hostKey, nodeID, publicIP, shipper) })
+}
+
+// sshPublicIP is PUBLIC_IP from the environment: the router's address on the internet, which Dropbear
+// shows in SSH_CONNECTION. The agent can't see it itself (Docker translates the address), and showing the
+// container's own address would give us away: "" = SSH_CONNECTION and SSH_CLIENT are left out.
+func sshPublicIP() string {
+	ip := os.Getenv("PUBLIC_IP")
+	if ip != "" && net.ParseIP(ip) == nil {
+		log.Printf("PUBLIC_IP %q is not an IP address: SSH sessions get no SSH_CONNECTION", ip)
+		return ""
+	}
+	return ip
 }
 
 // handleSSH runs one SSH connection: handshake + login, then a single session channel.
-func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shipper.Shipper) {
+// publicIP: see sshPublicIP.
+func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID, publicIP string, shipper *shipper.Shipper) {
 	defer conn.Close()
 
 	ip, portText, err := net.SplitHostPort(conn.RemoteAddr().String())
@@ -187,6 +205,13 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 	// global requests (e.g. port forwarding) -> all rejected
 	go ssh.DiscardRequests(reqs)
 
+	// what Dropbear adds to the shell's environment (make_connection_string): who connected, and to where
+	vars := map[string]string{}
+	if publicIP != "" {
+		vars["SSH_CLIENT"] = fmt.Sprintf("%s %d 22", ip, port)
+		vars["SSH_CONNECTION"] = fmt.Sprintf("%s %d %s 22", ip, port, publicIP)
+	}
+
 	// ---------- Phase 2: session channel ----------
 	// A client can open several channels on one connection; we serve only the first "session".
 	// After it, like Dropbear, the connection stays open until the CLIENT closes it (a server that
@@ -204,26 +229,51 @@ func handleSSH(conn net.Conn, hostKey ssh.Signer, nodeID string, shipper *shippe
 			return
 		}
 		served = true
-		handleSSHSession(conn, channel, requests, newEvent, shipper)
+		handleSSHSession(conn, channel, requests, sshConn.User(), vars, newEvent, shipper)
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout))
 	}
 }
 
-// handleSSHSession waits for the client to ask for an interactive shell or a single command (exec).
-func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.Request,
-	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
+// handleSSHSession waits for the client to ask for a shell or a single command (exec), then runs it
+// the way Dropbear would (svr-chansession.c): with a pty if the client asked for one (pty-req), else
+// with plain pipes, where the errors go apart as SSH extended data. user and vars: the environment.
+func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.Request, user string,
+	vars map[string]string, newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) {
 
 	defer channel.Close()
 
+	pty := false // the client asked for a terminal
 	for req := range requests {
 		switch req.Type {
-		case "pty-req", "window-change", "x11-req", "auth-agent-req@openssh.com":
+		case "pty-req":
+			if pty {
+				conn.Close() // Dropbear: dropbear_exit("Multiple pty requests"), the whole connection ends
+				return
+			}
+			var request struct {
+				Term                         string
+				Columns, Rows, Width, Height uint32
+				Modes                        string
+			}
+			if ssh.Unmarshal(req.Payload, &request) != nil {
+				conn.Close() // Dropbear reads past the packet's end: dropbear_exit, the whole connection ends
+				return
+			}
+			if len(request.Term) > dropbearMaxTermLen {
+				req.Reply(false, nil) // sessionpty: DROPBEAR_FAILURE
+				continue
+			}
+			pty = true
+			vars["TERM"], vars["SSH_TTY"] = request.Term, "/dev/pts/0" // the first pty of the router
+			req.Reply(true, nil)
+
+		case "window-change", "x11-req", "auth-agent-req@openssh.com":
 			// what Dropbear accepts (chansessionrequest; Buildroot builds it with X11 and agent
 			// forwarding). Nothing is ever forwarded: we never open a channel toward the client.
 			req.Reply(true, nil)
 
 		case "exec":
-			// ssh root@host "uname -a" -> one command, no prompt
+			// ssh root@host "uname -a": Dropbear runs sh -c "uname -a", no prompt
 			var payload struct{ Command string }
 			ssh.Unmarshal(req.Payload, &payload)
 			if len(payload.Command) > dropbearMaxCmdLen {
@@ -233,18 +283,29 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			// no terminal: output goes straight to the channel with plain \n
-			output, code, _ := runShellLine(vfs.NewShell(), payload.Command, newEvent, shipper)
-			fmt.Fprint(channel, output)
+			sh := vfs.NewSSHShell(user, vars, pty, true)
+			code := 0
+			if pty { // ssh -t: one stream, and the pty turns \n into \r\n
+				var screen strings.Builder
+				code, _ = runShellLine(sh, payload.Command, &screen, &screen, newEvent, shipper)
+				fmt.Fprint(channel, toCRLF(screen.String()))
+			} else {
+				code, _ = runShellLine(sh, payload.Command, channel, channel.Stderr(), newEvent, shipper)
+			}
 			endCommand(channel, code) // e.g. 127 for a command that doesn't exist
 			return
 
 		case "shell":
-			// ssh root@host -> interactive prompt
+			// ssh root@host: the login shell "-sh"
 			req.Reply(true, nil)
 			go ssh.DiscardRequests(requests)
 
-			endCommand(channel, runSSHShell(conn, channel, newEvent, shipper))
+			sh := vfs.NewSSHShell(user, vars, pty, false) // one shell per connection (its own cwd and files)
+			if pty {
+				endCommand(channel, runSSHTerminal(conn, channel, sh, newEvent, shipper))
+			} else {
+				endCommand(channel, runSSHPlain(conn, channel, sh, newEvent, shipper))
+			}
 			return
 
 		default:
@@ -254,12 +315,10 @@ func handleSSHSession(conn net.Conn, channel ssh.Channel, requests <-chan *ssh.R
 	}
 }
 
-// runSSHShell is the fake shell loop, almost the same as Phase 2 in telnet.go.
+// runSSHTerminal is the login shell on a pty: prompt and echo, almost the same as Phase 2 in telnet.go.
 // Returns the exit code of the last command, which a real shell also exits with.
-func runSSHShell(conn net.Conn, channel ssh.Channel,
+func runSSHTerminal(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) int {
-
-	sh := vfs.NewShell() // one shell per connection (its own cwd and files)
 
 	// term.Terminal handles echo, backspace and arrow keys (with a pty the client doesn't
 	// echo what it types, the server must send it back). It also turns \n into \r\n.
@@ -277,16 +336,58 @@ func runSSHShell(conn net.Conn, channel ssh.Channel,
 		}
 
 		pace.wait()
-		output, c, exit := runShellLine(sh, line, newEvent, shipper)
-		fmt.Fprint(terminal, output)
+		exit := false
+		code, exit = runShellLine(sh, line, terminal, terminal, newEvent, shipper)
 		if exit {
-			return code // "exit" itself doesn't count: the shell exits with the previous command's code
-		}
-		if strings.TrimSpace(line) != "" {
-			code = c
+			return code
 		}
 	}
 	return code
+}
+
+// runSSHPlain is the login shell without a pty (ssh -T, scripts, bots that skip pty-req): ash reads its
+// lines from its input, no prompt, no echo, plain \n, the errors apart. It ends at EOF (the client closed
+// its side) with the last command's code, at exit, or at the first error that ends a line (code 2).
+func runSSHPlain(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
+	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) int {
+
+	reader := bufio.NewReader(channel)
+	code := 0
+	var pace pacer
+	for i := 0; i < sshMaxCommands; i++ {
+		conn.SetDeadline(time.Now().Add(sshIdleTimeout)) // the whole line within it, like Telnet
+		line, err := readPlainLine(reader)
+		if err != nil {
+			return code
+		}
+
+		pace.wait()
+		exit := false
+		code, exit = runShellLine(sh, line, channel, channel.Stderr(), newEvent, shipper)
+		if exit {
+			return code
+		}
+	}
+	return code
+}
+
+// readPlainLine reads one line of a session without a pty, without its \n; bytes past sshMaxLine are
+// dropped. A last line without \n still counts: ash runs it at EOF.
+func readPlainLine(r *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		b, err := r.ReadByte()
+		switch {
+		case err != nil && len(line) > 0:
+			return string(line), nil // the next call gets the error
+		case err != nil:
+			return "", err
+		case b == '\n':
+			return string(line), nil
+		case len(line) < sshMaxLine:
+			line = append(line, b)
+		}
+	}
 }
 
 // endCommand ends the command or shell in Dropbear's order (check_close in common-channel.c): EOF,

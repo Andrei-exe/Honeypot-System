@@ -209,10 +209,14 @@ func TestTelnetLikeBusyBox(t *testing.T) {
 		t.Errorf("a wrong password was answered after %v (BusyBox: 3s)", took)
 	}
 
-	fmt.Fprint(conn, "root\r\n")
+	fmt.Fprint(conn, "admin\r\n") // uid 0 too: the prompt says root, $USER who logged in
 	readUntil(t, r, "Password: ")
-	fmt.Fprint(conn, "root\r\n")
+	fmt.Fprint(conn, "admin\r\n")
 	readUntil(t, r, "root@gateway:~# ")
+	fmt.Fprint(conn, "echo $USER $LOGNAME $TERM\r\n") // TERM: init's, through telnetd and login
+	if got := readUntil(t, r, "root@gateway:~# "); got != "echo $USER $LOGNAME $TERM\r\nadmin admin vt102\r\nroot@gateway:~# " {
+		t.Errorf("login environment: %q", got)
+	}
 	fmt.Fprint(conn, "idx\x7f\r\n") // a typo, deleted with backspace
 	want = "idx\b \b\r\nuid=0(root) gid=0(root) groups=0(root)\r\nroot@gateway:~# "
 	if got := readUntil(t, r, "root@gateway:~# "); got != want {
@@ -231,7 +235,7 @@ func TestTelnetLikeBusyBox(t *testing.T) {
 	if logins := ofType(events, "login_attempt"); len(logins) != 2 || logins[0].Credentials.Password != "secret" {
 		t.Errorf("login_attempt events: %+v", logins)
 	}
-	if commands := ofType(events, "command_exec"); len(commands) < 1 || commands[0].PayloadDetails.Command != "id" {
+	if commands := ofType(events, "command_exec"); len(commands) < 2 || commands[1].PayloadDetails.Command != "id" {
 		t.Errorf("command_exec events: %+v", commands)
 	}
 }
