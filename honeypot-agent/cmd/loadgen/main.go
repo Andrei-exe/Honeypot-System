@@ -24,6 +24,7 @@ import (
 var (
 	host = flag.String("host", "honeypot-agent", "agent host name")
 	mode = flag.String("mode", "hold", "hold = keep -n logged-in sessions open on every service; "+
+		"fill = like hold, but every SSH and Telnet session fills its fake disk and variables (the most RAM); "+
 		"brute = -n parallel SSH brute-force loops (full handshake + wrong password); "+
 		"http = -n parallel loops of varied web attacks (logins, scanners, exploits)")
 	n       = flag.Int("n", 10, "sessions per service (hold) or parallel loops (brute, http)")
@@ -53,14 +54,20 @@ func main() {
 		return
 	}
 
+	commands := []string{"uname -a; cat /proc/cpuinfo; ls -la /"} // what a shell session runs (hold)
+	if *mode == "fill" {
+		commands = fillCommands()
+	}
+	telnetLines := []string{"root\r\n", "root\r\n"}
+	for _, command := range commands {
+		telnetLines = append(telnetLines, command+"\r\n")
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < *n; i++ {
 		wg.Add(4)
-		go func() { defer wg.Done(); holdSSH(duration) }()
-		go func() {
-			defer wg.Done()
-			holdTCP("telnet", "2323", duration, "root\r\n", "root\r\n", "uname -a; ls /\r\n")
-		}()
+		go func() { defer wg.Done(); holdSSH(duration, commands) }()
+		go func() { defer wg.Done(); holdTCP("telnet", "2323", duration, telnetLines...) }()
 		go func() { defer wg.Done(); holdTCP("ftp", "2121", duration, "USER root\r\n", "PASS root\r\n") }()
 		go func() {
 			defer wg.Done()
@@ -74,7 +81,20 @@ func main() {
 		r := results[name]
 		parts = append(parts, fmt.Sprintf("%s ok=%d closed=%d failed=%d", name, r.ok.Load(), r.closed.Load(), r.failed.Load()))
 	}
-	fmt.Printf("hold %s: %s\n", duration, strings.Join(parts, " | "))
+	fmt.Printf("%s %s: %s\n", *mode, duration, strings.Join(parts, " | "))
+}
+
+// fillCommands fill one session's fake disk (256KB quota) and variables (64KB) a bit past their limits:
+// the most RAM a shell session can take. "seq 1 3000" prints 13893 bytes, under the 16KB file limit.
+func fillCommands() []string {
+	var commands []string
+	for i := range 20 { // 20 x 14KB = 278KB: the last writes fail with "No space left on device"
+		commands = append(commands, fmt.Sprintf("seq 1 3000 > /tmp/f%02d", i))
+	}
+	for i := range 5 { // 5 x 14KB = 70KB of variables
+		commands = append(commands, fmt.Sprintf("v%d=$(seq 1 3000)", i))
+	}
+	return commands
 }
 
 // holdTCP connects to a text service, sends each line after reading the server's answer,
@@ -131,9 +151,9 @@ func holdTCP(name, port string, d time.Duration, lines ...string) {
 	}
 }
 
-// holdSSH logs in over SSH, starts a shell with a few commands, keeps the session for d,
+// holdSSH logs in over SSH, starts a shell with the commands, keeps the session for d,
 // then checks whether it is still open.
-func holdSSH(d time.Duration) {
+func holdSSH(d time.Duration, commands []string) {
 	r := results["ssh"]
 	client, err := ssh.Dial("tcp", net.JoinHostPort(*host, "2222"), sshConfig("root"))
 	if err != nil {
@@ -160,7 +180,7 @@ func holdSSH(d time.Duration) {
 		r.failed.Add(1)
 		return
 	}
-	stdin.Write([]byte("uname -a; cat /proc/cpuinfo; ls -la /\n"))
+	stdin.Write([]byte(strings.Join(commands, "\n") + "\n"))
 
 	time.Sleep(d)
 	// A request the server answers only if the connection is still alive.

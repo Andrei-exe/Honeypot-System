@@ -200,12 +200,12 @@ Choose what it does with environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LOADGEN_MODE` | `hold` | `hold` logs in on every service and keeps the sessions open; `brute` runs SSH logins with a wrong password in a loop; `http` sends a mix of web attacks in a loop |
+| `LOADGEN_MODE` | `hold` | `hold` logs in on every service and keeps the sessions open; `fill` does the same, but every SSH and Telnet session also fills its fake disk and variables to their limits (the most memory the agent can need); `brute` runs SSH logins with a wrong password in a loop; `http` sends a mix of web attacks in a loop |
 | `LOADGEN_SECONDS` | `25` | How long to hold the sessions or run the loops |
 
 For example, `LOADGEN_MODE=http docker compose up --scale loadgen=20 loadgen` on Linux or macOS. On Windows, set the variable first: `set LOADGEN_MODE=http` (cmd) or `$env:LOADGEN_MODE="http"` (PowerShell).
 
-Each copy prints one line. In `hold` mode, for example `hold 25s: ssh ok=10 closed=0 failed=0 | telnet ok=10 closed=0 failed=0 | ...`:
+Each copy prints one line. In `hold` and `fill` mode, for example `hold 25s: ssh ok=10 closed=0 failed=0 | telnet ok=10 closed=0 failed=0 | ...`:
 
 - `ok`: the session stayed open until the end;
 - `closed`: the agent closed it early (a timeout);

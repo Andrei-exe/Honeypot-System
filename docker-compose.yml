@@ -167,7 +167,8 @@ services:
     build:
       context: ./honeypot-agent
       dockerfile: cmd/loadgen/Dockerfile
-    # hold = tine sesiuni deschise; brute = logari SSH gresite in bucla;
+    # hold = tine sesiuni deschise; fill = la fel, dar umple "discul" si variabilele fiecarui shell (RAM maxim);
+    # brute = logari SSH gresite in bucla;
     # http = atacuri web variate in bucla (logari, scannere, exploit-uri) (vezi README "Load testing")
     command: ["-mode", "${LOADGEN_MODE:-hold}", "-seconds", "${LOADGEN_SECONDS:-25}"]
     networks:
