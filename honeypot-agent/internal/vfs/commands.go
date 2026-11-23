@@ -149,13 +149,19 @@ func (s *Shell) applet(name string, args []string, input string) (string, int, b
 	case "date":
 		return date(args)
 	case "sleep":
-		return sleep(args)
+		out, code, exit := sleep(args)
+		for _, a := range args {
+			if n, _ := strconv.ParseFloat(strings.TrimRight(a, "smhd"), 64); code == 0 && n > 0 {
+				s.stopJob() // a job sleeping: it goes on later, for us never
+			}
+		}
+		return out, code, exit
 	case "w":
 		return wHeader, 0, false
 	case "who":
 		return "", 0, false
 
-	case "sh", "ash", "chmod", "mv", "kill", "killall", "ulimit", "true", "syslogd", "klogd":
+	case "sh", "ash", "chmod", "mv", "kill", "killall", "ulimit", "true", "syslogd", "klogd": // (kill: the applet)
 		// commands that print nothing on success on a real system (the daemons go to the background;
 		// "sh" alone would start a new shell, see sh in builtins.go)
 		return "", 0, false
@@ -198,6 +204,7 @@ func (s *Shell) applet(name string, args []string, input string) (string, int, b
 	case strings.HasPrefix(content, "#!"):
 		return s.errorf("", name+": not found"), 127, false // its interpreter (#!/bin/bash) doesn't exist
 	}
+	s.stopJob()         // in a job ("./xmrig &"): it runs for ever
 	return "", 0, false // a program the attacker wrote: it "runs" silently (malware goes to the background)
 }
 

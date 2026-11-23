@@ -27,6 +27,7 @@ const (
 	nFor             // for name in words; do body; done
 	nCase            // case words[0] in cases esac
 	nFunc            // name() body: defines a function
+	nBackgnd         // body &: runs as a job in the background (jobs.go)
 )
 
 // node is one command of the tree, like ash's union node: only the fields of its kind are used.
@@ -37,7 +38,7 @@ type node struct {
 	redirs []redir  // nCmd and the compound commands, in the order written
 	name   string   // nFor: the loop's variable; nFunc: the function's name
 
-	test, body, orElse *node   // nIf, nWhile, nUntil; body also for nNot, nSubshell, nBrace, nFor, nFunc
+	test, body, orElse *node   // nIf, nWhile, nUntil; body also for nNot, nSubshell, nBrace, nFor, nFunc, nBackgnd
 	list               []*node // nList, nAndOr, nPipe
 	ops                []int   // nAndOr
 	cases              []caseItem
@@ -204,7 +205,10 @@ func (p *parser) list(nlflag int) *node {
 		if n == nil {
 			n = &node{kind: nList}
 		}
-		n.list = append(n.list, c) // "&" would run it in the background: here it runs like ";"
+		if t == tBackgnd {
+			c = &node{kind: nBackgnd, line: c.line, body: c}
+		}
+		n.list = append(n.list, c)
 		switch t {
 		case tNL, tEOF:
 			p.pushback = true

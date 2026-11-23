@@ -82,6 +82,12 @@ type Shell struct {
 
 	started time.Time // when the session's shell started (its /proc/517)
 	argv    []string  // the command running now, as typed: what /proc/self (530) shows; nil = none
+
+	jobs         []*job // the background jobs (jobs.go), oldest first; a subshell has none
+	bgPID        int    // $!: the last job's PID (0: none yet)
+	lastPID      int    // the last PID a job got
+	inBackground bool   // running a job: a sleep, the attacker's program or the budget stop it (stopJob)
+	frozen       bool   // the job stopped there: it runs on "for ever"; every level stops (stopped)
 }
 
 // The variables a login shell starts with: what BusyBox login sets (HOME, SHELL, USER, LOGNAME, PATH;
@@ -141,6 +147,7 @@ func newShell(user string, extra map[string]string, interactive bool) *Shell {
 		fromStdin:   true,
 		work:        maxWork,
 		started:     now().UTC(),
+		lastPID:     530, // ps's own
 	}
 	for name, value := range loginVars {
 		s.vars[name], s.exported[name] = value, true
@@ -250,6 +257,9 @@ func (s *Shell) RunTo(line string, out, errs io.Writer) (code int, exit bool) {
 		}
 		more := len(code) <= maxPending // past it: the error ash would give at the end of its input
 		_, s.pending, s.pendingLine = s.runInput(code, first, more, &o)
+		if s.interactive && s.pending == "" {
+			s.reportJobs(&o) // before the next prompt: the jobs that ended
+		}
 	}
 	return s.status, s.finish(&o, out, errs)
 }
@@ -292,7 +302,9 @@ func (s *Shell) finish(o *output, out, errs io.Writer) (exit bool) {
 func (s *Shell) simple(n *node, o *output) {
 	s.lineno = s.lineOf(n)
 	if s.budget--; s.budget <= 0 {
-		s.raise(o, "", "can't fork: Resource temporarily unavailable")
+		if !s.stopJob() { // a job just goes on running, quietly
+			s.raise(o, "", "can't fork: Resource temporarily unavailable")
+		}
 		return
 	}
 	s.substStatus = 0

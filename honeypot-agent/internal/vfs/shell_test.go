@@ -557,6 +557,12 @@ func TestShellLimits(t *testing.T) {
 		{"f() { f | f; }; f", "can't fork"},
 		{"for i in 1 2 3 4 5 6 7 8 9; do for j in $(seq 1 99); do for k in $(seq 1 99); do :; done; done; done", "can't fork"},
 		{"X=" + strings.Repeat("0", 16000) + "; for i in 1 2 3; do case $X in " + strings.Repeat("*1", 300) + ") ;; esac; done; echo end", "end\n"},
+		// background jobs (jobs.go): each one stops after maxBackground commands, a shell keeps maxJobs
+		{"while :; do : & done; echo never", "-sh: can't fork: Resource temporarily unavailable\n"},
+		{"while :; do (while :; do :; done &); done", "can't fork"}, // a subshell's jobs aren't counted: the budget
+		{"f() { f & f; }; f", "can't fork"},
+		{"f() { f & f & }; f; echo $!", "can't fork"},
+		{"while :; do while :; do :; done & done", "can't fork"},
 		// functions live in the agent's RAM like the variables: past varsQuota, "out of memory"
 		{"i=0; while :; do i=$((i+1)); eval \"f$i() { echo " + strings.Repeat("x", 500) + "; }\"; done", "-sh: eval: out of memory\n"},
 	}
@@ -667,6 +673,9 @@ func FuzzRun(f *testing.F) {
 		`wget -qnv --out=x -T 5 --no -U a 'http://u@[::1]:80/a?b' ftp://h:0/ 1.2.3.4:x; tftp -g -r a/b -l - -b 512 gateway 69`,
 		`ftpget -v -P 21 -u a -p b localhost x y; uname -snrvmpio --mach --k -a; hostname -F /etc/hosts; hostname -fids`,
 		`sysctl -w a.b..c=0x1f vm.swappiness=-0 -n -e -q; sysctl -p /etc/hosts; sysctl -a; echo 010 > /proc/sys/kernel/pid_max`,
+		// background jobs: stopped at sleep, reports, jobs / wait / fg / bg / kill
+		`while :; do ./x; sleep 60; done & a | b & { c; sleep 1; } & jobs -lp; wait %1 $!; kill -9 %- %+ 99; fg %2; bg`,
+		`f() { f & f; }; (f &) & X=1 echo "$a" 'b' \c ${d:-e} >f 2>&1 & echo $!; sleep 0 & wait; jobs`,
 		// the processes in /proc: links on the way, self, writes
 		`for p in /proc/[0-9]*; do cat $p/cmdline $p/stat; done; cd /proc/self/; ls -la . ..; cat ../1/root/proc/self/status`,
 		`echo -1 > /proc/self/oom_score_adj; ls -lL /proc/self/exe /proc/self/; /proc/1/exe; cat /proc/530/environ < /proc/self/comm`,

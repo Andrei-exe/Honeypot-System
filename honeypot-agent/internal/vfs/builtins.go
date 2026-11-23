@@ -69,17 +69,20 @@ type state struct {
 	lineno                         int
 	stdin                          string
 	tty                            bool
+	jobs                           []*job
+	bgPID                          int
 }
 
 func (s *Shell) save() state {
 	return state{s.cwd, maps.Clone(s.vars), maps.Clone(s.exported), maps.Clone(s.readonly), s.params,
-		maps.Clone(s.funcs), s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno, s.stdin, s.tty}
+		maps.Clone(s.funcs), s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno, s.stdin, s.tty,
+		s.jobs, s.bgPID}
 }
 
 func (s *Shell) restore(v state) {
 	s.cwd, s.vars, s.exported, s.readonly, s.params = v.cwd, v.vars, v.exported, v.readonly, v.params
 	s.funcs, s.arg0, s.commandname, s.interactive, s.fromStdin = v.funcs, v.arg0, v.commandname, v.interactive, v.fromStdin
-	s.inFile, s.lineno, s.stdin, s.tty = v.inFile, v.lineno, v.stdin, v.tty
+	s.inFile, s.lineno, s.stdin, s.tty, s.jobs, s.bgPID = v.inFile, v.lineno, v.stdin, v.tty, v.jobs, v.bgPID
 }
 
 // child runs f as a subshell: what it changes in the shell is undone after, and its errors, exit,
@@ -91,6 +94,7 @@ func (s *Shell) child(o *output, f func()) {
 	}
 	saved := s.save()
 	s.depth++
+	s.jobs = nil // a forked shell has no jobs of its own (ash's forkchild frees them)
 	f()
 	s.depth--
 	s.restore(saved)
@@ -133,7 +137,7 @@ var builtins = map[string]bool{
 	"false": true, "kill": true, "pwd": true, "readonly": true, "set": true, "shift": true, "source": true,
 	"true": true, "ulimit": true, "unset": true, "break": true, "continue": true, "return": true, "local": true,
 	"[": true, "[[": true, "command": true, "help": true, "history": true, "printf": true, "read": true,
-	"test": true, "type": true,
+	"test": true, "type": true, "jobs": true, "wait": true, "fg": true, "bg": true,
 }
 
 // dispatch runs one expanded command, writing to o. A regular command's text goes to 1, or to 2 if it
@@ -167,6 +171,16 @@ func (s *Shell) dispatch(args []string, input string, o *output) (int, bool) {
 		return s.shift(args[1:], o), false
 	case "command":
 		return s.commandBuiltin(args[1:], input, o)
+	case "jobs":
+		return s.jobsBuiltin(args[1:], o), false
+	case "wait":
+		return s.wait(args[1:], o), false
+	case "fg", "bg":
+		return s.fgBg(name, args[1:], o), false
+	case "kill":
+		if name == args[0] { // the builtin, which knows the jobs (/bin/kill is the applet)
+			return s.kill(args[1:], o), false
+		}
 	case "env":
 		if strings.Contains(args[0], "/") || s.inPath(name) {
 			return s.env(args[1:], input, o)

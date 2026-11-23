@@ -30,9 +30,9 @@ func (s *Shell) crash() {
 }
 
 // stopped: nothing more may run now: an error that ends the line (or the commands budget is used
-// up), or a break / continue / return / exit on its way up.
+// up), a break / continue / return / exit on its way up, or a background job that goes on running.
 func (s *Shell) stopped() bool {
-	return s.raised || s.skip != 0
+	return s.raised || s.skip != 0 || s.frozen
 }
 
 // runCode runs shell code: one complete command at a time, each parsed and run before the next one is
@@ -107,6 +107,8 @@ func (s *Shell) eval(n *node, o *output) int {
 		s.pipe(n, o)
 	case nFunc:
 		s.define(n, o)
+	case nBackgnd:
+		s.background(n, o)
 	default: // a compound command: its redirections apply to everything it runs
 		if s.nesting >= maxNesting {
 			s.crash()
@@ -167,14 +169,14 @@ func (s *Shell) compound(n *node, o *output) int {
 			if skip == skipFunc {
 				code = test
 			}
-			if skip == 0 && !s.raised {
+			if skip == 0 && !s.raised && !s.frozen {
 				if (test == 0) != (n.kind == nWhile) {
 					break
 				}
 				code = s.eval(n.body, o)
 				skip = s.skipLoop()
 			}
-			if skip&^skipCont != 0 || s.raised {
+			if skip&^skipCont != 0 || s.raised || s.frozen { // (frozen: a job running on, see stopJob)
 				break
 			}
 		}
@@ -186,7 +188,7 @@ func (s *Shell) compound(n *node, o *output) int {
 		code := 0
 		s.loops++
 		for _, w := range words {
-			if s.raised {
+			if s.raised || s.frozen {
 				break
 			}
 			if msg := s.setVar(n.name, w); msg != "" {

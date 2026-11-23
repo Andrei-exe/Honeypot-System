@@ -353,7 +353,10 @@ func (s *Shell) param(name string) (string, bool) {
 	case "$":
 		return shellPID, true
 	case "!":
-		return "", false // nothing ever ran in the background
+		if s.bgPID == 0 {
+			return "", false // no job yet
+		}
+		return strconv.Itoa(s.bgPID), true // the last background job's PID
 	case "#":
 		return strconv.Itoa(len(s.params)), true
 	case "-": // ash's option letters: s = commands from its input, m = job control, i = interactive
