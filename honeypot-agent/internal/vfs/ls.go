@@ -27,40 +27,62 @@ var specialModes = map[string]string{
 
 // lsFlags are the options we understand; the others are ignored.
 type lsFlags struct {
-	long       bool // -l: one line per entry, with mode, size and date
-	all        bool // -a: hidden files too, plus . and ..
-	almostAll  bool // -A: hidden files too, without . and ..
-	onePerLine bool // -1
-	dirItself  bool // -d: the directory itself, not what is inside it
+	long      bool // -l: one line per entry, with mode, size and date
+	all       bool // -a: hidden files too, plus . and ..
+	almostAll bool // -A: hidden files too, without . and ..
+	dirItself bool // -d: the directory itself, not what is inside it
+	// how the names are laid out without -l: '1' one per line, 'C' in columns, 'x' in columns filled
+	// row by row; 0 = not chosen: columns on a terminal, else one per line (ls.c: isatty)
+	format byte
+	color  bool // each name in its type's color (on a terminal, unless LS_COLORS or --color say no)
 }
 
 // lsEntry is one name ls shows and the path it stands for.
 type lsEntry struct{ name, path string }
 
 func (s *Shell) ls(args []string) (string, int, bool) {
-	var f lsFlags
+	f := lsFlags{color: s.tty && s.lsColors()}
 	var targets []string
 	for _, a := range args {
 		switch {
+		case strings.HasPrefix(a, "--color"): // --color[=WHEN]: always (the default) / never / auto
+			when := strings.TrimPrefix(a, "--color")
+			when = strings.TrimPrefix(when, "=")
+			switch {
+			case strings.HasPrefix(when, "n"): // never, no, none
+				f.color = false
+			case when == "" || prefixOf(when, "always", "yes", "force"):
+				f.color = true
+			case prefixOf(when, "auto", "tty", "if-tty"):
+				f.color = s.tty
+			}
 		case strings.HasPrefix(a, "--"):
-			// long options (--color=auto) change nothing here
+			// the other long options (--full-time...) change nothing here
 		case len(a) > 1 && a[0] == '-':
-			for _, c := range a[1:] { // -la = -l -a
+			for _, c := range a[1:] { // -la = -l -a; of -C -x -l -1, the later ones win (ls.c's opt_complementary)
 				switch c {
-				case 'l':
+				case 'l': // (the layout doesn't matter then, until a later -C / -x)
 					f.long = true
+				case 'C', 'x':
+					f.long, f.format = false, byte(c)
+				case '1':
+					f.format = '1'
 				case 'a':
 					f.all = true
 				case 'A':
 					f.almostAll = true
-				case '1':
-					f.onePerLine = true
 				case 'd':
 					f.dirItself = true
 				}
 			}
 		default:
 			targets = append(targets, a)
+		}
+	}
+	if f.format == 0 {
+		f.format = '1'
+		if s.tty {
+			f.format = 'C'
 		}
 	}
 	if len(targets) == 0 {
@@ -95,9 +117,80 @@ func (s *Shell) ls(args []string) (string, int, bool) {
 			}
 			out.WriteString(t + ":\n")
 		}
-		out.WriteString(s.lsShow(s.lsDir(resolve(s.cwd, t), f), f))
+		entries := s.lsDir(resolve(s.cwd, t), f)
+		if f.long { // BusyBox with DESKTOP: the blocks the directory's entries take, in KB
+			blocks := 1
+			for _, e := range entries {
+				blocks += s.blocks(e.path)
+			}
+			out.WriteString("total " + strconv.Itoa(blocks/2) + "\n")
+		}
+		out.WriteString(s.lsShow(entries, f))
 	}
 	return out.String(), code, false
+}
+
+// prefixOf: word is the start of one of the names ("--color=alw" = always), like index_in_substrings.
+func prefixOf(word string, names ...string) bool {
+	for _, n := range names {
+		if strings.HasPrefix(n, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// lsColors: whether LS_COLORS lets ls color its names (unset, or set to something but "none").
+func (s *Shell) lsColors() bool {
+	v, set := s.vars["LS_COLORS"]
+	return !set || !s.exported["LS_COLORS"] || v != "" && v != "none"
+}
+
+// blocks is what p takes on its tmpfs, in 512-byte blocks (st_blocks): whole 4KB pages of its content;
+// directories, links, devices and /proc files take none.
+func (s *Shell) blocks(p string) int {
+	mode, _, size, _ := s.stat(p)
+	n, err := strconv.Atoi(size)
+	if mode[0] != '-' || err != nil || under(p, "/proc") {
+		return 0
+	}
+	return (n + 4095) / 4096 * 8
+}
+
+// paint puts a name in the color BusyBox ls gives its mode (ls.c: bold / fgcolor; "" = unknown, red):
+// directories blue, links cyan, programs green, devices and sockets magenta, files plain.
+func paint(name, mode string) string {
+	color := "1;31" // stat failed: a link to nothing
+	if mode != "" {
+		switch mode[0] {
+		case 'd':
+			color = "1;34"
+		case 'l':
+			color = "1;36"
+		case 'c', 'b', 's':
+			color = "1;35"
+		case 'p':
+			color = "0;35"
+		default:
+			color = "0;0"
+			if strings.ContainsAny(mode[3:4]+mode[6:7]+mode[9:10], "xst") { // executable by someone
+				color = "1;32"
+			}
+		}
+	}
+	return "\x1b[" + color + "m" + name + "\x1b[m"
+}
+
+// followedMode is the mode of what p is, following its links; "" if they lead nowhere.
+func (s *Shell) followedMode(p string) string {
+	for i := 0; i < 8 && fakeLinks[p] != ""; i++ {
+		p = resolve(path.Dir(p), fakeLinks[p])
+	}
+	if !s.exists(p) {
+		return ""
+	}
+	mode, _, _, _ := s.stat(p)
+	return mode
 }
 
 // lsDir returns the entries of a directory that ls shows: hidden ones (.x) only with -a or -A.
@@ -123,24 +216,30 @@ func (s *Shell) lsShow(entries []lsEntry, f lsFlags) string {
 	if f.long {
 		var out strings.Builder
 		for _, e := range entries {
-			out.WriteString(s.longLine(e))
+			out.WriteString(s.longLine(e, f.color))
 		}
 		return out.String()
 	}
 
 	names := make([]string, len(entries))
+	shown := make([]string, len(entries)) // the names as printed: in color, maybe
 	for i, e := range entries {
-		names[i] = e.name
+		names[i], shown[i] = e.name, e.name
+		if f.color {
+			mode, _, _, _ := s.stat(e.path)
+			shown[i] = paint(e.name, mode)
+		}
 	}
-	if f.onePerLine {
-		return strings.Join(names, "\n") + "\n"
+	if f.format == '1' {
+		return strings.Join(shown, "\n") + "\n"
 	}
-	return columns(names)
+	return columns(names, shown, f.format == 'x')
 }
 
-// columns lays names out like BusyBox ls on a terminal: top to bottom, then left to right,
-// every column as wide as the longest name plus 2.
-func columns(names []string) string {
+// columns lays names out like BusyBox ls: top to bottom then left to right (across: row by row), every
+// column as wide as the longest name plus 2. shown = the names as printed (with their colors, which take
+// no room on the screen).
+func columns(names, shown []string, across bool) string {
 	width := 0
 	for _, n := range names {
 		width = max(width, len(n)+2)
@@ -150,25 +249,36 @@ func columns(names []string) string {
 
 	var out strings.Builder
 	for r := 0; r < rows; r++ {
-		line := ""
+		column := 0 // where on the screen the line is
 		for c := 0; c < cols; c++ {
 			i := c*rows + r // column by column
+			if across {
+				i = r*cols + c
+			}
 			if i >= len(names) {
 				break
 			}
-			line += strings.Repeat(" ", c*width-len(line)) + names[i] // pad to where column c starts
+			out.WriteString(strings.Repeat(" ", c*width-column) + shown[i]) // pad to where column c starts
+			column = c*width + len(names[i])
 		}
-		out.WriteString(line + "\n")
+		out.WriteString("\n")
 	}
 	return out.String()
 }
 
 // longLine is one line of ls -l, in BusyBox's format:
 // drwxrwxrwt    2 root     root            40 Nov 18 09:15 tmp
-func (s *Shell) longLine(e lsEntry) string {
+// In color, a link's target has the color of what it leads to.
+func (s *Shell) longLine(e lsEntry, color bool) string {
 	mode, links, size, target := s.stat(e.path)
 	name := e.name
+	if color {
+		name = paint(name, mode)
+	}
 	if target != "" {
+		if color {
+			target = paint(target, s.followedMode(e.path))
+		}
 		name += " -> " + target
 	}
 	return fmt.Sprintf("%-10s %4d %-8s %-8s %9s %s %s\n", mode, links, "root", "root", size, lsDate(s.mtime(e.path)), name)

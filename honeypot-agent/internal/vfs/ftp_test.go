@@ -38,7 +38,7 @@ func TestFTPView(t *testing.T) {
 	if names := ReadDir("/home"); !slices.Equal(names, []string{"ftp"}) {
 		t.Errorf("/home: %q", names)
 	}
-	if got, _, _ := NewShell().Run("ls -ld /home/ftp; cat /etc/vsftpd.conf"); got !=
+	if got, _, _ := noColors().Run("ls -ld /home/ftp; cat /etc/vsftpd.conf"); got !=
 		"dr-xr-xr-x    2 root     root            40 Jun  4  2020 /home/ftp\n"+vsftpdConf {
 		t.Errorf("the shell sees: %q", got)
 	}

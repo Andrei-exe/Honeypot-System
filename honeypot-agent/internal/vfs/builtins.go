@@ -68,17 +68,18 @@ type state struct {
 	interactive, fromStdin, inFile bool
 	lineno                         int
 	stdin                          string
+	tty                            bool
 }
 
 func (s *Shell) save() state {
 	return state{s.cwd, maps.Clone(s.vars), maps.Clone(s.exported), maps.Clone(s.readonly), s.params,
-		maps.Clone(s.funcs), s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno, s.stdin}
+		maps.Clone(s.funcs), s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno, s.stdin, s.tty}
 }
 
 func (s *Shell) restore(v state) {
 	s.cwd, s.vars, s.exported, s.readonly, s.params = v.cwd, v.vars, v.exported, v.readonly, v.params
 	s.funcs, s.arg0, s.commandname, s.interactive, s.fromStdin = v.funcs, v.arg0, v.commandname, v.interactive, v.fromStdin
-	s.inFile, s.lineno, s.stdin = v.inFile, v.lineno, v.stdin
+	s.inFile, s.lineno, s.stdin, s.tty = v.inFile, v.lineno, v.stdin, v.tty
 }
 
 // child runs f as a subshell: what it changes in the shell is undone after, and its errors, exit,

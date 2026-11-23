@@ -12,7 +12,7 @@ var sshVars = map[string]string{"SSH_CLIENT": "203.0.113.9 40000 22", "SSH_CONNE
 // a command the line leaves unfinished gets ash's "unexpected end of file". Returns the screen and $?.
 func runTyped(line string) (string, int) {
 	var screen strings.Builder
-	sh := NewShell()
+	sh := noTerminal() // the oracle's output went to a file, not a terminal
 	code, exit := sh.RunTo(line, &screen, &screen)
 	if !exit {
 		code = sh.EndOfInput(&screen, &screen)

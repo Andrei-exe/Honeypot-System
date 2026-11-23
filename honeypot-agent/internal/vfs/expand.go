@@ -611,7 +611,10 @@ func (s *Shell) homeOf(user string) (string, bool) {
 // Its errors go to the screen (o) now, before the command's own output.
 func (s *Shell) substitute(code string, o *output) string {
 	var out output
-	s.child(o, func() { s.runCode(code, s.lineno, &out) }) // its lines are counted from the command's
+	s.child(o, func() {
+		s.tty = false                   // its output is captured, not shown
+		s.runCode(code, s.lineno, &out) // its lines are counted from the command's
+	})
 	s.substStatus = s.status
 	var text strings.Builder
 	for _, c := range out.chunks {

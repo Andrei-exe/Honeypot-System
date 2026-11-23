@@ -213,7 +213,7 @@ func TestRouterNetworkAndKernel(t *testing.T) {
 				"-sh: can't create /sys/x: Permission denied\ntouch: /sys/x: Permission denied\n", 1},
 		{`ls /proc/sys`, "debug   dev     fs      kernel  net     user    vm\n", 0},
 		{`ls -l /proc/sys/vm | cut -c1-10; ls -l /proc/sys/kernel/osrelease | cut -c1-10; ls -ld /proc/sys | cut -c1-10`,
-			"--w-------\n-rw-r--r--\n-rw-r--r--\n-r--r--r--\ndr-xr-xr-x\n", 0},
+			"total 0\n--w-------\n-rw-r--r--\n-rw-r--r--\n-r--r--r--\ndr-xr-xr-x\n", 0},
 		{`echo 'a b' > /proc/sys/kernel/domainname; cat /proc/sys/kernel/domainname`, "a b\n", 0},
 		{`cp /etc/hostname /proc/sys/kernel/hostname; hostname; cp /etc/passwd /proc/version`,
 			"gateway\ncp: write error: Input/output error\n", 1},
@@ -247,7 +247,7 @@ func TestRouterNetworkAndKernel(t *testing.T) {
 			"myhost\nhostname: can't open '/nope': No such file or directory\n", 1},
 	}
 	for _, tt := range tests {
-		if got, code, _ := NewShell().Run(tt.line); got != tt.want || code != tt.code {
+		if got, code, _ := noColors().Run(tt.line); got != tt.want || code != tt.code {
 			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
 		}
 	}

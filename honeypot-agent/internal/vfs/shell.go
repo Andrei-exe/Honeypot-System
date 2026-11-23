@@ -48,6 +48,10 @@ type Shell struct {
 	inFile      bool   // reading a file (sh FILE, . FILE): "line N:" even in the login shell
 	lineno      int    // the line being run: $LINENO and "line N:"
 	execCommand bool   // started as sh -c COMMAND (an SSH exec): Run gets the whole command
+	terminal    bool   // the session has a terminal: Telnet, SSH with a pty (exec too: "ssh -t host ls")
+	// the running command's output (descriptor 1) goes to that terminal, not into a |, a file or a $(...):
+	// what isatty(1) would say. ls lays its names out in colored columns only then
+	tty bool
 
 	linesRead int // the lines the login shell has read: the next one's number
 	// a command not finished yet ("for i in 1 2" typed alone): its lines so far, waiting for the next
@@ -108,6 +112,7 @@ func NewLoginShell(user string) *Shell {
 // is interactive only on a pty (ash's iflag needs a terminal).
 func NewSSHShell(user string, vars map[string]string, pty, exec bool) *Shell {
 	s := newShell(user, vars, pty && !exec)
+	s.terminal = pty
 	if exec {
 		s.arg0, s.execCommand, s.fromStdin = "sh", true, false
 		s.vars["PS1"] = `\w \$ ` // ash's own (no /etc/profile): not exported
@@ -129,6 +134,7 @@ func newShell(user string, extra map[string]string, interactive bool) *Shell {
 		funcs:       map[string]*node{},
 		arg0:        "-sh",
 		interactive: interactive,
+		terminal:    interactive,
 		fromStdin:   true,
 		work:        maxWork,
 	}
@@ -224,7 +230,7 @@ func (s *Shell) Run(line string) (string, int, bool) {
 // return outside a function, and if it isn't interactive (SSH without a pty, exec) at the first error
 // that ends a line, like ash's main loop.
 func (s *Shell) RunTo(line string, out, errs io.Writer) (code int, exit bool) {
-	s.budget, s.work, s.raised, s.skip, s.crashed = maxCommands, maxWork, false, 0, false
+	s.budget, s.work, s.raised, s.skip, s.crashed, s.tty = maxCommands, maxWork, false, 0, false, s.terminal
 	var o output
 	if s.execCommand {
 		s.runCode(line, 1, &o) // sh -c: the whole command
@@ -255,7 +261,7 @@ func (s *Shell) EndOfInput(out, errs io.Writer) int {
 	if s.pending == "" {
 		return s.status
 	}
-	s.budget, s.work, s.raised, s.skip, s.crashed = maxCommands, maxWork, false, 0, false
+	s.budget, s.work, s.raised, s.skip, s.crashed, s.tty = maxCommands, maxWork, false, 0, false, s.terminal
 	var o output
 	code, first := s.pending, s.pendingLine
 	s.pending = ""
@@ -460,6 +466,11 @@ func (s *Shell) redirected(redirs []redir, name string, o *output, body func(out
 		saved := s.stdin
 		s.stdin = input
 		defer func() { s.stdin = saved }()
+	}
+	if to := fds[1]; to.orig != 1 && to.orig != 2 { // "> file", ">&-": the output is no terminal now
+		saved := s.tty
+		s.tty = false
+		defer func() { s.tty = saved }()
 	}
 
 	var out output

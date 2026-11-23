@@ -247,6 +247,9 @@ func (s *Shell) pipe(n *node, o *output) {
 			if i > 0 {
 				s.stdin = piped
 			}
+			if !last {
+				s.tty = false // its output goes into the pipe
+			}
 			s.eval(c, &res)
 		})
 		piped = ""
