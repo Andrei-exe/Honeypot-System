@@ -667,6 +667,9 @@ func FuzzRun(f *testing.F) {
 		`wget -qnv --out=x -T 5 --no -U a 'http://u@[::1]:80/a?b' ftp://h:0/ 1.2.3.4:x; tftp -g -r a/b -l - -b 512 gateway 69`,
 		`ftpget -v -P 21 -u a -p b localhost x y; uname -snrvmpio --mach --k -a; hostname -F /etc/hosts; hostname -fids`,
 		`sysctl -w a.b..c=0x1f vm.swappiness=-0 -n -e -q; sysctl -p /etc/hosts; sysctl -a; echo 010 > /proc/sys/kernel/pid_max`,
+		// the processes in /proc: links on the way, self, writes
+		`for p in /proc/[0-9]*; do cat $p/cmdline $p/stat; done; cd /proc/self/; ls -la . ..; cat ../1/root/proc/self/status`,
+		`echo -1 > /proc/self/oom_score_adj; ls -lL /proc/self/exe /proc/self/; /proc/1/exe; cat /proc/530/environ < /proc/self/comm`,
 		// the control structures (6d)
 		"for i in 1 2; do while read x; do case $x in a*|[b]) break 2;; *) continue;; esac; done < /etc/hosts; done > /tmp/o",
 		"f() { local a=$1 b; shift; [ $# -gt 0 ] && f \"$@\" || return 3; }; f a b c; echo $?; unset -f f; type f",
@@ -799,7 +802,7 @@ func TestLs(t *testing.T) {
 			"-r--r--r--    1 root     root             0 Nov 18 09:15 /proc/cpuinfo\n" +
 				"lrwxrwxrwx    1 root     root            17 Jun  4  2020 /usr/bin/wget -> ../../bin/busybox\n"},
 		{"ls -ld /tmp /proc",
-			"dr-xr-xr-x    3 root     root             0 Nov 18 09:15 /proc\n" + // its directory: sys
+			"dr-xr-xr-x   14 root     root             0 Nov 18 09:15 /proc\n" + // its directories: sys + 11 processes
 				"drwxrwxrwt    2 root     root            40 Nov 18 09:15 /tmp\n"},
 		{nippon + "ls -la",
 			"total 4\n" +
@@ -843,8 +846,8 @@ func TestColumns(t *testing.T) {
 // Every applet link must work as a command: an "ls /bin" entry that answers "not found" gives us away.
 func TestAppletsAreImplemented(t *testing.T) {
 	for p, target := range fakeLinks {
-		if path.Base(target) != "busybox" {
-			continue // the C library links
+		if path.Base(target) != "busybox" || under(p, "/proc") {
+			continue // the C library links; /proc/1/exe runs as "exe", which no applet is (TestProc)
 		}
 		if out, code, _ := NewShell().command([]string{p}, ""); code == 127 {
 			t.Errorf("%s -> %s is listed but not implemented: %q", p, target, out)

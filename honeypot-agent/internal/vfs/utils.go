@@ -478,21 +478,7 @@ func (s *Shell) env(args []string, input string, o *output) (int, bool) {
 	}
 run:
 	if len(args) == 0 {
-		names := slices.Collect(maps.Keys(vars))
-		slices.SortFunc(names, func(a, b string) int {
-			if d := envHash(a) - envHash(b); d != 0 {
-				return d
-			}
-			if d := envRank(a) - envRank(b); d != 0 {
-				return d
-			}
-			return strings.Compare(a, b)
-		})
-		var out strings.Builder
-		for _, n := range names {
-			out.WriteString(n + "=" + vars[n] + "\n")
-		}
-		o.add(1, out.String())
+		o.add(1, environText(vars, "\n"))
 		return 0, false
 	}
 	code := 0
@@ -507,6 +493,37 @@ run:
 		code, _ = s.dispatch(args, input, o)
 	})
 	return code, false
+}
+
+// environText is an environment the way a program's environ holds it (env prints it, /proc/PID/environ):
+// "NAME=value" + end each, in ash's order (hashvar mod 39, see envHash).
+func environText(vars map[string]string, end string) string {
+	names := slices.Collect(maps.Keys(vars))
+	slices.SortFunc(names, func(a, b string) int {
+		if d := envHash(a) - envHash(b); d != 0 {
+			return d
+		}
+		if d := envRank(a) - envRank(b); d != 0 {
+			return d
+		}
+		return strings.Compare(a, b)
+	})
+	var out strings.Builder
+	for _, n := range names {
+		out.WriteString(n + "=" + vars[n] + end)
+	}
+	return out.String()
+}
+
+// environ is what the shell passes to the commands it runs: its exported variables (environText).
+func (s *Shell) environ(end string) string {
+	vars := map[string]string{}
+	for n := range s.exported {
+		if v, ok := s.vars[n]; ok {
+			vars[n] = v
+		}
+	}
+	return environText(vars, end)
 }
 
 // read [-r] [-p PROMPT] [-t N] [-n N] [-s] [NAME...]: the first line of its input, split on $IFS

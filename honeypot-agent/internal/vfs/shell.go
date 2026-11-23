@@ -79,6 +79,9 @@ type Shell struct {
 	history   []string // the lines typed (the history builtin)
 	errText   string   // what the running applet wrote to its errors, apart from its output (warn)
 	ownErrors bool     // the running applet split its output and errors itself (see dispatch)
+
+	started time.Time // when the session's shell started (its /proc/517)
+	argv    []string  // the command running now, as typed: what /proc/self (530) shows; nil = none
 }
 
 // The variables a login shell starts with: what BusyBox login sets (HOME, SHELL, USER, LOGNAME, PATH;
@@ -137,6 +140,7 @@ func newShell(user string, extra map[string]string, interactive bool) *Shell {
 		terminal:    interactive,
 		fromStdin:   true,
 		work:        maxWork,
+		started:     now().UTC(),
 	}
 	for name, value := range loginVars {
 		s.vars[name], s.exported[name] = value, true

@@ -193,7 +193,10 @@ func (s *Shell) dispatch(args []string, input string, o *output) (int, bool) {
 		return s.sh(args, "", o), false
 	}
 	s.errText, s.ownErrors = "", false
+	saved := s.argv
+	s.argv = args // /proc/self is this command now
 	out, code, exit := s.command(args, input)
+	s.argv = saved
 	if s.takesInput(args) {
 		s.stdin = ""
 	}
@@ -515,10 +518,10 @@ func (s *Shell) cd(args []string) (string, int, bool) {
 	default:
 		dest = args[0]
 	}
-	dir := resolve(s.cwd, dest)
-	if !s.isDir(dir) {
+	dir := clean(s.cwd, dest) // like ash's cd -L: the path as written, "cd /proc/self; pwd" = /proc/self
+	if real := resolve(s.cwd, dest); !s.isDir(real) {
 		reason := "No such file or directory"
-		for p := dir; p != "/"; p = path.Dir(p) { // a file on the way: /etc/passwd/x
+		for p := real; p != "/"; p = path.Dir(p) { // a file on the way: /etc/passwd/x
 			if _, isFile := s.readFile(p); isFile {
 				reason = "Not a directory"
 				break

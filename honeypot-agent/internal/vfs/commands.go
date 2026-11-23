@@ -8,23 +8,6 @@ import (
 	"strings"
 )
 
-// fakePS is the output of ps. It matches the persona: a router running dropbear, telnetd and vsftpd,
-// with syslogd writing /var/log/messages, Wi-Fi (hostapd) and a PPPoE link to the provider (pppd).
-// Every program here exists in the fake filesystem.
-const fakePS = `  PID USER       VSZ STAT COMMAND
-    1 root      1516 S    /sbin/init
-  289 root      1032 S    /sbin/syslogd -n
-  291 root      1032 S    /sbin/klogd -n
-  341 root      1124 S    /usr/sbin/dropbear -F -P /var/run/dropbear.pid -p 22
-  349 root      2108 S    /usr/sbin/lighttpd -f /etc/lighttpd/lighttpd.conf
-  356 root      1032 S    /usr/sbin/telnetd -F -l /bin/login
-  362 root      1840 S    /usr/sbin/hostapd -B /etc/hostapd.conf
-  377 root      1216 S    /usr/sbin/pppd call isp
-  402 root      1208 S    /usr/sbin/vsftpd
-  517 root      1300 S    -sh
-  530 root      1296 R    ps
-`
-
 // command runs one command (not one of the shell's own, see dispatch). Returns the output, the exit
 // code (0 = ok, 127 = command not found, other = error) and whether the session should end.
 // "/bin/cat" or "/usr/bin/wget" = "cat" / "wget" (busybox itself or one of its applet links); a name
@@ -34,8 +17,11 @@ func (s *Shell) command(args []string, input string) (string, int, bool) {
 	if name == "" { // "" (or an empty $X in quotes): ash tries to run it and the kernel refuses
 		return s.errorf("", ": Permission denied"), 127, false
 	}
-	if !strings.Contains(name, "/") && !builtins[name] && !s.inPath(name) {
+	if !strings.Contains(args[0], "/") && !builtins[name] && !s.inPath(name) { // "/bin/ls" needs no $PATH
 		return s.errorf("", name+": not found"), 127, false
+	}
+	if strings.Contains(args[0], "/") && !strings.Contains(name, "/") && name != "busybox" && !appletNames[name] {
+		return name + ": applet not found\n", 127, false // busybox under a name no applet has (/proc/1/exe)
 	}
 	return s.applet(name, args[1:], input)
 }

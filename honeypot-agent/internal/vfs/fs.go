@@ -345,9 +345,9 @@ func bootLog() string {
 	return out.String()
 }
 
-// resolve turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path.
-// E.g. cwd "/tmp" + "../etc/passwd" -> "/etc/passwd"
-func resolve(cwd, p string) string {
+// clean turns a path typed by the attacker (relative, with .., with ~) into a clean absolute path, as
+// written. E.g. cwd "/tmp" + "../etc/passwd" -> "/etc/passwd"
+func clean(cwd, p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		p = "/root" + p[1:]
 	}
@@ -355,6 +355,42 @@ func resolve(cwd, p string) string {
 		p = cwd + "/" + p
 	}
 	return path.Clean(p)
+}
+
+// resolve is the path the files are found at: clean, then a link on the way is followed, like the kernel
+// walking the path (/proc/self/stat -> /proc/530/stat). The last name stays: ls -l shows a link as a link.
+func resolve(cwd, p string) string {
+	last := p[strings.LastIndex(p, "/")+1:]
+	trailing := last == "" || last == "." || last == ".." // "/proc/self/", "." in /proc/self: a folder for sure
+	p = clean(cwd, p)
+	for hops := 0; hops < 40; hops++ { // the kernel's limit (ELOOP)
+		link := ""
+		for i := 1; i < len(p) && link == ""; i++ {
+			if p[i] == '/' && fakeLinks[p[:i]] != "" {
+				link = p[:i]
+			}
+		}
+		if link == "" {
+			break
+		}
+		p = path.Clean(follow(link) + p[len(link):])
+	}
+	if trailing && fakeLinks[p] != "" {
+		return resolve("/", follow(p)) // the folder the link leads to
+	}
+	return p
+}
+
+// follow is where the link p leads (/usr/bin/wget -> /bin/busybox, /proc/self -> /proc/530); p itself if
+// it is no link.
+func follow(p string) string {
+	if target, ok := fakeLinks[p]; ok {
+		if !path.IsAbs(target) {
+			target = path.Join(path.Dir(p), target)
+		}
+		return path.Clean(target)
+	}
+	return p
 }
 
 // under reports whether p is dir itself or something inside it.
@@ -368,13 +404,18 @@ func (s *Shell) readFile(p string) (string, bool) {
 	if content, ok := s.files[p]; ok {
 		return content, true
 	}
+	p = s.procSelf(follow(p))
+	if content, ok := procFile(p, s); ok { // /proc/self/cmdline: this session's command
+		return content, true
+	}
 	return readBuiltin(p)
 }
 
 // readBuiltin reads a built-in file, following a symlink.
 func readBuiltin(p string) (string, bool) {
-	if target, ok := fakeLinks[p]; ok {
-		p = resolve(path.Dir(p), target) // /usr/bin/wget -> ../../bin/busybox -> /bin/busybox
+	p = follow(p)                                   // /usr/bin/wget -> ../../bin/busybox -> /bin/busybox
+	if content, ok := procFile(p, &noSession); ok { // FTP's look
+		return content, true
 	}
 	if gen, ok := dynamicFiles[p]; ok {
 		return gen(), true // /proc/uptime: computed now
@@ -386,16 +427,18 @@ func readBuiltin(p string) (string, bool) {
 	return content, ok
 }
 
-// isDir reports whether p is a built-in or a session-created directory.
+// isDir reports whether p is a built-in or a session-created directory, or a link to one (/proc/self).
 func (s *Shell) isDir(p string) bool {
+	p = s.procSelf(follow(p))
 	return fakeDirs[p] || s.dirs[p]
 }
 
 // list returns the names inside dir (hidden ones too), sorted alphabetically like ls.
 func (s *Shell) list(dir string) []string {
+	dir = s.procSelf(follow(dir))
 	seen := map[string]bool{}
 	add := func(p string) {
-		if p != "/" && path.Dir(p) == dir {
+		if p != "/" && path.Dir(p) == dir && s.procSelf(p) == p {
 			seen[path.Base(p)] = true
 		}
 	}
@@ -482,6 +525,8 @@ func (s *Shell) writeProc(p, content string) (failed, err error) {
 		return nil, errNoAccess // even for root (proc_sys_permission)
 	case content == "":
 		return nil, nil
+	case strings.Count(p, "/") == 3 && p[6] >= '0' && p[6] <= '9': // /proc/PID/x
+		return writePID(p), nil
 	case !isSetting:
 		return errIO, nil
 	}

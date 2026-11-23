@@ -99,7 +99,7 @@ func (s *Shell) ls(args []string) (string, int, bool) {
 		p := resolve(s.cwd, t)
 		_, isFile := s.readFile(p)
 		switch {
-		case s.isDir(p) && !f.dirItself:
+		case s.isDir(p) && !f.dirItself && !(f.long && fakeLinks[p] != ""): // -l shows a named link itself (ls.c)
 			dirs = append(dirs, t)
 		case isFile || s.isDir(p):
 			files = append(files, lsEntry{t, p})
@@ -196,6 +196,7 @@ func (s *Shell) followedMode(p string) string {
 // lsDir returns the entries of a directory that ls shows: hidden ones (.x) only with -a or -A.
 func (s *Shell) lsDir(dir string, f lsFlags) []lsEntry {
 	var entries []lsEntry
+	dir = follow(dir) // "ls /proc/self": what is in /proc/530
 	if f.all {
 		entries = append(entries, lsEntry{".", dir}, lsEntry{"..", path.Dir(dir)})
 	}
@@ -288,21 +289,21 @@ func (s *Shell) longLine(e lsEntry, color bool) string {
 func (s *Shell) stat(p string) (mode string, links int, size string, target string) {
 	_, isSessionFile := s.files[p]
 	switch {
+	case fakeLinks[p] != "": // before isDir, which follows it (/proc/self)
+		target = fakeLinks[p]
+		mode, links, size = "lrwxrwxrwx", 1, strconv.Itoa(len(target)) // a link's size = its target's length
 	case s.isDir(p):
 		mode = "drwxr-xr-x"
 		names := s.list(p)
 		links = 2 // its entry in the parent + its own "."; each subdirectory adds a ".."
 		for _, n := range names {
-			if s.isDir(path.Join(p, n)) {
+			if sub := path.Join(follow(p), n); s.isDir(sub) && fakeLinks[sub] == "" { // a link to one isn't
 				links++
 			}
 		}
 		size = strconv.Itoa(40 + 20*len(names)) // like tmpfs: 20 bytes per entry, . and .. included
 	case isSessionFile:
 		mode, links, size = "-rw-r--r--", 1, strconv.Itoa(len(s.files[p]))
-	case fakeLinks[p] != "":
-		target = fakeLinks[p]
-		mode, links, size = "lrwxrwxrwx", 1, strconv.Itoa(len(target)) // a link's size = its target's length
 	case p == "/dev/null":
 		mode, links, size = "crw-rw-rw-", 1, "1,   3" // a device shows "major, minor" instead of a size
 	default:
@@ -319,14 +320,15 @@ func (s *Shell) stat(p string) (mode string, links int, size string, target stri
 		}
 	}
 
-	if m, ok := specialModes[p]; ok { // writing over a file doesn't change its mode
+	m, special := specialModes[p]
+	if special { // writing over a file doesn't change its mode
 		mode = m
 	}
 	if under(p, "/proc") {
 		size = "0" // files in /proc are generated when read: their size is always 0
 		if k, ok := kernelSettings[p]; ok {
 			mode = k.mode
-		} else if s.isDir(p) {
+		} else if mode[0] == 'd' && !special {
 			mode = "dr-xr-xr-x"
 		}
 	}
