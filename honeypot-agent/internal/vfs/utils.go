@@ -356,8 +356,8 @@ func (s *Shell) which(args []string) (string, int, bool) {
 
 // The ash builtins type tells apart; the "special" ones (POSIX) end a script on an error.
 var (
-	specialBuiltins = strings.Fields(". : break continue eval exec exit export readonly return set shift times trap unset")
-	shellKeywords   = strings.Fields("! case do done elif else esac fi for if in then until while { }")
+	specialBuiltins = strings.Fields(". : break continue eval exec exit export local readonly return set shift source times trap unset")
+	shellKeywords   = strings.Fields("! case do done elif else esac fi for function if in then until while { }")
 )
 
 // describe is one line of type: "ls is /bin/ls", "cd is a shell builtin" ("" = not found).
@@ -365,6 +365,8 @@ func (s *Shell) describe(name string) string {
 	switch {
 	case slices.Contains(shellKeywords, name):
 		return name + " is a shell keyword"
+	case s.isFunction(name):
+		return name + " is a function"
 	case slices.Contains(specialBuiltins, name):
 		return name + " is a special shell builtin"
 	case builtins[name]:
@@ -406,7 +408,7 @@ func (s *Shell) commandBuiltin(args []string, input string, o *output) (int, boo
 			return code, false
 		}
 		switch {
-		case builtins[name] || slices.Contains(shellKeywords, name):
+		case builtins[name] || slices.Contains(shellKeywords, name) || s.isFunction(name):
 			o.add(1, name+"\n")
 		case s.lookPath(name) != "":
 			o.add(1, s.lookPath(name)+"\n")
@@ -508,8 +510,9 @@ run:
 }
 
 // read [-r] [-p PROMPT] [-t N] [-n N] [-s] [NAME...]: the first line of its input, split on $IFS
-// into the names (the last gets the rest; none = REPLY). No input (nothing came through < or |):
-// exit code 1 (a real one would wait for the next line typed: simplification).
+// into the names (the last gets the rest; none = REPLY). The next read gets the next line
+// ("while read x"). No input (nothing came through < or |): exit code 1 (a real one would wait for
+// the next line typed: simplification).
 func (s *Shell) read(args []string, input string) (string, int, bool) {
 	raw := false
 	var names []string
@@ -527,7 +530,8 @@ func (s *Shell) read(args []string, input string) (string, int, bool) {
 	if len(names) == 0 {
 		names = []string{"REPLY"}
 	}
-	line, _, found := strings.Cut(input, "\n")
+	line, rest, found := strings.Cut(input, "\n")
+	s.stdin = rest
 	if !raw {
 		line = strings.ReplaceAll(line, "\\", "")
 	}

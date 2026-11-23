@@ -63,24 +63,26 @@ type state struct {
 	vars                           map[string]string
 	exported, readonly             map[string]bool
 	params                         []string
+	funcs                          map[string]*node
 	arg0, commandname              string
 	interactive, fromStdin, inFile bool
 	lineno                         int
+	stdin                          string
 }
 
 func (s *Shell) save() state {
 	return state{s.cwd, maps.Clone(s.vars), maps.Clone(s.exported), maps.Clone(s.readonly), s.params,
-		s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno}
+		maps.Clone(s.funcs), s.arg0, s.commandname, s.interactive, s.fromStdin, s.inFile, s.lineno, s.stdin}
 }
 
 func (s *Shell) restore(v state) {
 	s.cwd, s.vars, s.exported, s.readonly, s.params = v.cwd, v.vars, v.exported, v.readonly, v.params
-	s.arg0, s.commandname, s.interactive, s.fromStdin = v.arg0, v.commandname, v.interactive, v.fromStdin
-	s.inFile, s.lineno = v.inFile, v.lineno
+	s.funcs, s.arg0, s.commandname, s.interactive, s.fromStdin = v.funcs, v.arg0, v.commandname, v.interactive, v.fromStdin
+	s.inFile, s.lineno, s.stdin = v.inFile, v.lineno, v.stdin
 }
 
-// child runs f as a subshell: what it changes in the shell is undone after, and its errors and exit
-// end only it. Too deep: the fork "fails", like on a router out of processes.
+// child runs f as a subshell: what it changes in the shell is undone after, and its errors, exit,
+// return, break end only it. Too deep: the fork "fails", like on a router out of processes.
 func (s *Shell) child(o *output, f func()) {
 	if s.depth >= maxDepth {
 		s.raise(o, "", "can't fork: Resource temporarily unavailable")
@@ -91,38 +93,13 @@ func (s *Shell) child(o *output, f func()) {
 	f()
 	s.depth--
 	s.restore(saved)
-	s.stdin = ""
+	if s.crashed { // (its exit code stays 139)
+		o.add(2, "Segmentation fault\n")
+	}
+	s.skip, s.crashed = 0, false
 	if s.budget > 0 {
 		s.raised = false
 	}
-}
-
-// runLines runs code one line at a time, counting the lines for "line N:" and $LINENO. A newline
-// inside quotes or $(...) doesn't end a line ('a<newline>b' is one word).
-func (s *Shell) runLines(code string, o *output) bool {
-	lineno, start := 1, 0
-	for i := 0; i <= len(code); i++ {
-		switch {
-		case i == len(code) || code[i] == '\n':
-			s.lineno = lineno
-			if s.run(code[start:i], o) {
-				return true
-			}
-			if s.raised || s.budget <= 0 {
-				return false
-			}
-			lineno += strings.Count(code[start:min(i+1, len(code))], "\n")
-			start = i + 1
-		case code[i] == '#' && (i == 0 || strings.IndexByte(" \t\n;&|(", code[i-1]) >= 0):
-			for i+1 < len(code) && code[i+1] != '\n' { // a comment: its quotes are text
-				i++
-			}
-		case strings.IndexByte("\\'\"`", code[i]) >= 0 || code[i] == '$' && i+1 < len(code) && strings.IndexByte("({'", code[i+1]) >= 0:
-			end, _ := partEnd(code, i)
-			i = end - 1
-		}
-	}
-	return false
 }
 
 // appletName: "/bin/sh" or "/usr/bin/wget" = "sh" / "wget" (a link to busybox); other names stay.
@@ -153,7 +130,7 @@ func (s *Shell) inPath(name string) bool {
 var builtins = map[string]bool{
 	".": true, ":": true, "cd": true, "echo": true, "eval": true, "exec": true, "exit": true, "export": true,
 	"false": true, "kill": true, "pwd": true, "readonly": true, "set": true, "shift": true, "source": true,
-	"true": true, "ulimit": true, "unset": true,
+	"true": true, "ulimit": true, "unset": true, "break": true, "continue": true, "return": true, "local": true,
 	"[": true, "[[": true, "command": true, "help": true, "history": true, "printf": true, "read": true,
 	"test": true, "type": true,
 }
@@ -168,7 +145,13 @@ func (s *Shell) dispatch(args []string, input string, o *output) (int, bool) {
 	case "exit":
 		return s.exit(args[1:], o)
 	case "eval":
-		return s.eval(args[1:], o)
+		return s.evalBuiltin(args[1:], o), false
+	case "break", "continue":
+		return s.breakBuiltin(name, args[1:], o), false
+	case "return":
+		return s.returnBuiltin(args[1:], o), false
+	case "local":
+		return s.local(args[1:], o), false
 	case ".", "source":
 		return s.dot(name, args[1:], o)
 	case "exec":
@@ -210,6 +193,9 @@ func (s *Shell) dispatch(args []string, input string, o *output) (int, bool) {
 	}
 	s.errText, s.ownErrors = "", false
 	out, code, exit := s.command(args, input)
+	if s.takesInput(args) {
+		s.stdin = ""
+	}
 	if s.ownErrors { // it said what its errors were (warn): "wc: /x: ..." apart from the counts
 		o.add(2, s.errText)
 		o.add(1, out)
@@ -260,37 +246,44 @@ func (s *Shell) sh(args []string, input string, o *output) int {
 		code, name, commandname, args = content, args[0], args[0], args[1:]
 		input = ""
 	}
+	if !command && commandname == "" {
+		s.stdin = "" // "echo cmd | sh": the shell read all its input, as its commands
+	}
 	if code == "" {
 		return 0
 	}
+	left := s.stdin // what sh -c leaves of the shared input ("while read" goes on after it)
 	s.child(o, func() {
 		s.arg0, s.commandname, s.params = name, commandname, args
 		s.interactive, s.inFile = false, !command && commandname != ""
 		s.fromStdin = !command && commandname == "" // "echo cmd | sh" reads its commands from its input
+		s.stdin = ""
 		if command {
 			s.stdin = input // sh -c 'cat' reads what came through |
 		}
-		s.runLines(code, o)
+		s.runCode(code, 1, o)
+		if command {
+			left = s.stdin
+		}
 	})
+	s.stdin = left
 	return s.status
 }
 
-// eval runs its arguments, joined, as a line of this shell (errors say "eval: ...").
-func (s *Shell) eval(args []string, o *output) (int, bool) {
-	if len(args) == 0 {
-		return 0, false
-	}
+// evalBuiltin: eval runs its arguments, joined, as code of this shell (errors say "eval: line N:",
+// its lines counted from 1).
+func (s *Shell) evalBuiltin(args []string, o *output) int {
 	if s.depth >= maxDepth {
 		s.raise(o, "", "can't fork: Resource temporarily unavailable")
-		return 2, false
+		return 2
 	}
 	saved := s.commandname
 	s.commandname = "eval"
 	s.depth++
-	exit := s.run(strings.Join(args, " "), o)
+	code := s.runCode(strings.Join(args, " "), 1, o)
 	s.depth--
 	s.commandname = saved
-	return s.status, exit
+	return code
 }
 
 // dot runs a file in this shell (. FILE, source FILE). A name without "/" is looked for in $PATH only.
@@ -325,10 +318,13 @@ func (s *Shell) dot(name string, args []string, o *output) (int, bool) {
 	commandname, inFile, lineno := s.commandname, s.inFile, s.lineno
 	s.commandname, s.inFile = file, true
 	s.depth++
-	exit := s.runLines(content, o)
+	code := s.runCode(content, 1, o)
 	s.depth--
 	s.commandname, s.inFile, s.lineno = commandname, inFile, lineno
-	return s.status, exit
+	if s.skip == skipFunc { // return in the file ends only the file
+		s.skip = 0
+	}
+	return code, false
 }
 
 // exists reports whether p is a file or a directory.
@@ -407,10 +403,15 @@ func (s *Shell) export(name string, args []string, o *output) int {
 	return 0
 }
 
-// unset NAME...: the variables are gone (-v / -f are accepted; there are no functions).
+// unset NAME...: the variables are gone; unset -f NAME...: the functions.
 func (s *Shell) unset(args []string, o *output) int {
+	functions := false
+	for len(args) > 0 && (args[0] == "-v" || args[0] == "-f") {
+		functions, args = args[0] == "-f", args[1:]
+	}
 	for _, n := range args {
-		if n == "-v" || n == "-f" {
+		if functions {
+			delete(s.funcs, n)
 			continue
 		}
 		if s.readonly[n] {

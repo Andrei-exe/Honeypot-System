@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"fmt"
+	"io"
 	"path"
 	"runtime"
 	"strings"
@@ -229,7 +230,7 @@ func TestExpansions(t *testing.T) {
 		{`"" ; echo $?`, "-sh: : Permission denied\n127\n", 0},
 	}
 	for _, tt := range tests {
-		if got, code, _ := NewShell().Run(tt.line); got != tt.want || code != tt.code {
+		if got, code := runTyped(tt.line); got != tt.want || code != tt.code {
 			t.Errorf("Run(%q)\n got: %q, exit code %d\nwant: %q, exit code %d", tt.line, got, code, tt.want, tt.code)
 		}
 	}
@@ -362,8 +363,9 @@ func TestApplets(t *testing.T) {
 		{`echo abcd | grep -oE 'ab|abcd'; echo abcd | sed -E 's/ab|abcd/X/'`, "abcd\nX\n", 0}, // the longest match
 		{"printf '1\\n2\\n3\\n4\\n5\\n' | head -n -2", "1\n2\n3\n", 0},
 		{`echo xyz | tr a-z A-Z`, "XYZ\n", 0},
-		{"printf '10\\n9\\n' | awk '$1 > 9'", "10\n", 0},                     // numbers, not text ("10" < "9")
-		{`touch /tmp/x; export PATH=/tmp:$PATH; which x; echo $?`, "1\n", 0}, // not executable
+		{"printf '10\\n9\\n' | awk '$1 > 9'", "10\n", 0},                                           // numbers, not text ("10" < "9")
+		{"echo | awk '{print 7%2.5, 5%.1, -7%3, 7.9%2, 5%0.3, 5.5%2}'", "2 0 -1 1.9 0.2 1.5\n", 0}, // % of fractions (FuzzRun: 0%.1 divided by 0)
+		{`touch /tmp/x; export PATH=/tmp:$PATH; which x; echo $?`, "1\n", 0},                       // not executable
 		{`echo abc | grep -w c; echo $?; echo "a c" | grep -w c`, "1\na c\n", 0},
 		{"printf 'a\\nb\\nc\\n' | sed '/b/d'; printf 'a\\nb\\nc\\n' | sed -n '/a/,/b/p'", "a\nc\na\nb\n", 0},
 		{"printf 'x\\ny\\n' > /tmp/h; wc -l /nofile /tmp/h 2>/dev/null; echo $?", "        2 /tmp/h\n        2 total\n1\n", 0},
@@ -533,6 +535,14 @@ func TestShellLimits(t *testing.T) {
 		{"echo " + strings.Repeat("/*/*/*/x ", 300) + "/etc/pass*", "/*/*/*/x /etc/pass*\n"},
 		{"X=" + strings.Repeat("a", 1000) + "; echo " + strings.Repeat("${X#"+strings.Repeat("*a", 30)+"b} ", 100), "aaaaa"},
 		{"echo $((" + strings.Repeat("1+", 4000) + "1))", "4001\n"},
+		// the control structures (6d): endless loops and fork bombs stop at maxCommands
+		{"while :; do :; done; echo never", "-sh: can't fork: Resource temporarily unavailable\n"},
+		{"until false; do echo y; done", "y\ny\ny\n"},
+		{"f() { f | f; }; f", "can't fork"},
+		{"for i in 1 2 3 4 5 6 7 8 9; do for j in $(seq 1 99); do for k in $(seq 1 99); do :; done; done; done", "can't fork"},
+		{"X=" + strings.Repeat("0", 16000) + "; for i in 1 2 3; do case $X in " + strings.Repeat("*1", 300) + ") ;; esac; done; echo end", "end\n"},
+		// functions live in the agent's RAM like the variables: past varsQuota, "out of memory"
+		{"i=0; while :; do i=$((i+1)); eval \"f$i() { echo " + strings.Repeat("x", 500) + "; }\"; done", "-sh: eval: out of memory\n"},
 	}
 	for _, tt := range tests {
 		start := time.Now()
@@ -597,6 +607,14 @@ func TestPatternWork(t *testing.T) {
 	if got := trim("/tmp/a.tar.gz", "*/", true, true, &work); got != "a.tar.gz" {
 		t.Errorf("${X##*/}: %q", got)
 	}
+	// a case pattern too costly for the line's budget doesn't match (nor any after it), a cheap one does
+	x := "X=" + strings.Repeat("0", 16000) + "; case $X in "
+	if got, _, _ := NewShell().Run(x + strings.Repeat("*0", 300) + ") echo m;; *) echo any;; esac; echo end"); got != "end\n" {
+		t.Errorf("costly case pattern: %q", got)
+	}
+	if got, _, _ := NewShell().Run(x + "*0) echo m;; esac"); got != "m\n" {
+		t.Errorf("cheap case pattern: %q", got)
+	}
 }
 
 // varsUsed is what the session's variables take, counted like setVar does.
@@ -633,13 +651,19 @@ func FuzzRun(f *testing.F) {
 		`wget -qnv --out=x -T 5 --no -U a 'http://u@[::1]:80/a?b' ftp://h:0/ 1.2.3.4:x; tftp -g -r a/b -l - -b 512 gateway 69`,
 		`ftpget -v -P 21 -u a -p b localhost x y; uname -snrvmpio --mach --k -a; hostname -F /etc/hosts; hostname -fids`,
 		`sysctl -w a.b..c=0x1f vm.swappiness=-0 -n -e -q; sysctl -p /etc/hosts; sysctl -a; echo 010 > /proc/sys/kernel/pid_max`,
+		// the control structures (6d)
+		"for i in 1 2; do while read x; do case $x in a*|[b]) break 2;; *) continue;; esac; done < /etc/hosts; done > /tmp/o",
+		"f() { local a=$1 b; shift; [ $# -gt 0 ] && f \"$@\" || return 3; }; f a b c; echo $?; unset -f f; type f",
+		"if ! false; then { echo a; } 2>&1 | (read x; echo $x); elif true; then :; else until :; do :; done; fi",
+		"function g { g; }; g", "case x in (x|y) ;; esac; for; while do; f() {", "{ ( { (", "[[ a && b || c ]]; echo }",
 	} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, line string) {
 		sh := NewShell()
 		sh.Run(line)
-		sh.Run(line) // again, over what the first run created
+		sh.Run(line) // again, over what the first run created (or after it, if it left a command unfinished)
+		sh.EndOfInput(io.Discard, io.Discard)
 		if used := sh.quotaUsed(); used > sessionQuota {
 			t.Errorf("Run(%q): %d bytes used, quota %d", line, used, sessionQuota)
 		}

@@ -227,6 +227,14 @@ func TestTelnetLikeBusyBox(t *testing.T) {
 	if got := readUntil(t, r, "root@gateway:~# "); got != want {
 		t.Errorf("non-ASCII: %q\n     want %q", got, want)
 	}
+	fmt.Fprint(conn, "for i in 1 2\r\n") // not finished: $PS2, then the rest
+	if got := readUntil(t, r, "> "); got != "for i in 1 2\r\n> " {
+		t.Errorf("unfinished command: %q", got)
+	}
+	fmt.Fprint(conn, "do echo n$i; done\r\n")
+	if got := readUntil(t, r, "root@gateway:~# "); got != "do echo n$i; done\r\nn1\r\nn2\r\nroot@gateway:~# " {
+		t.Errorf("its second line: %q", got)
+	}
 	fmt.Fprint(conn, "exit\r\n")
 	waitDone(t, done)
 

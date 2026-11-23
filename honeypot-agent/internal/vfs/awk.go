@@ -636,7 +636,7 @@ func awkArith(op string, a, b float64) awkVal {
 	if b == 0 {
 		return awkNum(0)
 	}
-	return awkNum(float64(int64(a) % int64(b)))
+	return awkNum(a - float64(int64(a/b))*b) // awk.c: L_d -= (long long)(L_d / R_d) * R_d (5%0.3 = 0.2)
 }
 
 func (r *awkRun) call(e *awkExpr) awkVal {

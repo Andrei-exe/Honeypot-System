@@ -49,12 +49,28 @@ type Shell struct {
 	lineno      int    // the line being run: $LINENO and "line N:"
 	execCommand bool   // started as sh -c COMMAND (an SSH exec): Run gets the whole command
 
-	depth       int    // how deep in sh -c / $(...) / eval / . we are
-	budget      int    // commands the current line may still run (maxCommands at each Run)
-	work        int    // expansion work the current line may still do (maxWork at each Run)
-	raised      bool   // an error that ends the whole line, like ash's (bad substitution, exit abc...)
-	substStatus int    // the exit code of the last $(...): $? after "X=$(cmd)"
-	stdin       string // a child shell's input (echo cmd | sh): the first command that reads gets it
+	linesRead int // the lines the login shell has read: the next one's number
+	// a command not finished yet ("for i in 1 2" typed alone): its lines so far, waiting for the next
+	// one (Prompt shows $PS2), and the number of its first line
+	pending     string
+	pendingLine int
+	depth       int  // how deep in sh -c / $(...) / eval / . we are
+	budget      int  // commands the current line may still run (maxCommands at each Run)
+	work        int  // expansion work the current line may still do (maxWork at each Run)
+	raised      bool // an error that ends the whole line, like ash's (bad substitution, exit abc...)
+	substStatus int  // the exit code of the last $(...): $? after "X=$(cmd)"
+	// the input the commands share: what came through | or < into a loop or a { } ("seq 3 | while
+	// read x"), or into a child shell (echo cmd | sh). read takes a line of it, the text tools all of it
+	stdin string
+
+	funcs     map[string]*node      // the functions defined (f() { ...; }): their definitions
+	skip      int                   // a break / continue / return / exit on its way up (control.go)
+	crashed   bool                  // the exit on its way up is a crash (control.go: crash)
+	skipCount int                   // how many loops the break / continue leaves
+	loops     int                   // how many loops are running, one inside the other
+	nesting   int                   // compound commands and function calls running one inside the other
+	funcLine  int                   // the line the running function was defined on (0: none)
+	locals    []map[string]localVar // for each function running: what local changed, to put back
 
 	history   []string // the lines typed (the history builtin)
 	errText   string   // what the running applet wrote to its errors, apart from its output (warn)
@@ -110,6 +126,7 @@ func newShell(user string, extra map[string]string, interactive bool) *Shell {
 		vars:        map[string]string{},
 		exported:    map[string]bool{},
 		readonly:    map[string]bool{},
+		funcs:       map[string]*node{},
 		arg0:        "-sh",
 		interactive: interactive,
 		fromStdin:   true,
@@ -127,9 +144,13 @@ func newShell(user string, extra map[string]string, interactive bool) *Shell {
 }
 
 // Prompt is $PS1 the way BusyBox draws it: \u user, \h host, \w directory (~ for $HOME), \W its last
-// part, \$ "#" for root. With the PS1 from /etc/profile: "root@gateway:~# ".
+// part, \$ "#" for root. With the PS1 from /etc/profile: "root@gateway:~# ". While a command isn't
+// finished (RunTo got "for i in 1 2"), $PS2 instead: "> ".
 func (s *Shell) Prompt() string {
 	ps1 := s.vars["PS1"]
+	if s.pending != "" {
+		ps1 = s.vars["PS2"]
+	}
 	var out strings.Builder
 	for i := 0; i < len(ps1); i++ {
 		if ps1[i] != '\\' || i+1 == len(ps1) {
@@ -159,14 +180,6 @@ func (s *Shell) Prompt() string {
 		}
 	}
 	return out.String()
-}
-
-// step is one command in a line, plus how it is linked to the previous one.
-type step struct {
-	op     string   // ";" = always, "&&" = if the previous succeeded, "||" = if it failed, "|" = gets its output
-	args   []string // its words as typed (quotes and $... still in): expanded when it runs
-	redirs []redir  // its redirections, in the order written (it matters: ">f 2>&1" is not "2>&1 >f")
-	group  int      // the "( )" group it is in (0 = none): in "(a; b) | c", c gets a's and b's output
 }
 
 // redir is one redirection, as ash parses it (parseredir in ash.c): "2>/dev/null" = {2, ">", "/dev/null"}.
@@ -207,20 +220,53 @@ func (s *Shell) Run(line string) (string, int, bool) {
 }
 
 // RunTo is Run with the output and the errors written apart, in the order they come (an SSH session
-// without a pty sends the errors as a stream of their own). A shell that isn't interactive (SSH without
-// a pty, exec) ends at the first error that ends a line, like ash's main loop: exit is true then.
+// without a pty sends the errors as a stream of their own). The shell ends (exit is true) on exit, on
+// return outside a function, and if it isn't interactive (SSH without a pty, exec) at the first error
+// that ends a line, like ash's main loop.
 func (s *Shell) RunTo(line string, out, errs io.Writer) (code int, exit bool) {
-	s.budget, s.work, s.raised = maxCommands, maxWork, false
+	s.budget, s.work, s.raised, s.skip, s.crashed = maxCommands, maxWork, false, 0, false
 	var o output
 	if s.execCommand {
-		exit = s.runLines(line, &o) // sh -c: the whole command, counting its lines
+		s.runCode(line, 1, &o) // sh -c: the whole command
 	} else {
-		s.lineno++ // the login shell counts the lines it read ($LINENO)
+		s.linesRead++ // the login shell counts the lines it read ($LINENO)
 		if s.interactive {
-			s.remember(line) // the history is line editing's: only on a terminal
+			s.remember(line) // the history is line editing's: each line typed
 		}
-		exit = s.run(line, &o)
+		// what the shell reads is the line with its newline, after the lines of a command not finished yet
+		code, first := s.pending+line+"\n", s.pendingLine
+		if s.pending == "" {
+			first = s.linesRead
+		}
+		more := len(code) <= maxPending // past it: the error ash would give at the end of its input
+		_, s.pending, s.pendingLine = s.runInput(code, first, more, &o)
 	}
+	return s.status, s.finish(&o, out, errs)
+}
+
+// maxPending is how long a command may grow while it waits for its next lines (an open quote that never
+// closes, a "for" without its "done"): the agent keeps it in RAM.
+const maxPending = 64 * 1024
+
+// EndOfInput tells the shell its input ended (an SSH session without a pty, at EOF): a command still
+// waiting for its next lines gets the syntax error ash gives at the end of its input. Returns the exit
+// code the shell ends with.
+func (s *Shell) EndOfInput(out, errs io.Writer) int {
+	if s.pending == "" {
+		return s.status
+	}
+	s.budget, s.work, s.raised, s.skip, s.crashed = maxCommands, maxWork, false, 0, false
+	var o output
+	code, first := s.pending, s.pendingLine
+	s.pending = ""
+	s.runCode(code, first, &o)
+	s.finish(&o, out, errs)
+	return s.status
+}
+
+// finish writes what a line printed, its output and its errors apart, and says whether the shell
+// ended: exit, return outside a function, or (not interactive) an error that ends a line.
+func (s *Shell) finish(o *output, out, errs io.Writer) (exit bool) {
 	for _, c := range o.chunks {
 		if c.fd == 2 {
 			io.WriteString(errs, c.text)
@@ -228,99 +274,26 @@ func (s *Shell) RunTo(line string, out, errs io.Writer) (code int, exit bool) {
 			io.WriteString(out, c.text)
 		}
 	}
-	return s.status, exit || s.raised && !s.interactive
+	return s.skip == skipExit || s.skip == skipFunc || s.raised && !s.interactive
 }
 
-// run executes one line in this shell, writing to o. Returns whether exit ran.
-func (s *Shell) run(line string, o *output) bool {
-	steps, syntaxErr := parse(line)
-	if syntaxErr != "" {
-		s.raise(o, "", "syntax error: "+syntaxErr) // nothing on the line runs
-		return false
-	}
-	piped := ""      // output kept for the next command if it is linked with |
-	skipped := false // whether the previous command was skipped (because of && or ||)
-	var outside state
-	groupDone := false // the current ( ) group ran exit or raised an error: the rest of it is skipped
-	for i, st := range steps {
-		if s.budget <= 0 || s.raised && st.group == 0 {
-			break
-		}
-		if st.group != 0 && (i == 0 || steps[i-1].group != st.group) {
-			outside, groupDone = s.save(), false // ( ) is a subshell: its cd and variables don't stay
-		}
-		exit := false
-		switch {
-		case len(st.args) == 0 && len(st.redirs) == 0, groupDone && st.group != 0:
-			// e.g. ";;" or a trailing "&"
-		case (st.op == "&&" && s.status != 0) || (st.op == "||" && s.status == 0) || (st.op == "|" && skipped):
-			skipped = true
-			if st.op == "|" {
-				piped = "" // nobody reads it now
-			}
-		default:
-			skipped = false
-			input := ""
-			if st.op == "|" {
-				input, piped = piped, ""
-			} else if s.stdin != "" {
-				input, s.stdin = s.stdin, ""
-			}
-			// the output goes to the command linked with | after this one (or after its whole group:
-			// in "(a; b) | c" both a's and b's), not to the screen; errors go to the screen at once
-			next := i + 1
-			for st.group != 0 && next < len(steps) && steps[next].group == st.group {
-				next++
-			}
-			toPipe := next < len(steps) && steps[next].op == "|"
-
-			var res output
-			if st.group == 0 && (st.op == "|" || toPipe) {
-				// ash runs each command of a pipeline in a subshell: "echo a | read x" leaves x unset
-				saved := s.save()
-				s.runCommand(st, input, &res)
-				s.restore(saved)
-			} else {
-				exit = s.runCommand(st, input, &res)
-			}
-			for _, c := range res.chunks {
-				if c.fd == 1 && toPipe {
-					if len(piped) < maxSize {
-						piped += c.text
-					}
-				} else {
-					o.add(c.fd, c.text)
-				}
-			}
-		}
-		if st.group != 0 && (exit || s.raised && s.budget > 0) {
-			groupDone, exit, s.raised = true, false, false // they end only the subshell
-		}
-		if st.group != 0 && (i+1 == len(steps) || steps[i+1].group != st.group) {
-			s.restore(outside)
-		}
-		if exit {
-			return true
-		}
-	}
-	return false
-}
-
-// runCommand expands one command's words (with the variables and $? of this moment) and runs it.
-func (s *Shell) runCommand(st step, input string, o *output) bool {
-	if s.budget--; s.budget == 0 {
+// simple runs a simple command: expands its words (with the variables and $? of this moment), then runs
+// it with its redirections: a function, one of the shell's own commands, or a program.
+func (s *Shell) simple(n *node, o *output) {
+	s.lineno = s.lineOf(n)
+	if s.budget--; s.budget <= 0 {
 		s.raise(o, "", "can't fork: Resource temporarily unavailable")
-		return false
+		return
 	}
 	s.substStatus = 0
-	words := st.args
+	words := n.words
 	var assigns []string // X=1 before the command
 	for len(words) > 0 && isAssignment(words[0]) {
 		assigns, words = append(assigns, words[0]), words[1:]
 	}
 	args := s.expandWords(words, o)
-	redirs := make([]redir, len(st.redirs))
-	for i, r := range st.redirs {
+	redirs := make([]redir, len(n.redirs))
+	for i, r := range n.redirs {
 		redirs[i] = r
 		redirs[i].target = s.expandText(r.target, o)
 	}
@@ -330,24 +303,39 @@ func (s *Shell) runCommand(st step, input string, o *output) bool {
 		values[i] = s.expandText(raw, o)
 	}
 	if s.raised {
-		return false
+		return
 	}
 	if len(args) == 0 { // only assignments: they stay (before a command they would be its environment)
 		for i, a := range assigns {
 			name, _, _ := strings.Cut(a, "=")
 			if msg := s.setVar(name, values[i]); msg != "" {
 				s.raise(o, "", msg)
-				return false
+				return
 			}
 		}
 	}
-	res, code, exit := s.exec(args, redirs, input)
+	name, exit := "", false
+	if len(args) > 0 {
+		name = args[0]
+	}
+	code := s.redirected(redirs, name, o, func(out *output) int {
+		if len(args) == 0 { // "> file" alone is valid: it only creates the file
+			return 0
+		}
+		if f, ok := s.funcs[args[0]]; ok {
+			return s.call(f, args, out)
+		}
+		code, e := s.dispatch(args, s.stdin, out)
+		exit = e
+		return code
+	})
 	if len(args) == 0 && code == 0 {
 		code = s.substStatus // "X=$(false)" fails
 	}
 	s.status = code
-	o.chunks = append(o.chunks, res.chunks...)
-	return exit
+	if exit {
+		s.skip = skipExit
+	}
 }
 
 // isAssignment: NAME=... as typed (a name not in quotes, then "=").
@@ -369,245 +357,6 @@ func validName(name string) bool {
 	return true
 }
 
-// parse splits the line into commands on ; && || | (but not inside quotes), each command into words
-// on whitespace, and takes out the redirections, glued to the words or not ("echo hi>x"), like ash.
-// Words stay as typed: quotes, backslashes, $(...), ${...}, `...` are taken apart when the command
-// runs (expand.go); the operators inside them are text. A syntax error (a redirection without its
-// file, an unclosed quote) gives ash's message, and nothing on the line runs.
-func parse(line string) ([]step, string) {
-	steps := []step{{op: ";"}}
-	var word strings.Builder
-	inWord := false
-	group, open := 0, 0 // the current "( )" group's number and how many "(" are still open
-	needTarget := false // the last redirection still waits for its word
-	syntaxErr := ""
-
-	endWord := func() {
-		if !inWord {
-			return
-		}
-		last := &steps[len(steps)-1]
-		if needTarget {
-			last.redirs[len(last.redirs)-1].target = word.String()
-			needTarget = false
-		} else {
-			last.args = append(last.args, word.String())
-		}
-		word.Reset()
-		inWord = false
-	}
-	// unexpected: what comes instead of a redirection's word, in ash's words (tokname). The line
-	// won't run; parsing goes on without that word (so the next word isn't taken for it)
-	unexpected := func(what string) {
-		if needTarget && syntaxErr == "" {
-			syntaxErr = "unexpected " + what
-		}
-		needTarget = false
-	}
-	newStep := func(op, token string) {
-		endWord()
-		unexpected(token)
-		// "; echo", "a; | b": no command before the operator (a newline alone is fine: an empty line)
-		if last := steps[len(steps)-1]; token != "newline" && len(last.args) == 0 && len(last.redirs) == 0 && syntaxErr == "" {
-			syntaxErr = "unexpected " + token
-		}
-		st := step{op: op}
-		if open > 0 {
-			st.group = group
-		}
-		steps = append(steps, st)
-	}
-	addRedir := func(fd int, op string) {
-		unexpected("redirection")
-		last := &steps[len(steps)-1]
-		last.redirs = append(last.redirs, redir{fd: fd, op: op})
-		needTarget = true
-	}
-
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		next := byte(0)
-		if i+1 < len(line) {
-			next = line[i+1]
-		}
-		switch {
-		case c == '\\' || c == '\'' || c == '"' || c == '`' || c == '$' && (next == '(' || next == '{' || next == '\''):
-			end, err := partEnd(line, i) // kept whole, as typed
-			if err != "" && syntaxErr == "" {
-				syntaxErr = err
-			}
-			word.WriteString(line[i:end])
-			inWord = true
-			i = end - 1
-		case c == '#' && !inWord: // a comment, up to the end of the line
-			for i+1 < len(line) && line[i+1] != '\n' {
-				i++
-			}
-		case c == ' ' || c == '\t' || c == '\r':
-			endWord()
-		case c == '>' || c == '<':
-			fd := 1
-			if c == '<' {
-				fd = 0
-			}
-			// "2>x": a word of only digits right before is the descriptor; "a2>x" = "a2" + ">x"
-			// ("2">x is a word: the quotes are still in it)
-			if inWord && isFDNumber(word.String()) {
-				fd, _ = strconv.Atoi(word.String())
-				word.Reset()
-				inWord = false
-			}
-			endWord()
-			op := string(c)
-			if c == '>' && (next == '>' || next == '&' || next == '|') || c == '<' && (next == '<' || next == '&' || next == '>') {
-				op += string(next)
-				i++
-			}
-			if op == ">|" {
-				op = ">" // ">|" overwrites even with noclobber, which we never have
-			}
-			addRedir(fd, op)
-		case c == '&' && next == '>': // "&>file" = ">file 2>&1" (ash's bash compatibility, on in Buildroot)
-			endWord()
-			addRedir(1, "&>")
-			i++
-		case c == '(' && !inWord:
-			// a subshell, "(crontab -l; echo JOB) | crontab -" (how miners add a cron job): its commands
-			// are marked as one group, run in a copy of the shell (run: save / restore)
-			if open == 0 {
-				group++
-				steps[len(steps)-1].group = group // the step this "(" starts
-			}
-			open++
-		case c == ')' && open > 0:
-			open--
-			endWord()
-			unexpected(`")"`)
-		case c == ';' && next == ';': // a case's terminator, and there are no cases
-			if syntaxErr == "" {
-				syntaxErr = `unexpected ";;"`
-			}
-			newStep(";", `";;"`)
-			i++
-		case c == ';':
-			newStep(";", `";"`)
-		case c == '\n':
-			newStep(";", "newline")
-		case c == '&' || c == '|':
-			if next == c {
-				newStep(line[i:i+2], `"`+line[i:i+2]+`"`) // && or ||
-				i++
-			} else if c == '|' {
-				newStep("|", `"|"`)
-			} else {
-				newStep(";", `"&"`) // a single & = "run in background" -> same as ; for us
-			}
-		default:
-			word.WriteByte(c)
-			inWord = true
-		}
-	}
-	endWord()
-	unexpected("newline")
-	// "echo a &&" with nothing after: a real login shell would wait for the rest (PS2 "> "); like sh -c
-	if last := steps[len(steps)-1]; len(last.args) == 0 && len(last.redirs) == 0 && syntaxErr == "" &&
-		(last.op == "&&" || last.op == "||" || last.op == "|") {
-		syntaxErr = "unexpected end of file"
-	}
-	return steps, syntaxErr
-}
-
-// partEnd returns where the escape, quoted string, $(...), $((...)), ${...} or `...` that starts at
-// line[i] ends (the index after it), skipping what is nested inside, like ash's parser. If it never
-// ends: the end of the line, and ash's syntax error.
-func partEnd(line string, i int) (int, string) {
-	switch line[i] {
-	case '\\':
-		return min(i+2, len(line)), ""
-	case '\'':
-		if j := strings.IndexByte(line[i+1:], '\''); j >= 0 {
-			return i + j + 2, ""
-		}
-		return len(line), "unterminated quoted string"
-	case '"':
-		for j := i + 1; j < len(line); j++ {
-			switch c := line[j]; {
-			case c == '\\':
-				j++
-			case c == '"':
-				return j + 1, ""
-			case c == '`' || c == '$' && j+1 < len(line) && (line[j+1] == '(' || line[j+1] == '{'):
-				end, err := partEnd(line, j)
-				if err != "" {
-					return end, err
-				}
-				j = end - 1
-			}
-		}
-		return len(line), "unterminated quoted string"
-	case '`':
-		for j := i + 1; j < len(line); j++ {
-			switch line[j] {
-			case '\\':
-				j++
-			case '`':
-				return j + 1, ""
-			}
-		}
-		return len(line), "EOF in backquote substitution"
-	}
-	if line[i+1] == '\'' { // $'...' (bash's, on in ash): like '...', but \' doesn't end it
-		for j := i + 2; j < len(line); j++ {
-			switch line[j] {
-			case '\\':
-				j++
-			case '\'':
-				return j + 1, ""
-			}
-		}
-		return len(line), "unterminated quoted string"
-	}
-	// $( $(( ${: count the brackets, skipping what is quoted or nested inside
-	opener, closer, err := byte('('), byte(')'), `unexpected end of file (expecting ")")`
-	switch {
-	case line[i+1] == '{':
-		opener, closer, err = '{', '}', "missing '}'"
-	case strings.HasPrefix(line[i:], "$(("):
-		err = "missing '))'"
-	}
-	depth := 0
-	for j := i + 1; j < len(line); j++ {
-		switch c := line[j]; {
-		case c == '\\' || c == '\'' || c == '"' || c == '`' || c == '$' && j+1 < len(line) && (line[j+1] == '(' || line[j+1] == '{'):
-			end, e := partEnd(line, j)
-			if e != "" {
-				return end, e
-			}
-			j = end - 1
-		case c == opener:
-			depth++
-		case c == closer:
-			if depth--; depth == 0 {
-				return j + 1, ""
-			}
-		}
-	}
-	return len(line), err
-}
-
-// isFDNumber: ash takes a word of 1 to 9 digits right before > or < as the descriptor (isdigit_str9).
-func isFDNumber(w string) bool {
-	if len(w) == 0 || len(w) > 9 {
-		return false
-	}
-	for _, c := range w {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // sink is where a descriptor writes: the command's original output or errors (orig 1 or 2: the screen,
 // or for 1 the next command after |), a file (orig 0), or nowhere because it was closed (orig -1, >&-).
 type sink struct {
@@ -615,18 +364,19 @@ type sink struct {
 	file string // absolute path
 }
 
-// exec runs a single command (no ; && || |), already expanded. Its redirections are applied first, in
-// order, like ash does: "> f" creates f even if the command then fails, "2>&1" copies where 1 points
-// *now*. Returns what went to the original output and errors (in order), the exit code and whether it
-// was exit.
-func (s *Shell) exec(args []string, redirs []redir, input string) (res output, code int, exit bool) {
+// redirected applies a command's redirections, in order, like ash does: "> f" creates f even if the
+// command then fails, "2>&1" copies where 1 points *now*. Then it runs body (the command: a simple one,
+// or all of an if / a loop / a { }) and sends what it wrote where the descriptors point: to o (1 and 2
+// as they were) or to files. name is the command's, for its "write error". Returns body's exit code
+// (1 if a redirection failed: then body doesn't run).
+func (s *Shell) redirected(redirs []redir, name string, o *output, body func(out *output) int) int {
 	fds := map[int]sink{0: {orig: 2}, 1: {orig: 1}, 2: {orig: 2}} // 0 = the terminal, writable too
 	// write sends text to a sink; an error = the write failed (the command reports it, see below)
 	write := func(to sink, text string) error {
 		switch {
 		case text == "":
 		case to.orig == 1 || to.orig == 2:
-			res.add(to.orig, text)
+			o.add(to.orig, text)
 		case to.orig == -1:
 			return errBadFD
 		default:
@@ -636,9 +386,9 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 		return nil
 	}
 	// fail: a redirection that can't be done stops the command; ash's message goes where 2 points now
-	fail := func(msg string) (output, int, bool) {
+	fail := func(msg string) int {
 		write(fds[2], s.errorf("", msg))
-		return res, 1, false
+		return 1
 	}
 	// open creates (">", or empties it) or appends to (">>") a file now, before the command runs
 	open := func(name string, appendTo bool) (sink, bool) {
@@ -653,12 +403,13 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 		return sink{file: resolve(s.cwd, name)}, true
 	}
 
+	input, ownInput := "", false
 	for _, r := range redirs {
 		switch r.op {
 		case ">", ">>", "&>":
 			to, ok := open(r.target, r.op == ">>")
 			if !ok {
-				return res, 1, false
+				return 1
 			}
 			fds[r.fd] = to
 			if r.op == "&>" {
@@ -681,7 +432,7 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 			default:
 				to, ok := open(r.target, false)
 				if !ok {
-					return res, 1, false
+					return 1
 				}
 				fds[1], fds[2] = to, to
 			}
@@ -694,22 +445,25 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 			case ok || s.isDir(p): // a directory opens fine; reading it gives nothing here
 			case r.op == "<>": // read and write: created if missing
 				if _, ok := open(r.target, true); !ok {
-					return res, 1, false
+					return 1
 				}
 			default:
 				return fail("can't open " + r.target + ": no such file") // ash's text for ENOENT
 			}
 			if r.fd == 0 {
-				input = content
+				input, ownInput = content, true
 			}
 		case "<&", "<<": // input from another descriptor, a here-document: not simulated, no effect
 		}
 	}
+	if ownInput { // the command (and all it runs: "while read x; do ...; done < f") reads this instead
+		saved := s.stdin
+		s.stdin = input
+		defer func() { s.stdin = saved }()
+	}
 
 	var out output
-	if len(args) > 0 { // "> file" alone is valid: it only creates the file
-		code, exit = s.dispatch(args, input, &out)
-	}
+	code := body(&out)
 	failed := false
 	for _, c := range out.chunks {
 		if c.fd == 2 {
@@ -719,8 +473,8 @@ func (s *Shell) exec(args []string, redirs []redir, input string) (res output, c
 		// the output's write failed: the disk filled up, the descriptor was closed (>&-), /proc refused it
 		if err := write(fds[1], c.text); err != nil && !failed {
 			failed, code = true, 1
-			write(fds[2], writeError(args[0], err))
+			write(fds[2], writeError(name, err))
 		}
 	}
-	return res, code, exit
+	return code
 }

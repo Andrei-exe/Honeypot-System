@@ -555,6 +555,9 @@ func TestSSHShellWithoutPTY(t *testing.T) {
 		{"echo a\necho ${x?unset}\necho never\n", false, "a\n", "-sh: x: unset\n", 2},
 		{"echo a; exit 3\necho never\n", false, "a\n", "", 3},
 		{"echo $TERM$SSH_TTY. $PS1 $SSH_CLIENT; history", true, ". \\u@\\h:\\w\\$ 127.0.0.1 PORT 22\n", "", 0},
+		// a command on several lines waits for them; one not finished at EOF is a syntax error (code 2)
+		{"for i in 1 2\ndo\necho $i\ndone\necho $LINENO\n", true, "1\n2\n5\n", "", 0},
+		{"echo a\nfor i in 1; do\n", true, "a\n", "-sh: syntax error: unexpected end of file\n", 2},
 	} {
 		stdout, stderr, code, port := sshRun(t, func(session *ssh.Session, stdin io.WriteCloser) error {
 			if err := session.Shell(); err != nil {
@@ -582,10 +585,12 @@ func TestSSHShellWithPTY(t *testing.T) {
 		if err := session.Shell(); err != nil {
 			return err
 		}
-		fmt.Fprint(stdin, "echo $TERM $SSH_TTY $-\rnosuch\rexit 4\r")
+		fmt.Fprint(stdin, "echo $TERM $SSH_TTY $-\rnosuch\rfor i in 1 2\rdo echo n$i; done\rexit 4\r")
 		return nil
 	})
-	for _, want := range []string{"root@gateway:~# ", "vt100 /dev/pts/0 smi\r\n", "-sh: nosuch: not found\r\n"} {
+	// a command not finished waits for its next line with $PS2 ("> ")
+	for _, want := range []string{"root@gateway:~# ", "vt100 /dev/pts/0 smi\r\n", "-sh: nosuch: not found\r\n",
+		"for i in 1 2\r\n> do echo n$i; done\r\nn1\r\nn2\r\nroot@gateway:~# "} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("no %q in %q", want, stdout)
 		}

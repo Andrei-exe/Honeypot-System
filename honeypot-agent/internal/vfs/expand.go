@@ -26,8 +26,11 @@ type expander struct {
 	o      *output // where $(...)'s errors and the shell's own ("bad substitution") go
 	split  bool    // split on $IFS and match files (not in an assignment or a redirection)
 	inWord bool    // in the word of an unquoted ${X:-word}: its own text is split too
-	fields []*field
-	size   int // bytes made: a command's words are capped like its output (maxSize)
+	// a pattern (case, ${X#...}): the * ? [ an unquoted expansion gives match like typed ones
+	// (P='a*'; ${X#$P}), quoted ones only themselves (${X#"$P"})
+	pattern bool
+	fields  []*field
+	size    int // bytes made: a command's words are capped like its output (maxSize)
 }
 
 // expandWords expands a command's words (as typed) into its arguments.
@@ -85,7 +88,7 @@ func (s *Shell) expandText(raw string, o *output) string {
 
 // expandPattern expands the pattern of ${X#pattern} and the like: quoted parts match themselves.
 func (s *Shell) expandPattern(raw string, o *output) string {
-	e := &expander{s: s, o: o}
+	e := &expander{s: s, o: o, pattern: true}
 	e.text(raw, false)
 	return e.cur().pattern.String()
 }
@@ -119,7 +122,7 @@ func (e *expander) char(c byte, quoted bool) {
 func (e *expander) value(v string, quoted bool) {
 	if quoted || !e.split {
 		for i := 0; i < len(v); i++ {
-			e.char(v[i], true)
+			e.char(v[i], quoted || !e.pattern)
 		}
 		return
 	}
@@ -608,7 +611,7 @@ func (s *Shell) homeOf(user string) (string, bool) {
 // Its errors go to the screen (o) now, before the command's own output.
 func (s *Shell) substitute(code string, o *output) string {
 	var out output
-	s.child(o, func() { s.runLines(code, &out) })
+	s.child(o, func() { s.runCode(code, s.lineno, &out) }) // its lines are counted from the command's
 	s.substStatus = s.status
 	var text strings.Builder
 	for _, c := range out.chunks {

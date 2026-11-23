@@ -8,9 +8,22 @@ import (
 // sshVars is what Dropbear adds to the environment of the oracle's sessions (PUBLIC_IP 198.51.100.7).
 var sshVars = map[string]string{"SSH_CLIENT": "203.0.113.9 40000 22", "SSH_CONNECTION": "203.0.113.9 40000 198.51.100.7 22"}
 
+// runTyped runs a line typed into a new login shell, then ends its input, like the oracle's sh -ic LINE:
+// a command the line leaves unfinished gets ash's "unexpected end of file". Returns the screen and $?.
+func runTyped(line string) (string, int) {
+	var screen strings.Builder
+	sh := NewShell()
+	code, exit := sh.RunTo(line, &screen, &screen)
+	if !exit {
+		code = sh.EndOfInput(&screen, &screen)
+	}
+	return screen.String(), code
+}
+
 // runSSH runs input the way an SSH session without a pty does: exec = sh -c with the whole input; else the
 // login shell reads it line by line (a last line without a newline counts) until EOF, exit or an error
-// that ends it. Returns what went to stdout and stderr and the exit code.
+// that ends it; a command still waiting for its next lines at EOF is an error then (runSSHPlain).
+// Returns what went to stdout and stderr and the exit code.
 func runSSH(input string, exec bool) (stdout, stderr string, code int) {
 	var out, errs strings.Builder
 	sh := NewSSHShell("root", sshVars, false, exec)
@@ -24,9 +37,10 @@ func runSSH(input string, exec bool) (stdout, stderr string, code int) {
 		}
 		exit := false
 		if code, exit = sh.RunTo(strings.TrimSuffix(line, "\n"), &out, &errs); exit {
-			break
+			return out.String(), errs.String(), code
 		}
 	}
+	code = sh.EndOfInput(&out, &errs) // (before the String calls: Go evaluates a return's values in order)
 	return out.String(), errs.String(), code
 }
 

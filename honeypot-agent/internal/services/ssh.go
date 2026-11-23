@@ -348,7 +348,8 @@ func runSSHTerminal(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 
 // runSSHPlain is the login shell without a pty (ssh -T, scripts, bots that skip pty-req): ash reads its
 // lines from its input, no prompt, no echo, plain \n, the errors apart. It ends at EOF (the client closed
-// its side) with the last command's code, at exit, or at the first error that ends a line (code 2).
+// its side) with the last command's code (a command still waiting for its next lines: ash's syntax
+// error, code 2), at exit, or at the first error that ends a line (code 2).
 func runSSHPlain(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 	newEvent func(string) models.HoneypotEvent, shipper *shipper.Shipper) int {
 
@@ -359,7 +360,7 @@ func runSSHPlain(conn net.Conn, channel ssh.Channel, sh *vfs.Shell,
 		conn.SetDeadline(time.Now().Add(sshIdleTimeout)) // the whole line within it, like Telnet
 		line, err := readPlainLine(reader)
 		if err != nil {
-			return code
+			return sh.EndOfInput(channel, channel.Stderr())
 		}
 
 		pace.wait()
