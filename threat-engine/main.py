@@ -1,14 +1,19 @@
+# main.py - analiza OFFLINE a unui fisier JSONL (mock-ul, un export, received_events.jsonl).
+#
+# Foloseste ACELASI drum ca receiver.py (engine.py): aceeasi validare, aceleasi duplicate,
+# aceleasi reguli. Diferenta: citeste un fisier intreg si scrie rapoarte, nu ruleaza ca server.
+# Pe acelasi fisier da aceleasi alerte ca receiver-ul.
+
 import argparse
 import json
 import os
-from collections import Counter
 from reader import read_events, DATA_FILE
-from filters import is_internal, check_event, build_alert, BruteForceTracker
-from sessions import group_sessions, session_summary, kill_chain_funnel
-from correlation import correlate
-from clustering import cluster
+from engine import Engine
+from storage import MemoryStorage
+from sessions import kill_chain_funnel
 from blocklist import build_blocklist
 from attack_techniques import navigator_layer
+from texts import STAGE_LABELS, present_stages, present_campaign, present_family
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "filtered_alerts.json")
@@ -30,6 +35,11 @@ def parse_args():
     return parser.parse_args()
 
 
+def timestamp_text(event):
+    value = event.get("timestamp") if isinstance(event, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def main():
     args = parse_args()
     print("threat engine running")
@@ -43,46 +53,18 @@ def main():
         return
 
     print(f"[+] preluat {len(raw_events)} evenimente colectate")
-    raw_events.sort(key=lambda e: e.get("timestamp", ""))
+    raw_events.sort(key=timestamp_text)
 
-    alerts = []
-    analyzed_events = []
-    ignored_internal = 0
-    threat_stats = Counter()
-    severity_stats = Counter()
-    attacker_ips = Counter()
-    cred_combos = Counter()
-    tracker = BruteForceTracker(threshold=args.bf_threshold)
+    # max_sessions=None: aici analizam tot fisierul, nu doar ultimele 2000 de sesiuni
+    engine = Engine(MemoryStorage(), include_internal=args.include_internal,
+                    bf_threshold=args.bf_threshold, max_sessions=None)
+    result = engine.ingest(raw_events)
+    alerts = result["new_alerts"]
+    stats = engine.stats
 
-    for ev in raw_events:
-        if is_internal(ev) and not args.include_internal:
-            ignored_internal += 1
-            continue
-
-        analyzed_events.append(ev)
-        src_ip = ev.get("source_ip", "IP_NECUNOSCUT")
-
-        if ev.get("event_type") == "login_attempt":
-            creds = ev.get("credentials") or {}
-            user = creds.get("username", "").strip()
-            pwd = creds.get("password", "").strip()
-            if user or pwd:
-                cred_combos[f"{user}:{pwd}"] += 1
-
-        is_threat, score, reason = check_event(ev, tracker)
-
-        if is_threat:
-            alert = build_alert(ev, score, reason)
-            alerts.append(alert)
-            severity = alert["severity"]
-
-            proto = ev.get("protocol", "UNKNOWN").upper()
-            threat_stats[proto] += 1
-            severity_stats[severity] += 1
-            if src_ip != "IP_NECUNOSCUT":
-                attacker_ips[src_ip] += 1
-
-            print(f"[ALERT][{severity:<8}] {src_ip:<15} | Proto: {proto:<6} -> {reason}")
+    for alert in alerts:
+        proto = (alert.get("protocol") or "UNKNOWN").upper()
+        print(f"[ALERT][{alert['severity']:<8}] {alert.get('source_ip', '?'):<15} | Proto: {proto:<6} -> {alert['alert_reason']}")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     try:
@@ -93,41 +75,44 @@ def main():
         print(f"[EROARE] salvarea fisierului cu alerte a esuat: {e}")
         return
 
-    sessions = group_sessions(analyzed_events)
-    summaries = [session_summary(sid, evs) for sid, evs in sessions.items()]
+    summaries = engine.summaries()
     summaries.sort(key=lambda s: s["start"] or "")
     try:
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(summaries, f, indent=2, ensure_ascii=False)
+            json.dump([present_stages(s) for s in summaries], f, indent=2, ensure_ascii=False)
         print(f"[+] {len(summaries)} sesiuni exportate in: {SESSIONS_FILE}")
     except IOError as e:
         print(f"[EROARE] salvarea sesiunilor a esuat: {e}")
 
     print("\n--- analiza tldr ---")
-    print(f"total evenimente citite    : {len(raw_events)}")
-    print(f"trafic intern exclus       : {ignored_internal}")
-    print(f"total amenintari detectate : {len(alerts)}")
-    print(f"adrese IP unice de atac    : {len(attacker_ips)}")
-    if threat_stats:
-        distributie = ", ".join(f"{k}: {v}" for k, v in threat_stats.items())
+    print(f"total evenimente citite    : {result['received']}")
+    if result["rejected"]:
+        print(f"evenimente invalide        : {result['rejected']} ({', '.join(result['rejected_reasons'])})")
+    if result["duplicates"]:
+        print(f"duplicate (acelasi id)     : {result['duplicates']}")
+    print(f"trafic intern exclus       : {result['accepted'] - stats.total_events}")
+    print(f"total amenintari detectate : {stats.total_alerts}")
+    print(f"adrese IP unice de atac    : {len(stats.alerts_by_ip)}")
+    if stats.alerts_by_protocol:
+        distributie = ", ".join(f"{k}: {v}" for k, v in stats.alerts_by_protocol.items())
         print(f"spread protocoale          : {distributie}")
-    if severity_stats:
-        sev_dist = ", ".join(f"{k}: {v}" for k, v in severity_stats.items())
+    if stats.alerts_by_severity:
+        sev_dist = ", ".join(f"{k}: {v}" for k, v in stats.alerts_by_severity.items())
         print(f"distributie severitate     : {sev_dist}")
-    if attacker_ips:
-        top_ips = ", ".join(f"{ip} ({cnt})" for ip, cnt in attacker_ips.most_common(5))
+    if stats.alerts_by_ip:
+        top_ips = ", ".join(f"{ip} ({cnt})" for ip, cnt in stats.alerts_by_ip.most_common(5))
         print(f"top 5 IP-uri atacante      : {top_ips}")
-    if cred_combos:
-        top_creds = ", ".join(f"{c} ({cnt}x)" for c, cnt in cred_combos.most_common(5))
+    if stats.credentials:
+        top_creds = ", ".join(f"{c} ({cnt}x)" for c, cnt in stats.credentials.most_common(5))
         print(f"top 5 credentiale incercate: {top_creds}")
     if summaries:
         print(f"\npalnia kill chain ({len(summaries)} sesiuni):")
         funnel = kill_chain_funnel(summaries)
         first_count = funnel[0][1] or 1
         for stage, count in funnel:
-            print(f"  {stage:<16} : {count:>4}  ({count * 100 // first_count}%)")
+            print(f"  {STAGE_LABELS[stage]:<16} : {count:>4}  ({count * 100 // first_count}%)")
 
-    campaigns = correlate(summaries)
+    campaigns = [present_campaign(c) for c in engine.campaigns()]
     if campaigns:
         print(f"\ncampanii detectate (atacatori legati intre ei): {len(campaigns)}")
         for i, campaign in enumerate(campaigns, start=1):
@@ -135,7 +120,7 @@ def main():
             if campaign["servers"]:
                 print(f"      servere: {', '.join(campaign['servers'])}")
 
-    families = cluster(summaries)
+    families = [present_family(f) for f in engine.families()]
     if families:
         print(f"\nfamilii de atacatori (dupa comportament): {len(families)}")
         for i, family in enumerate(families, start=1):

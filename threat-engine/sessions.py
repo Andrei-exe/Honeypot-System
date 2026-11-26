@@ -1,6 +1,7 @@
 from filters import command_words, parse_time
 
-STAGES = ["conectare", "incercare login", "login reusit", "comenzi", "descarcare", "persistenta"]
+# etapele kill chain, in ordine. Coduri fixe: textul afisat e in texts.py (STAGE_LABELS).
+STAGES = ["connect", "login_attempt", "login_success", "commands", "download", "persistence"]
 
 DOWNLOAD_COMMANDS = ["wget", "curl", "tftp", "ftpget"]
 
@@ -45,7 +46,7 @@ def is_persistence(command):
 
 def session_stages(session_events):
     """Etapele atinse intr-o sesiune. Comenzile conteaza doar dupa un login reusit."""
-    stages = {"conectare"}
+    stages = {"connect"}
     logged_in = False
 
     for event in session_events:
@@ -54,21 +55,21 @@ def session_stages(session_events):
         creds = event.get("credentials") or {}
 
         if event_type == "login_attempt":
-            stages.add("incercare login")
+            stages.add("login_attempt")
             if creds.get("success"):
-                stages.add("login reusit")
+                stages.add("login_success")
                 logged_in = True
 
         elif event_type == "command_exec" and logged_in:
-            stages.add("comenzi")
-            command = payload.get("command", "").lower()
+            stages.add("commands")
+            command = (payload.get("command") or "").lower()
             if is_download(command, payload):
-                stages.add("descarcare")
+                stages.add("download")
             if is_persistence(command):
-                stages.add("persistenta")
+                stages.add("persistence")
 
         elif event_type == "file_download":
-            stages.add("descarcare")
+            stages.add("download")
 
     return stages
 
@@ -138,7 +139,8 @@ def session_summary(session_id, session_events):
 
 
 class SessionStore:
-    """Tine minte evenimentele ultimelor sesiuni (implicit 2000), ca sa le poata rezuma oricand."""
+    """Tine minte evenimentele ultimelor sesiuni (implicit 2000), ca sa le poata rezuma oricand.
+    max_sessions=None = fara limita (main.py, care analizeaza un fisier intreg)."""
 
     def __init__(self, max_sessions=2000):
         self.max_sessions = max_sessions
@@ -150,7 +152,7 @@ class SessionStore:
             return
         if session_id not in self.sessions:
             self.sessions[session_id] = []
-            if len(self.sessions) > self.max_sessions:
+            if self.max_sessions is not None and len(self.sessions) > self.max_sessions:
                 self.forget_oldest()
         self.sessions[session_id].append(event)
 
@@ -171,7 +173,7 @@ class SessionStore:
 
 
 def kill_chain_funnel(summaries):
-    """Cate sesiuni au ajuns la fiecare etapa: [('conectare', 18), ...]."""
+    """Cate sesiuni au ajuns la fiecare etapa: [('connect', 18), ...]."""
     funnel = []
     for stage in STAGES:
         count = 0

@@ -60,6 +60,8 @@ class Attack:
 
     def event(self, event_type):
         event = {
+            # id unic, ca la agent: un lot retrimis e recunoscut si nu se salveaza de doua ori
+            "event_id": secrets.token_hex(8),
             "timestamp": self.timestamp(),
             "node_id": NODES[self.protocol],
             "event_type": event_type,

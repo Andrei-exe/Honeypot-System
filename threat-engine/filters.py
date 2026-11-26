@@ -1,76 +1,86 @@
+import hashlib
 import ipaddress
+from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
+from events import parse_time, content_id
 from scoring import score_to_severity
 from geo import geo_lookup
 from recommendations import recommend
 from attack_techniques import technique_for
+from texts import RULE_LABELS, REASON_TEMPLATES, COMMAND_TEMPLATE, HTTP_TEMPLATE, SECRET_LABELS, UNKNOWN
 
 # fiecare regula are PUNCTE, nu o severitate fixa. Punctele spun cat de grav e pasul
 # din lantul de atac. Severitatea iese la final din punctele adunate (vezi scoring.py).
+#
+# Fiecare regula are si un COD fix (ex. "reverse_shell"). Codul se salveaza; textul afisat
+# se face din cod abia la afisare (texts.py), ca sa-l putem schimba fara sa stricam datele.
 
-NOT_A_THREAT = (False, 0, "")
+# verdictul: e periculos?, cate puncte, codul regulii, detaliile ei (ce s-a gasit, cate parole...)
+Verdict = namedtuple("Verdict", ["is_threat", "score", "rule", "details"])
+NOT_A_THREAT = Verdict(False, 0, None, {})
 
 TARGET_USERS = [
     "root", "admin", "administrator", "guest", "test", "support", "oracle", "postgres"
 ]
 
-# (text cautat oriunde in comanda, puncte, ce inseamna)
+# (text cautat oriunde in comanda, puncte, codul regulii)
 COMMAND_PATTERNS = [
-    ("/dev/tcp/", 50, "reverse shell"),
-    ("bash -i", 50, "reverse shell"),
-    ("nc -e", 50, "reverse shell"),
-    ("authorized_keys", 45, "isi lasa cheia SSH (persistenta)"),
-    ("/etc/shadow", 35, "citeste parolele"),
-    ("rm -rf /var/log", 30, "sterge log-urile"),
-    ("base64 -d", 30, "decodeaza un payload ascuns"),
-    ("python -c", 30, "ruleaza cod Python"),
-    ("perl -e", 30, "ruleaza cod Perl"),
-    ("/etc/passwd", 25, "citeste lista de utilizatori"),
-    ("history -c", 25, "sterge istoricul comenzilor"),
-    ("chmod +x", 20, "face un fisier executabil"),
-    ("nohup", 20, "porneste ceva in fundal"),
-    ("\\x", 10, "testeaza daca shell-ul e real (echo -e, tipic Mirai)"),
+    ("/dev/tcp/", 50, "reverse_shell"),
+    ("bash -i", 50, "reverse_shell"),
+    ("nc -e", 50, "reverse_shell"),
+    ("authorized_keys", 45, "ssh_key_persistence"),
+    ("/etc/shadow", 35, "read_shadow"),
+    ("rm -rf /var/log", 30, "clear_logs"),
+    ("base64 -d", 30, "decode_payload"),
+    ("python -c", 30, "python_exec"),
+    ("perl -e", 30, "perl_exec"),
+    ("/etc/passwd", 25, "read_passwd"),
+    ("history -c", 25, "clear_history"),
+    ("chmod +x", 20, "make_executable"),
+    ("nohup", 20, "background_process"),
+    ("\\x", 10, "shell_probe"),
 ]
 
-# (cuvant intreg din comanda, puncte, ce inseamna)
+# (cuvant intreg din comanda, puncte, codul regulii)
 COMMAND_WORDS = [
-    ("crontab", 45, "programeaza o comanda (persistenta)"),
-    ("wget", 30, "descarcare"),
-    ("curl", 30, "descarcare"),
-    ("tftp", 30, "descarcare"),
+    ("crontab", 45, "cron_persistence"),
+    ("wget", 30, "download_command"),
+    ("curl", 30, "download_command"),
+    ("tftp", 30, "download_command"),
     ("nc", 30, "netcat"),
     ("netcat", 30, "netcat"),
-    ("nmap", 25, "scaneaza reteaua"),
-    ("busybox", 8, "testeaza busybox (tipic Mirai)"),
-    ("whoami", 6, "afla cu ce cont a intrat"),
-    ("id", 6, "afla cu ce cont a intrat"),
-    ("uname", 6, "afla ce sistem e"),
+    ("nmap", 25, "network_scan"),
+    ("busybox", 8, "busybox_probe"),
+    ("whoami", 6, "user_discovery"),
+    ("id", 6, "user_discovery"),
+    ("uname", 6, "system_discovery"),
 ]
 
-# (text cautat in adresa web decodata, puncte, ce inseamna)
+# (text cautat in adresa web decodata, puncte, codul regulii)
 HTTP_RULES = [
-    ("${jndi:", 50, "Log4Shell"),
+    ("${jndi:", 50, "web_log4shell"),
     # comanda de descarcare injectata in adresa: /cgi-bin/;wget http://..., /shell?cd /tmp;wget ...
-    ("wget", 30, "incearca sa ruleze comenzi"),
-    ("curl", 30, "incearca sa ruleze comenzi"),
-    ("tftp", 30, "incearca sa ruleze comenzi"),
-    ("union select", 25, "SQL injection"),
-    ("' or '", 25, "SQL injection"),
-    ("or 1=1", 25, "SQL injection"),
-    ("cmd=", 25, "incearca sa ruleze comenzi"),
-    ("eval(", 25, "incearca sa ruleze cod"),
-    ("/etc/shadow", 20, "cauta fisierul cu parole"),
-    ("shell.php", 15, "cauta un webshell"),
-    ("../", 15, "path traversal"),
-    ("<script>", 12, "XSS"),
-    (".env", 12, "cauta parolele aplicatiei"),
-    (".git/config", 12, "cauta codul sursa"),
-    ("wp-login.php", 6, "cauta WordPress"),
-    ("phpmyadmin", 6, "cauta phpMyAdmin"),
-    ("actuator", 6, "cauta panoul de administrare Spring"),
+    ("wget", 30, "web_command_injection"),
+    ("curl", 30, "web_command_injection"),
+    ("tftp", 30, "web_command_injection"),
+    ("union select", 25, "web_sql_injection"),
+    ("' or '", 25, "web_sql_injection"),
+    ("or 1=1", 25, "web_sql_injection"),
+    ("cmd=", 25, "web_command_injection"),
+    ("eval(", 25, "web_code_injection"),
+    ("/etc/shadow", 20, "web_shadow_probe"),
+    ("shell.php", 15, "web_webshell_probe"),
+    ("../", 15, "web_path_traversal"),
+    ("<script>", 12, "web_xss"),
+    (".env", 12, "web_env_probe"),
+    (".git/config", 12, "web_git_probe"),
+    ("wp-login.php", 6, "web_wordpress_probe"),
+    ("phpmyadmin", 6, "web_phpmyadmin_probe"),
+    ("actuator", 6, "web_actuator_probe"),
 ]
+HTTP_RULE_CODES = {rule for _, _, rule in HTTP_RULES}
 
 # puncte pentru lucruri care nu vin din tabele
 POINTS_DOWNLOAD = 40          # a descarcat ceva (are link in comanda)
@@ -85,23 +95,31 @@ POINTS_HONEYTOKEN_LOGIN = 50  # foloseste un secret-momeala: cineva a citit fisi
 # Honeytokens: secrete care exista DOAR in fisierele agentului (honeypot-agent/internal/vfs/fs.go).
 # Cine le trimite la un login le-a citit de acolo (el sau alt IP din aceeasi campanie).
 # Daca se schimba in fs.go, schimba-le si aici (test_honeytokens_match_the_agent verifica).
-# (secretul, fisierul in care e, ce e)
+# (secretul, fisierul in care e, codul secretului - textul e in texts.py)
 HONEYTOKENS = [
-    ("w7Kq2mVx9pLz", "hostapd.conf", "parola Wi-Fi"),    # wifiPassphrase
-    ("Rp4tHx92kQ", "chap-secrets", "parola PPPoE"),      # pppoePassword
-    ("2210417553", "chap-secrets", "contul PPPoE"),      # pppoeUser
+    ("w7Kq2mVx9pLz", "hostapd.conf", "wifi_password"),    # wifiPassphrase
+    ("Rp4tHx92kQ", "chap-secrets", "pppoe_password"),     # pppoePassword
+    ("2210417553", "chap-secrets", "pppoe_account"),      # pppoeUser
 ]
 
 # Fisierele cu secretele. Cautam doar numele, nu calea: "cd /etc/ppp; cat chap-secrets".
 HONEYTOKEN_FILES = [
-    ("hostapd.conf", "parola Wi-Fi"),
-    ("chap-secrets", "contul PPPoE"),
+    ("hostapd.conf", "wifi_password"),
+    ("chap-secrets", "pppoe_account"),
 ]
+
+
+def text_of(obj, key):
+    """Campul ca text; "" daca lipseste sau nu e text (un eveniment ciudat nu ne mai opreste)."""
+    value = obj.get(key)
+    if isinstance(value, str):
+        return value
+    return ""
 
 
 def is_internal(event):
     """True daca atacul vine dintr-o retea privata (192.168.x, 10.x, 127.x...)."""
-    ip = event.get("source_ip", "").strip()
+    ip = text_of(event, "source_ip").strip()
     if ip == "":
         return False
     try:
@@ -140,7 +158,7 @@ def honeytoken_files_read(command):
 
 
 def honeytokens_used(text):
-    """Secretele-momeala dintr-un user sau o parola: [(secret, fisier, ce e)].
+    """Secretele-momeala dintr-un user sau o parola: [(secret, fisier, cod)].
     Le cautam in tot textul: unii le copiaza cu tot cu ghilimele ("Rp4tHx92kQ")."""
     found = []
     for token in HONEYTOKENS:
@@ -150,27 +168,16 @@ def honeytokens_used(text):
 
 
 def stronger(first, second):
-    """Dintre doua verdicte (e_periculos, scor, motiv) il pastreaza pe cel cu mai multe puncte."""
-    if second[1] > first[1]:
+    """Dintre doua verdicte il pastreaza pe cel cu mai multe puncte."""
+    if second.score > first.score:
         return second
     return first
 
 
-def parse_time(timestamp):
-    """'2026-11-17T08:12:03.512Z' -> datetime (sau None daca textul e stricat)."""
-    if not timestamp:
-        return None
-    try:
-        when = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when
-
-
 class BruteForceTracker:
-    """Tine minte, pentru fiecare IP, la ce ore a gresit parola."""
+    """Tine minte, pentru fiecare IP, la ce ore a gresit parola.
+
+    Sta in RAM; la pornire se reface din login-urile din ultimele 10 minute (engine.py)."""
 
     def __init__(self, threshold=5, window_seconds=600):
         self.threshold = threshold
@@ -213,26 +220,108 @@ class BruteForceTracker:
     def minutes(self):
         return int(self.window.total_seconds() // 60)
 
+    def snapshot(self, ips):
+        """Starea unor IP-uri inainte de un lot, ca s-o punem la loc daca lotul nu se poate salva."""
+        states = {}
+        for ip in ips:
+            failures = self.failures.get(ip)
+            states[ip] = (list(failures) if failures is not None else None, self.reported_until.get(ip))
+        return states, self.calls
 
-def build_alert(event, score, reason):
-    """Copia evenimentului + scorul, severitatea (din scor), motivul, ora, recomandarea si locatia."""
-    alert = dict(event)
-    alert["score"] = score
-    alert["severity"] = score_to_severity(score)
-    alert["alert_reason"] = reason
-    alert["processed_at"] = datetime.now(timezone.utc).isoformat()
-    alert["recommendation"] = recommend(alert)
-    alert["geo"] = geo_lookup(event.get("source_ip", ""))
-    found = technique_for(reason)
-    alert["technique"] = found[0] if found else None
-    alert["technique_name"] = found[1] if found else None
-    return alert
+    def restore(self, saved):
+        """Pune la loc ce a salvat snapshot(): lotul nesalvat nu mai conteaza la brute force."""
+        states, calls = saved
+        for ip, (failures, until) in states.items():
+            if failures is None:
+                self.failures.pop(ip, None)
+            else:
+                self.failures[ip] = failures
+            if until is None:
+                self.reported_until.pop(ip, None)
+            else:
+                self.reported_until[ip] = until
+        self.calls = calls
+
+
+def alert_id_for(event_id):
+    """Id-ul alertei, din id-ul evenimentului (un eveniment da cel mult o alerta)."""
+    return hashlib.sha256(f"alert:{event_id}".encode("utf-8")).hexdigest()[:32]
+
+
+def build_alert(event, verdict):
+    """Alerta care se SALVEAZA: id-ul ei, id-ul evenimentului, verdictul (coduri) si locatia.
+
+    Fara copia evenimentului (comanda, raw_data, user-agent): pe ele le adauga alert_view la afisare.
+    Raman doar cateva campuri mici, ca sa putem cauta si numara alerte fara eveniment
+    (dupa IP, protocol, ora, sesiune)."""
+    event_id = event.get("event_id") or content_id(event)
+    return {
+        "alert_id": alert_id_for(event_id),
+        "event_id": event_id,
+        "timestamp": event.get("timestamp"),
+        "source_ip": event.get("source_ip"),
+        "protocol": event.get("protocol"),
+        "event_type": event.get("event_type"),
+        "session_id": event.get("session_id"),
+        "rule": verdict.rule,
+        "details": dict(verdict.details),
+        "score": verdict.score,
+        "severity": score_to_severity(verdict.score),
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "geo": geo_lookup(text_of(event, "source_ip")),
+    }
+
+
+def describe(rule, details, event):
+    """Textul unei alerte, facut din codul regulii, detalii si eveniment."""
+    payload = event.get("payload_details") or {}
+    creds = event.get("credentials") or {}
+    fields = {
+        "label": RULE_LABELS.get(rule, rule),
+        "command": text_of(payload, "command").lower().strip(),
+        "url": text_of(payload, "extracted_url"),
+        "path": text_of(payload, "http_path"),
+        "user": text_of(creds, "username").strip().lower(),
+        "password": text_of(creds, "password"),
+        "port": event.get("target_port", "?"),
+    }
+    fields.update(details)
+    if "secret" in details:
+        fields["secret"] = SECRET_LABELS.get(details["secret"], details["secret"])
+    if rule == "file_download" and fields["url"] == "":
+        fields["url"] = UNKNOWN
+
+    if rule in REASON_TEMPLATES:
+        template = REASON_TEMPLATES[rule]
+    elif rule in HTTP_RULE_CODES:
+        template = HTTP_TEMPLATE
+    else:
+        template = COMMAND_TEMPLATE
+    return template.format_map(fields)
+
+
+def alert_view(alert, event=None):
+    """Alerta asa cum o vede dashboard-ul: evenimentul + alerta + textele facute din coduri."""
+    if "rule" not in alert:
+        # alerta veche (dinainte de coduri): e deja o copie a evenimentului, cu textele in ea
+        view = dict(alert)
+        view.setdefault("alert_id", content_id(alert))
+        return view
+
+    view = dict(event or {})
+    view.update(alert)
+    view["alert_reason"] = describe(alert["rule"], alert.get("details") or {}, view)
+    view["recommendation"] = recommend(alert["rule"])
+    found = technique_for(alert["rule"])
+    view["technique"] = found[0] if found else None
+    view["technique_name"] = found[1] if found else None
+    return view
 
 
 def check_command(event):
     payload = event.get("payload_details") or {}
-    cmd = payload.get("command", "").lower().strip()
-    url = payload.get("extracted_url", "")
+    cmd = text_of(payload, "command").lower().strip()
+    url = text_of(payload, "extracted_url")
     # citirea unui fisier-momeala nu se pierde in spatele unei reguli mai slabe (uname, id),
     # dar nici nu acopera una mai grava (cat chap-secrets | nc ... ramane netcat)
     return stronger(command_rules(cmd, url), check_honeytoken_read(cmd))
@@ -241,49 +330,47 @@ def check_command(event):
 def check_honeytoken_read(cmd):
     for name, secret in HONEYTOKEN_FILES:
         if name in cmd:
-            return True, POINTS_HONEYTOKEN_READ, f"citeste fisier-momeala ({secret} din {name}): {cmd}"
+            return Verdict(True, POINTS_HONEYTOKEN_READ, "honeytoken_read", {"file": name, "secret": secret})
     return NOT_A_THREAT
 
 
 def command_rules(cmd, url):
     if url:
-        return True, POINTS_DOWNLOAD, f"incercare de descarcare: {url}"
+        return Verdict(True, POINTS_DOWNLOAD, "download_attempt", {})
 
-    for text, points, meaning in COMMAND_PATTERNS:
+    for text, points, rule in COMMAND_PATTERNS:
         if text in cmd:
-            return True, points, f"{meaning} ({text}): {cmd}"
+            return Verdict(True, points, rule, {"match": text})
 
     words = command_words(cmd)
-    for word, points, meaning in COMMAND_WORDS:
+    for word, points, rule in COMMAND_WORDS:
         if word in words:
-            return True, points, f"{meaning} ({word}): {cmd}"
+            return Verdict(True, points, rule, {"match": word})
 
     return NOT_A_THREAT
 
 
 def check_login(event, tracker):
     creds = event.get("credentials") or {}
-    user = creds.get("username", "").strip().lower()
-    password = creds.get("password", "")
-    ip = event.get("source_ip", "?")
+    user = text_of(creds, "username").strip().lower()
+    password = text_of(creds, "password")
+    ip = text_of(event, "source_ip") or "?"
     when = parse_time(event.get("timestamp")) or datetime.now(timezone.utc)
 
     # inaintea regulilor de brute force: altfel s-ar pierde printre parolele gresite
-    used = honeytokens_used(creds.get("username", "")) + honeytokens_used(password)
+    used = honeytokens_used(text_of(creds, "username")) + honeytokens_used(password)
     if used:
         if tracker is not None and not creds.get("success"):
             tracker.add_failure(ip, when)   # tot o parola gresita: se numara la brute force
         _, file_name, secret = used[0]
-        return (True, POINTS_HONEYTOKEN_LOGIN,
-                f"login cu secret-momeala ({secret} din {file_name}): {user}:{password}"
-                f" - cineva a citit fisierul inainte")
+        return Verdict(True, POINTS_HONEYTOKEN_LOGIN, "honeytoken_login", {"file": file_name, "secret": secret})
 
     if creds.get("success"):
-        return True, POINTS_SUCCESS_LOGIN, f"login REUSIT cu {user}:{password}"
+        return Verdict(True, POINTS_SUCCESS_LOGIN, "login_success", {})
 
     if tracker is None:
         if user in TARGET_USERS:
-            return True, POINTS_CRITICAL_USER, f"login pe cont critic: {user}"
+            return Verdict(True, POINTS_CRITICAL_USER, "critical_user_login", {})
         return NOT_A_THREAT
 
     count = tracker.add_failure(ip, when)
@@ -291,28 +378,27 @@ def check_login(event, tracker):
     if count >= tracker.threshold and tracker.should_report(ip, when):
         # mai multe parole incercate = atac mai agresiv = mai multe puncte (pana la BRUTE_MAX)
         score = min(BRUTE_BASE + count, BRUTE_MAX)
-        return True, score, f"atac brute-force detectat ({count} parole gresite in {tracker.minutes()} minute)"
+        return Verdict(True, score, "brute_force", {"count": count, "minutes": tracker.minutes()})
 
     if count == 1 and user in TARGET_USERS:
-        return True, POINTS_CRITICAL_USER, f"login pe cont critic: {user}"
+        return Verdict(True, POINTS_CRITICAL_USER, "critical_user_login", {})
 
     return NOT_A_THREAT
 
 
 def check_http(event):
     payload = event.get("payload_details") or {}
-    path = payload.get("http_path", "")
-    decoded = unquote_deep(path)
+    decoded = unquote_deep(text_of(payload, "http_path"))
 
-    for text, points, meaning in HTTP_RULES:
+    for text, points, rule in HTTP_RULES:
         if text in decoded:
-            return True, points, f"{meaning} ({text}) pe ruta: {path}"
+            return Verdict(True, points, rule, {"match": text})
 
     return NOT_A_THREAT
 
 
 def check_event(event, tracker=None):
-    """Judeca un eveniment. Intoarce (e_periculos, scor, motiv). Severitatea iese din scor."""
+    """Judeca un eveniment. Intoarce Verdict(e_periculos, scor, cod, detalii). Severitatea iese din scor."""
     event_type = event.get("event_type")
 
     if event_type == "command_exec":
@@ -320,7 +406,7 @@ def check_event(event, tracker=None):
 
     if event_type == "login_attempt":
         verdict = check_login(event, tracker)
-        if (event.get("protocol") or "").upper() == "HTTP":
+        if text_of(event, "protocol").upper() == "HTTP":
             # o logare web poate aduce si un exploit in cale (/login.cgi?user=admin;wget http://...)
             verdict = stronger(verdict, check_http(event))
         return verdict
@@ -329,11 +415,9 @@ def check_event(event, tracker=None):
         return check_http(event)
 
     if event_type == "port_scan":
-        return True, POINTS_PORT_PROBE, f"probe pe portul {event.get('target_port', '?')}"
+        return Verdict(True, POINTS_PORT_PROBE, "port_probe", {})
 
     if event_type == "file_download":
-        payload = event.get("payload_details") or {}
-        url = payload.get("extracted_url") or "necunoscut"
-        return True, POINTS_DOWNLOAD, f"descarcare fisier suspect: {url}"
+        return Verdict(True, POINTS_DOWNLOAD, "file_download", {})
 
     return NOT_A_THREAT

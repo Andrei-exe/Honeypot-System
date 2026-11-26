@@ -23,9 +23,11 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app \
 USER app
 
 # Where receiver.py writes (read from env vars) -> on the volume, so nothing is lost.
+# REJECTED_FILE = events that failed validation (kept with the reason, not dropped).
 # SESSIONS_FILE is used by main.py (offline analysis).
 ENV EVENTS_FILE=/data/received_events.jsonl \
     ALERTS_FILE=/data/alerts.jsonl \
+    REJECTED_FILE=/data/rejected_events.jsonl \
     SESSIONS_FILE=/data/sessions.json \
     PORT=8000
 
