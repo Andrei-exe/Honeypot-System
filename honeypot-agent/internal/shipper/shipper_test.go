@@ -22,7 +22,8 @@ type fakeReceiver struct {
 	mu        sync.Mutex
 	requests  int
 	events    []models.HoneypotEvent
-	sizes     []int // events in each accepted POST
+	sizes     []int      // events in each accepted POST
+	tried     [][]string // event IDs of every POST, accepted or not
 	auth      string
 	status    func(n int) int
 	slowFirst time.Duration // the first request takes this long to answer (events pile up meanwhile)
@@ -34,10 +35,16 @@ func (f *fakeReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests++
 	f.auth = r.Header.Get("Authorization")
 
+	var batch []models.HoneypotEvent
+	json.NewDecoder(r.Body).Decode(&batch)
+	var ids []string
+	for _, e := range batch {
+		ids = append(ids, e.EventID)
+	}
+	f.tried = append(f.tried, ids)
+
 	code := f.status(f.requests)
 	if code == http.StatusOK {
-		var batch []models.HoneypotEvent
-		json.NewDecoder(r.Body).Decode(&batch)
 		f.events = append(f.events, batch...)
 		f.sizes = append(f.sizes, len(batch))
 	}
@@ -301,6 +308,59 @@ func TestCloseDoesNotRetryRejected(t *testing.T) {
 	}
 	if req, _ := rcv.counts(); req != 1 {
 		t.Errorf("sent the rejected batch %d times (should be once)", req)
+	}
+}
+
+// Every event gets its own event_id (16 hex, the format receiver.py accepts), given once: a batch
+// resent after a failure and the JSONL copy carry the same IDs, so the threat-engine can drop the
+// second copy (a POST over 5s is resent even if the receiver already stored it).
+func TestEventIDs(t *testing.T) {
+	t.Parallel()
+	rcv := &fakeReceiver{status: func(n int) int {
+		if n == 1 {
+			return http.StatusServiceUnavailable // the first try fails: the same batch goes again
+		}
+		return http.StatusOK
+	}}
+	srv := httptest.NewServer(rcv)
+	defer srv.Close()
+
+	var out bytes.Buffer
+	s := NewShipper(&out, srv.URL, "")
+	for i := 0; i < 10; i++ {
+		s.EmitEvent(event(i)) // the same struct values a service could send: the ID comes from EmitEvent
+	}
+	// fewer than batchSize: the first try comes at the 2s tick
+	if !waitFor(4*time.Second, func() bool { req, _ := rcv.counts(); return req >= 1 }) {
+		t.Fatal("no first try")
+	}
+	s.Close(5 * time.Second) // the resend
+
+	checkReceived(t, rcv, 0, 10)
+	var delivered []string
+	seen := map[string]bool{}
+	for _, e := range rcv.events {
+		if len(e.EventID) != 16 || strings.Trim(e.EventID, "0123456789abcdef") != "" {
+			t.Errorf("event_id %q: expected 16 hex characters", e.EventID)
+		}
+		if seen[e.EventID] {
+			t.Errorf("event_id %q given twice", e.EventID)
+		}
+		seen[e.EventID] = true
+		delivered = append(delivered, e.EventID)
+	}
+
+	if len(rcv.tried) < 2 || !slices.Equal(rcv.tried[0], delivered) {
+		t.Errorf("the resend has other IDs:\nfirst try %v\ndelivered %v", rcv.tried, delivered)
+	}
+	var copied []string
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var e models.HoneypotEvent
+		json.Unmarshal([]byte(line), &e)
+		copied = append(copied, e.EventID)
+	}
+	if !slices.Equal(copied, delivered) {
+		t.Errorf("the JSONL copy has other IDs:\nJSONL     %v\ndelivered %v", copied, delivered)
 	}
 }
 

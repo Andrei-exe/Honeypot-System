@@ -70,6 +70,7 @@ func parseEvents(t *testing.T, jsonl string) []models.HoneypotEvent {
 	schema := loadSchema(t)
 
 	var events []models.HoneypotEvent
+	ids := map[string]bool{} // every event of every service has its own event_id
 	for _, line := range strings.Split(jsonl, "\n") {
 		if line == "" {
 			continue
@@ -82,6 +83,10 @@ func parseEvents(t *testing.T, jsonl string) []models.HoneypotEvent {
 
 		var event models.HoneypotEvent
 		json.Unmarshal([]byte(line), &event)
+		if event.EventID == "" || ids[event.EventID] {
+			t.Errorf("event_id missing or given twice: %q", line)
+		}
+		ids[event.EventID] = true
 		events = append(events, event)
 	}
 	return events

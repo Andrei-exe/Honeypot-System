@@ -4,6 +4,7 @@
   "type": "object",
   "required": ["timestamp", "node_id", "event_type", "source_ip", "protocol"],
   "properties": {
+    "event_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
     "timestamp": { "type": "string", "format": "date-time" },
     "node_id": { "type": "string" },
     "event_type": { 

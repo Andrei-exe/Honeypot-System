@@ -36,6 +36,7 @@ flowchart LR
   - `/proc` has a folder for every process `ps` shows (`/proc/1`, `/proc/341`...) with `cmdline`, `comm`, `status`, `stat`, `environ` and the `exe` link in the Linux 4.14 formats, and `/proc/self` is the command reading it. A killer script that loops over `/proc/[0-9]*` looking for rival miners finds the router's own daemons, and the numbers agree with `ps`.
   - `wget`, `tftp` and `ftpget` print exactly what BusyBox prints before and when a download fails: `Connecting to ...`, then a connection that times out (the router's way out is blocked), or `bad address` for names it cannot resolve. The URL is logged in `extracted_url` even without `http://` (`wget 1.2.3.4/x`, `tftp -g -r x HOST`, `ftpget HOST x`).
   - Every action becomes a JSON event. Events are sent in batches to the threat engine and also written to stdout. If the threat engine is down, the agent keeps up to 5000 events in memory and sends them when it is back, in requests of at most 200 events.
+  - Each event carries a random `event_id`, given once when the event is logged. A batch sent again after a failure, or the stdout copy replayed later, has the same IDs, so the threat engine stores every event only once.
   - It limits what one attacker can do, so a flood cannot bury the events of the other services:
     - at most 200 connections per service and 10 per IP;
     - a connection keeps its place for at least one second, so one IP can open at most 10 new connections per second;

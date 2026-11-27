@@ -3,6 +3,8 @@ package shipper
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +75,9 @@ func NewShipper(out io.Writer, url, token string) *Shipper {
 // EmitEvent is called by the services and never waits on the network:
 // it writes the JSONL line, queues the event and returns immediately.
 func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
+	// the ID is given here, once: every resend of the event and its JSONL copy carry the same one
+	e.EventID = newEventID()
+
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock() // even if Encode panicked: a session's recovered panic must not leave it locked
@@ -90,6 +95,13 @@ func (s *Shipper) EmitEvent(e models.HoneypotEvent) {
 		// queue full (receiver down for a long time) -> don't block the service, just count it
 		s.dropped.Add(1)
 	}
+}
+
+// newEventID returns 8 random bytes as 16 hex characters (like the session IDs).
+func newEventID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Close sends the events still waiting and stops the sender goroutine, giving up after timeout.

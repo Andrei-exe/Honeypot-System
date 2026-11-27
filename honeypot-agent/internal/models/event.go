@@ -5,6 +5,9 @@ import "time"
 // HoneypotEvent is one event sent to the threat-engine (one JSONL line).
 // Any field change must also go into shared/event-schema.json.
 type HoneypotEvent struct {
+	// EventID is unique per event, set by shipper.EmitEvent: a batch sent twice (retry) has the
+	// same IDs, so the threat-engine stores it once.
+	EventID        string          `json:"event_id,omitempty"`
 	Timestamp      string          `json:"timestamp"`
 	NodeID         string          `json:"node_id"`
 	EventType      string          `json:"event_type"`
