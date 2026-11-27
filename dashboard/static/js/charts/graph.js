@@ -310,11 +310,25 @@ export class CorrelationGraph {
       ctx.fill();
       ctx.stroke();
 
-      // Only label group nodes, hovered nodes, or IPs when zoomed in: keeps the graph readable
-      if (node.kind !== "ip" || isHover || this.scale >= 1.4) {
+      // Group nodes keep their name; attacker IPs show only on hover so the graph stays clean
+      if (node.kind !== "ip") {
         ctx.fillStyle = isHover ? "#ffffff" : st.text;
         ctx.fillText(node.label, node.x + st.size + 5, node.y + 4);
       }
+    }
+
+    // Hovered node: draw its label last, on a small dark pill, so it is always readable
+    if (this.hovered) {
+      const node = this.hovered;
+      const st = NODE_STYLE[node.kind] || NODE_STYLE.ip;
+      const text = String(node.label);
+      const tw = ctx.measureText(text).width;
+      const lx = node.x + st.size + 6;
+      const ly = node.y;
+      ctx.fillStyle = "rgba(20, 24, 31, 0.92)";
+      ctx.fillRect(lx - 4, ly - 9, tw + 8, 18);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(text, lx, ly + 4);
     }
 
     ctx.restore();

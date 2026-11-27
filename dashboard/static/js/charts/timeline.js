@@ -1,5 +1,5 @@
 /**
- * Stacked bar chart of alerts over time, split by protocol (HTML5 canvas, HiDPI).
+ * Line chart of alerts over time; hover shows the split by protocol (HTML5 canvas, HiDPI).
  */
 
 const PROTO_COLORS = {
@@ -32,21 +32,8 @@ function bucketLabel(b, full) {
 const FONT = '12px system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
 const COLOR_AXIS_TEXT = "#77818e";
 const COLOR_GRID = "#212730";
-const COLOR_LEGEND = "#a3acb8";
 const COLOR_CRITICAL = "#ef5b5b";
-
-function roundedTopRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h);
-  ctx.beginPath();
-  ctx.moveTo(x, y + h);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h);
-  ctx.closePath();
-  ctx.fill();
-}
+const LINE_COLOR = "#6b9ce8";
 
 export class TimelineChart {
   constructor(containerEl, { height = 200, onSelectBucket = null } = {}) {
@@ -106,7 +93,7 @@ export class TimelineChart {
       h: this.height,
       padL: 36,
       padR: 8,
-      padT: 30,
+      padT: 14,
       padB: 26,
     };
   }
@@ -164,18 +151,6 @@ export class TimelineChart {
     const plotW = m.w - m.padL - m.padR;
     const plotH = m.h - m.padT - m.padB;
 
-    // Legend, top-left
-    let lx = m.padL;
-    for (const proto of ORDER.slice(0, 4)) {
-      ctx.fillStyle = PROTO_COLORS[proto];
-      ctx.beginPath();
-      ctx.arc(lx + 4, 10, 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = COLOR_LEGEND;
-      ctx.fillText(PROTO_LABELS[proto], lx + 12, 14);
-      lx += ctx.measureText(PROTO_LABELS[proto]).width + 30;
-    }
-
     if (!buckets.length) {
       ctx.fillStyle = COLOR_AXIS_TEXT;
       ctx.textAlign = "center";
@@ -203,39 +178,76 @@ export class TimelineChart {
     }
     ctx.textAlign = "left";
 
+    // One calm line with a soft fill: total alerts per time bucket
     const step = plotW / buckets.length;
-    const gap = Math.max(2, Math.min(6, step * 0.25));
-    const barW = Math.max(2, step - gap);
+    const pts = buckets.map((b, i) => ({
+      x: m.padL + i * step + step / 2,
+      y: m.padT + plotH - ((b.total || 0) / maxTotal) * plotH,
+    }));
+    const baseY = m.padT + plotH;
 
-    for (let i = 0; i < buckets.length; i++) {
-      const b = buckets[i];
-      const x = m.padL + i * step + gap / 2;
-
-      if (i === this.hoverIdx) {
-        ctx.fillStyle = "rgba(107, 156, 232, 0.08)";
-        ctx.fillRect(m.padL + i * step, m.padT, step, plotH);
+    const tracePath = () => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      if (pts.length === 1) {
+        ctx.lineTo(pts[0].x + 0.01, pts[0].y);
+        return;
       }
+      // Quadratic curves through midpoints: smooth, and never dips below the data
+      for (let i = 1; i < pts.length - 1; i++) {
+        const mx = (pts[i].x + pts[i + 1].x) / 2;
+        const my = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      }
+      const last = pts[pts.length - 1];
+      ctx.lineTo(last.x, last.y);
+    };
 
-      const segments = ORDER.filter((p) => b[p]);
-      let curY = m.padT + plotH;
-      segments.forEach((proto, sIdx) => {
-        const segH = Math.max(1, (b[proto] / maxTotal) * plotH);
-        curY -= segH;
-        ctx.fillStyle = PROTO_COLORS[proto];
-        if (sIdx === segments.length - 1) {
-          roundedTopRect(ctx, x, curY, barW, segH, 3);
-        } else {
-          ctx.fillRect(x, curY, barW, segH);
-        }
-      });
+    if (pts.length > 1) {
+      tracePath();
+      ctx.lineTo(pts[pts.length - 1].x, baseY);
+      ctx.lineTo(pts[0].x, baseY);
+      ctx.closePath();
+      const fill = ctx.createLinearGradient(0, m.padT, 0, baseY);
+      fill.addColorStop(0, "rgba(107, 156, 232, 0.28)");
+      fill.addColorStop(1, "rgba(107, 156, 232, 0.02)");
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
 
-      // Small red dot above buckets that contain critical alerts
-      if (b.CRITICAL > 0) {
+    tracePath();
+    ctx.strokeStyle = LINE_COLOR;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+
+    // Red dots on buckets that contain critical alerts
+    for (let i = 0; i < buckets.length; i++) {
+      if (buckets[i].CRITICAL > 0) {
         ctx.fillStyle = COLOR_CRITICAL;
         ctx.beginPath();
-        ctx.arc(x + barW / 2, Math.max(m.padT + 3, curY - 6), 2.5, 0, Math.PI * 2);
+        ctx.arc(pts[i].x, pts[i].y, 3.5, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    // Hover: a thin guide line and a dot on the current bucket
+    if (this.hoverIdx >= 0 && pts[this.hoverIdx]) {
+      const p = pts[this.hoverIdx];
+      ctx.strokeStyle = "rgba(163, 172, 184, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(p.x) + 0.5, m.padT);
+      ctx.lineTo(Math.round(p.x) + 0.5, baseY);
+      ctx.stroke();
+      ctx.fillStyle = "#0f1319";
+      ctx.strokeStyle = LINE_COLOR;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
     }
 
     // X labels
@@ -244,7 +256,7 @@ export class TimelineChart {
     ctx.textAlign = "center";
     for (let k = 0; k < xLabelCount; k++) {
       const idx = Math.floor((k * (buckets.length - 1)) / Math.max(1, xLabelCount - 1));
-      ctx.fillText(bucketLabel(buckets[idx], false), m.padL + idx * step + step / 2, m.h - 6);
+      ctx.fillText(bucketLabel(buckets[idx], false), pts[idx].x, m.h - 6);
     }
     ctx.textAlign = "left";
   }
