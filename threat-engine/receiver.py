@@ -13,13 +13,16 @@
 # Toata logica e in engine.py (aceeasi si pentru main.py); aici e doar HTTP.
 # Datele interne folosesc coduri ("persistence"); raspunsurile pun langa ele textele
 # pe care le asteapta dashboard-ul ("persistenta"), vezi texts.py.
+# Datele: baza SQLite (DB_FILE) + jurnalul received_events.jsonl (EVENTS_FILE), vezi storage.py.
 
 import hmac
 import os
+import sqlite3
+import sys
 
 from flask import Flask, jsonify, request, Response
 from engine import Engine
-from storage import JsonlStorage
+from storage import SqliteStorage
 from blocklist import build_blocklist
 from attack_techniques import navigator_layer
 from geo import geo_available, GEOIP_DB
@@ -30,14 +33,18 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.environ.get("DB_FILE", os.path.join(BASE_DIR, "honeypot.db"))
 EVENTS_FILE = os.environ.get("EVENTS_FILE", os.path.join(BASE_DIR, "received_events.jsonl"))
-ALERTS_FILE = os.environ.get("ALERTS_FILE", os.path.join(BASE_DIR, "alerts.jsonl"))
 REJECTED_FILE = os.environ.get("REJECTED_FILE", os.path.join(BASE_DIR, "rejected_events.jsonl"))
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
 INCLUDE_INTERNAL = os.environ.get("INCLUDE_INTERNAL", "true").lower() == "true"
 
-engine = Engine(JsonlStorage(EVENTS_FILE, ALERTS_FILE, REJECTED_FILE), include_internal=INCLUDE_INTERNAL)
+try:
+    engine = Engine(SqliteStorage(DB_FILE, EVENTS_FILE, REJECTED_FILE), include_internal=INCLUDE_INTERNAL)
+except RuntimeError as error:   # baza are tabelele unei versiuni vechi: se reface din jurnal
+    print(f"[EROARE] {error}")
+    sys.exit(1)
 
 
 def token_is_valid(header):
@@ -64,7 +71,7 @@ def receive_events():
 
     try:
         result = engine.ingest(items)
-    except OSError as error:
+    except (OSError, sqlite3.Error) as error:   # disc plin, baza blocata / stricata
         # 503: agentul pastreaza lotul si il retrimite; in RAM nu s-a schimbat nimic
         print(f"[!] nu pot salva lotul de {len(items)} evenimente: {error}")
         return jsonify(error="nu pot salva evenimentele, retrimite mai tarziu"), 503
@@ -147,13 +154,12 @@ def get_navigator():
 
 
 loaded = engine.load()
-print(f"[*] incarcat {loaded['events']} evenimente si {loaded['alerts']} alerte din fisiere"
-      + (f" ({loaded['skipped']} linii invalide sarite)" if loaded["skipped"] else ""))
+print(f"[*] baza de date: {loaded['events']} evenimente si {loaded['alerts']} alerte")
 
 if __name__ == "__main__":
     if AGENT_TOKEN == "":
         print("[!] ATENTIE: AGENT_TOKEN e gol - oricine poate trimite evenimente. Pe un server, seteaza-l.")
     if not geo_available():
         print(f"[!] fara GeoIP: lipseste biblioteca geoip2 sau fisierul {GEOIP_DB} (alertele n-au tara/orasul)")
-    print(f"receiver pornit pe http://localhost:{PORT} | scriu in {EVENTS_FILE}")
+    print(f"receiver pornit pe http://localhost:{PORT} | baza {DB_FILE} | jurnal {EVENTS_FILE}")
     app.run(host="0.0.0.0", port=PORT)

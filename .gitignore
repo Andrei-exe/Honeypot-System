@@ -49,6 +49,10 @@ captured_payloads/
 # Captured events (attackers' passwords and IPs), anywhere in the repo; the sample data stays tracked
 *.jsonl
 !shared/mock_events.jsonl
+# The threat engine's SQLite database and copies of it (same data)
+*.db
+*.db-wal
+*.db-shm
 
 .vscode/
 .idea/

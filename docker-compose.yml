@@ -97,7 +97,7 @@ services:
       AGENT_TOKEN: ${AGENT_TOKEN:-}
       INCLUDE_INTERNAL: ${INCLUDE_INTERNAL:-true}
     volumes:
-      # received_events.jsonl + alerts.jsonl -> raman si dupa rebuild
+      # honeypot.db (baza SQLite) + received_events.jsonl (jurnalul) -> raman si dupa rebuild
       - engine-data:/data
     networks:
       - backend    # DOAR backend: fara internet, atacatorii nu ajung la el direct
