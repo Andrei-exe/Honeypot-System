@@ -1,42 +1,38 @@
 /**
- * View 2: ALERTS EXPLORER (DSL filtering, column sorting, CSV/JSON export)
+ * Alerts page: every recent alert, searchable and sortable, with exports.
  */
 
-import { TimelineChart } from "../charts/timeline.js";
 import { inspectAttacker } from "../components/inspector.js";
 import {
+  asList,
   badgeProtocol,
   badgeSeverity,
   badgeTag,
   escapeHtml,
   fmtNum,
-  fmtTime,
-  shortId,
+  timeCell,
 } from "../core/escape.js";
+import { findNewKeys } from "../core/fresh.js";
 import { filterItems } from "../core/query.js";
+import { rowKey } from "../core/selection.js";
 import { store } from "../core/store.js";
 
-let timelineInst = null;
-let lastRows = [];
+const PAGE_SIZE = 100;
 
-const PRESETS = [
-  { label: "ALL", dsl: "" },
-  { label: "HIGH+", dsl: "sev:high+" },
-  { label: "CRITICAL", dsl: "sev:critical" },
-  { label: "NO HTTP", dsl: "-proto:http" },
-  { label: "HTTP", dsl: "proto:http" },
-  { label: "HAS CREDS", dsl: "has:creds" },
-  { label: "AUTH OK", dsl: "tag:auth_ok" },
-  { label: "HONEYTOKEN", dsl: "has:honeytoken" },
-  { label: "MIRAI", dsl: "tag:mirai" },
-  { label: "MINER", dsl: "tag:cryptominer" },
+let lastRows = [];
+let shown = PAGE_SIZE;
+let shownForQuery = "";
+
+const SEVERITY_TABS = [
+  { label: "All", dsl: "" },
+  { label: "Critical", dsl: "sev:critical" },
+  { label: "High & up", dsl: "sev:high+" },
+  { label: "Logins", dsl: "has:creds" },
+  { label: "Commands", dsl: "has:cmd" },
 ];
 
 export function destroyAlerts() {
-  if (timelineInst) {
-    timelineInst.destroy();
-    timelineInst = null;
-  }
+  // No charts on this page any more; kept so main.js can call it safely.
 }
 
 export function getAlertsRows() {
@@ -55,102 +51,111 @@ function sortAlerts(list, sortCfg) {
 }
 
 export function renderAlerts(container, state) {
-  destroyAlerts();
   const data = state.data.alerts;
   if (!data) {
-    container.innerHTML = `<div class="empty-state">LOADING RECENT ALERTS BUFFER...</div>`;
+    container.innerHTML = `<div class="empty-state">Loading alerts…</div>`;
     lastRows = [];
     return;
   }
 
-  const { items: filtered } = filterItems(data.alerts || [], state.query, "alert");
+  if (state.query !== shownForQuery) {
+    shown = PAGE_SIZE;
+    shownForQuery = state.query;
+  }
+
+  const all = asList(data.alerts);
+  const fresh = findNewKeys("alerts", all.map((a) => rowKey("alerts", a)));
+  const { items: filtered } = filterItems(all, state.query, "alert");
   const sorted = sortAlerts(filtered, state.sort.alerts);
-  lastRows = sorted;
+  lastRows = sorted.slice(0, shown);
 
   const sortCfg = state.sort.alerts || { key: "timestamp", dir: "desc" };
-  const thCls = (k) =>
-    `sortable${sortCfg.key === k ? (sortCfg.dir === "asc" ? " sort-asc" : " sort-desc") : ""}`;
+  const th = (k, label, width, extra = "") =>
+    `<th style="width:${width}px;" class="sortable ${extra} ${sortCfg.key === k ? (sortCfg.dir === "asc" ? "sort-asc" : "sort-desc") : ""}" data-sort="${k}">${label}</th>`;
+
+  const sev = data.by_severity || {};
+  const q = state.query.trim();
 
   container.innerHTML = `
     <div class="stack-8">
-      <div class="panel">
-        <div class="panel-head">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="panel-title">ALERTS EXPLORER</span>
-            <span class="badge">${fmtNum(sorted.length)} / ${fmtNum(data.returned || 0)} IN WINDOW (TOTAL ${fmtNum(data.total || 0)})</span>
-            <div class="btn-group">
-              ${PRESETS.map(
-                (p) =>
-                  `<button class="btn ${state.query.trim() === p.dsl ? "active" : ""}" data-preset="${escapeHtml(p.dsl)}">${p.label}</button>`
-              ).join("")}
-            </div>
-          </div>
-          <div class="btn-group">
-            <a class="btn" href="/api/v1/export/alerts.csv">EXPORT CSV</a>
-            <a class="btn" href="/api/v1/export/alerts.json">EXPORT JSON</a>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Alerts</h1>
+          <div class="inline-stats">
+            <span><strong>${fmtNum(data.total || 0)}</strong> total</span>
+            <span class="${sev.CRITICAL ? "crit" : ""}"><strong>${fmtNum(sev.CRITICAL || 0)}</strong> critical</span>
+            <span><strong>${fmtNum(sev.HIGH || 0)}</strong> high</span>
+            <span><strong>${fmtNum(sev.MEDIUM || 0)}</strong> medium</span>
           </div>
         </div>
-        <div class="panel-body">
-          <div id="al-timeline-chart"></div>
+        <div class="page-actions">
+          <div class="seg">
+            ${SEVERITY_TABS.map(
+              (t) => `<button class="${q === t.dsl ? "active" : ""}" data-preset="${escapeHtml(t.dsl)}">${t.label}</button>`
+            ).join("")}
+          </div>
+          <a class="btn" href="/api/v1/export/alerts.csv">Export CSV</a>
+          <a class="btn ghost" href="/api/v1/export/alerts.json">JSON</a>
         </div>
       </div>
 
       <div class="panel">
         <div class="panel-body flush">
-          <div class="table-scroll bounded-lg">
+          <div class="table-scroll bounded-lg" data-scroll-key="alerts-table">
             <table class="soc-table">
               <thead>
                 <tr>
-                  <th style="width:74px;" class="${thCls("timestamp")}" data-sort="timestamp">UTC</th>
-                  <th style="width:78px;" class="${thCls("severity_rank")}" data-sort="severity_rank">SEV</th>
-                  <th style="width:68px;" class="${thCls("protocol")}" data-sort="protocol">PROTO</th>
-                  <th style="width:128px;" class="${thCls("source_ip")}" data-sort="source_ip">SOURCE IP</th>
-                  <th style="width:105px;">SESSION</th>
-                  <th style="width:86px;" class="${thCls("technique")}" data-sort="technique">MITRE</th>
-                  <th style="width:130px;">CREDENTIALS</th>
-                  <th>DETECTION REASON & PAYLOAD</th>
-                  <th style="width:48px;" class="num ${thCls("score")}" data-sort="score">PTS</th>
+                  ${th("timestamp", "Time", 110)}
+                  ${th("severity_rank", "Severity", 100)}
+                  ${th("protocol", "Protocol", 90)}
+                  ${th("source_ip", "Source IP", 150)}
+                  <th>What happened</th>
+                  <th style="width:160px;">Login used</th>
+                  ${th("score", "Score", 70, "num")}
                 </tr>
               </thead>
               <tbody>
                 ${
-                  sorted.length
-                    ? sorted
+                  lastRows.length
+                    ? lastRows
                         .map((al, idx) => {
+                          const key = rowKey("alerts", al);
                           const creds = al.credentials;
-                          const credStr = creds ? `${creds.username}:${creds.password}` : "-";
+                          const credStr = creds ? `${creds.username}:${creds.password}` : "";
                           return `
-                            <tr class="sev-row-${escapeHtml(al.severity)} ${idx === state.selectedRowIndex ? "selected" : ""}" data-row-idx="${idx}">
-                              <td class="cell-muted">${escapeHtml(fmtTime(al.timestamp))}</td>
+                            <tr class="sev-row-${escapeHtml(al.severity)} ${key === state.selectedKey ? "selected" : ""} ${fresh.has(key) ? "is-new" : ""}" data-row-idx="${idx}" data-row-key="${escapeHtml(key || "")}">
+                              <td>${timeCell(al.timestamp)}</td>
                               <td>${badgeSeverity(al.severity)}</td>
                               <td>${badgeProtocol(al.protocol)}</td>
                               <td><span class="ip-link" data-inspect-ip="${escapeHtml(al.source_ip)}">${escapeHtml(al.source_ip)}</span></td>
-                              <td class="cell-muted" title="${escapeHtml(al.session_id)}">${escapeHtml(shortId(al.session_id, 12))}</td>
-                              <td style="color:var(--state-accent);" title="${escapeHtml(al.technique_name)}">${escapeHtml(al.technique || "-")}</td>
-                              <td class="${creds && creds.success ? "cell-strong" : "cell-muted"}" title="${escapeHtml(credStr)}">${escapeHtml(credStr)}</td>
                               <td title="${escapeHtml(al.alert_reason)}">
-                                ${(al.tags || []).slice(0, 2).map(badgeTag).join(" ")}
-                                <span>${escapeHtml(al.alert_reason)}</span>
+                                ${asList(al.tags).slice(0, 1).map(badgeTag).join(" ")}
+                                ${escapeHtml(al.alert_reason)}
                               </td>
-                              <td class="num cell-strong">${fmtNum(al.score)}</td>
+                              <td class="mono ${creds && creds.success ? "cell-strong" : "cell-muted"}" title="${escapeHtml(credStr)}">${credStr ? escapeHtml(credStr) : "—"}</td>
+                              <td class="num">${fmtNum(al.score)}</td>
                             </tr>`;
                         })
                         .join("")
-                    : `<tr><td colspan="9" class="empty-state">NO ALERTS MATCH QUERY "${escapeHtml(state.query)}"</td></tr>`
+                    : `<tr><td colspan="7" class="empty-state">${q ? "No alerts match this search" : "No alerts yet"}</td></tr>`
                 }
               </tbody>
             </table>
           </div>
+          ${
+            sorted.length > lastRows.length
+              ? `<div class="table-foot">
+                  <span>Showing ${fmtNum(lastRows.length)} of ${fmtNum(sorted.length)}</span>
+                  <button class="btn sm" id="alerts-more">Show ${fmtNum(Math.min(PAGE_SIZE, sorted.length - lastRows.length))} more</button>
+                </div>`
+              : sorted.length
+              ? `<div class="table-foot"><span>${fmtNum(sorted.length)} alert${sorted.length === 1 ? "" : "s"}${q ? " match this search" : " in the recent window"}</span></div>`
+              : ""
+          }
         </div>
       </div>
     </div>
   `;
-
-  const tlEl = container.querySelector("#al-timeline-chart");
-  if (tlEl) {
-    timelineInst = new TimelineChart(tlEl, { height: 120 });
-    timelineInst.setData(data.timeline);
-  }
 
   container.querySelectorAll("[data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -161,8 +166,13 @@ export function renderAlerts(container, state) {
     });
   });
 
-  container.querySelectorAll("th[data-sort]").forEach((th) => {
-    th.addEventListener("click", () => store.setSort("alerts", th.dataset.sort));
+  container.querySelector("#alerts-more")?.addEventListener("click", () => {
+    shown += PAGE_SIZE;
+    renderAlerts(container, store.get());
+  });
+
+  container.querySelectorAll("th[data-sort]").forEach((el) => {
+    el.addEventListener("click", () => store.setSort("alerts", el.dataset.sort));
   });
 
   container.querySelectorAll("[data-inspect-ip]").forEach((el) => {
@@ -174,10 +184,9 @@ export function renderAlerts(container, state) {
 
   container.querySelectorAll("tbody tr[data-row-idx]").forEach((tr) => {
     tr.addEventListener("click", () => {
-      const idx = Number(tr.dataset.rowIdx);
-      const item = sorted[idx];
+      const item = lastRows[Number(tr.dataset.rowIdx)];
       if (!item) return;
-      store.set({ selectedRowIndex: idx }, "selection");
+      store.set({ selectedKey: rowKey("alerts", item) }, "selection");
       store.openInspector("alert", item, "summary");
     });
   });

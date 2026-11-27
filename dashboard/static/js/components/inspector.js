@@ -1,38 +1,51 @@
 /**
- * Resizable split-pane inspector (Alert / Session / Attacker / Campaign / Family).
- * Keeps `credentials` strictly apart from `raw_data` and offers SSH/Telnet terminal replay.
+ * Details panel on the right (alert / session / attacker / campaign / family).
+ * Every tab starts with a plain-language summary; raw data is one tab away.
+ * Credentials are always shown apart from raw_data.
  */
 
 import { api } from "../core/api.js";
 import {
+  agoCell,
+  asList,
   badgeProtocol,
   badgeSeverity,
   badgeTag,
   classifyCommand,
   copyText,
   escapeHtml,
-  fmtDateTime,
+  fmtLocal,
   fmtNum,
   renderStagePips,
   shortId,
+  stageLabel,
+  timeAgo,
 } from "../core/escape.js";
 import { store } from "../core/store.js";
 
 let maskPasswords = false;
+let attackerRequest = 0;
 
 function maskVal(val) {
   if (!val) return "(empty)";
-  return maskPasswords ? "*".repeat(Math.min(12, String(val).length)) : String(val);
+  return maskPasswords ? "•".repeat(Math.min(10, String(val).length)) : String(val);
+}
+
+function plural(n, one, many) {
+  return `${fmtNum(n)} ${n === 1 ? one : many}`;
 }
 
 export async function inspectAttacker(ip) {
   if (!ip) return;
+  const req = ++attackerRequest;
   store.openInspector("attacker", { ip }, "summary", true);
   try {
     const detail = await api.getAttackerDetail(ip, false);
+    if (req !== attackerRequest) return; // user already clicked another IP
     store.openInspector("attacker", detail, "summary", false);
   } catch (err) {
-    store.openInspector("attacker", { ip, error: err.message }, "summary", false);
+    if (req !== attackerRequest || (err && err.name === "AbortError")) return;
+    store.openInspector("attacker", { ip, error: err.message || "Could not load this IP" }, "summary", false);
   }
 }
 
@@ -51,7 +64,7 @@ export function initInspectorResizer() {
 
   window.addEventListener("mousemove", (ev) => {
     if (!dragging) return;
-    const nextW = Math.max(320, Math.min(window.innerWidth * 0.65, window.innerWidth - ev.clientX));
+    const nextW = Math.max(340, Math.min(window.innerWidth * 0.65, window.innerWidth - ev.clientX));
     pane.style.width = `${Math.round(nextW)}px`;
     pane.style.flexBasis = `${Math.round(nextW)}px`;
   });
@@ -64,366 +77,387 @@ export function initInspectorResizer() {
   });
 }
 
-function renderCredentialsBlock(creds, protocol) {
-  if (!creds) return "";
-  const isOk = Boolean(creds.success);
+function kv(rows) {
+  return `<div class="kv-grid">${rows
+    .filter(Boolean)
+    .map(([k, v]) => `<div class="kv-k">${escapeHtml(k)}</div><div class="kv-v">${v}</div>`)
+    .join("")}</div>`;
+}
+
+function rawTab(obj) {
+  const json = JSON.stringify(obj, null, 2);
   return `
-    <div class="creds-box ${isOk ? "success" : ""}">
+    <div class="btn-group"><button class="btn sm" data-copy="${escapeHtml(json)}">Copy JSON</button></div>
+    <pre class="code-block tall">${escapeHtml(json)}</pre>
+  `;
+}
+
+function credentialsBlock(creds, protocol) {
+  if (!creds) return "";
+  const ok = Boolean(creds.success);
+  return `
+    <div class="creds-box ${ok ? "success" : ""}">
       <div class="creds-head">
-        <span>EXTRACTED CREDENTIALS (${escapeHtml(protocol || "AUTH")})${isOk ? " // AUTH SUCCESS" : ""}</span>
+        <span>Login attempt over ${escapeHtml(protocol || "the network")}</span>
         <div class="btn-group">
-          <button class="btn" data-action="toggle-mask">${maskPasswords ? "UNMASK" : "MASK"}</button>
-          <button class="btn" data-copy="${escapeHtml(`${creds.username}:${creds.password}`)}">COPY PAIR</button>
+          <button class="btn sm ghost" data-action="toggle-mask">${maskPasswords ? "Show password" : "Hide password"}</button>
+          <button class="btn sm" data-copy="${escapeHtml(`${creds.username}:${creds.password}`)}">Copy</button>
         </div>
       </div>
       <div class="creds-pair">
-        <span class="cell-muted">USERNAME</span>
-        <span class="cell-strong">${escapeHtml(creds.username || "(empty)")}</span>
-        <span class="cell-muted">PASSWORD</span>
-        <span class="cell-strong">${escapeHtml(maskVal(creds.password))}</span>
-        <span class="cell-muted">RESULT</span>
-        <span>${isOk ? '<span class="badge sev-CRITICAL">ACCEPTED</span>' : '<span class="badge sev-NONE">REJECTED</span>'}</span>
+        <span class="cell-muted">Username</span><span class="mono">${escapeHtml(creds.username || "(empty)")}</span>
+        <span class="cell-muted">Password</span><span class="mono">${escapeHtml(maskVal(creds.password))}</span>
+        <span class="cell-muted">Result</span><span>${ok ? '<span class="badge sev-CRITICAL">Accepted</span>' : '<span class="badge sev-NONE">Rejected</span>'}</span>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
-function renderAlertBody(al, tab) {
-  const pd = al.payload_details || {};
-  const geoStr = al.geo ? `${al.geo.country || "?"}${al.geo.city ? " / " + al.geo.city : ""}` : "N/A (GeoIP off)";
+function ipLink(ip) {
+  return `<span class="ip-link" data-inspect-ip="${escapeHtml(ip)}">${escapeHtml(ip)}</span>`;
+}
 
-  if (tab === "raw") {
-    return `
-      <div class="btn-group">
-        <button class="btn" data-copy="${escapeHtml(JSON.stringify(al, null, 2))}">COPY JSON</button>
-      </div>
-      <pre class="code-block tall">${escapeHtml(JSON.stringify(al, null, 2))}</pre>
-    `;
-  }
+/* ---------- Alert ---------- */
+
+function alertBody(al, tab) {
+  const pd = al.payload_details || {};
+  if (tab === "raw") return rawTab(al);
 
   if (tab === "payload") {
     return `
-      ${renderCredentialsBlock(al.credentials, al.protocol)}
-      <div class="panel">
-        <div class="panel-head">
-          <span class="panel-title">EXTRACTED PAYLOAD FIELDS</span>
-          <span class="panel-meta">${escapeHtml(al.protocol)}</span>
-        </div>
-        <div class="panel-body flush">
-          <div class="kv-grid">
-            <div class="kv-k">COMMAND</div><div class="kv-v">${escapeHtml(pd.command || "-")}</div>
-            <div class="kv-k">HTTP METHOD</div><div class="kv-v">${escapeHtml(pd.http_method || "-")}</div>
-            <div class="kv-k">HTTP PATH</div><div class="kv-v">${escapeHtml(pd.http_path || "-")}</div>
-            <div class="kv-k">USER-AGENT</div><div class="kv-v">${escapeHtml(pd.http_user_agent || "-")}</div>
-            <div class="kv-k">MALWARE URL</div><div class="kv-v">${escapeHtml(pd.extracted_url || "-")}</div>
-          </div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">
-          <span class="panel-title">RAW_DATA (REDACTED HTTP PASSWORD SEPARATED)</span>
-          <button class="btn" data-copy="${escapeHtml(pd.raw_data || "")}">COPY RAW</button>
-        </div>
-        <div class="panel-body flush">
-          <pre class="code-block">${escapeHtml(pd.raw_data || "(no raw_data captured for this event)")}</pre>
-        </div>
-      </div>
+      ${credentialsBlock(al.credentials, al.protocol)}
+      ${kv([
+        ["Command", pd.command ? `<span class="mono">${escapeHtml(pd.command)}</span>` : "—"],
+        ["HTTP request", pd.http_path ? `<span class="mono">${escapeHtml(`${pd.http_method || ""} ${pd.http_path}`)}</span>` : "—"],
+        ["User agent", escapeHtml(pd.http_user_agent || "—")],
+        ["Download URL", pd.extracted_url ? `<span class="mono">${escapeHtml(pd.extracted_url)}</span>` : "—"],
+      ])}
+      <div class="section-title">Raw data</div>
+      <pre class="code-block">${escapeHtml(pd.raw_data || "(nothing captured)")}</pre>
     `;
   }
 
-  // Summary tab
+  const geo = al.geo ? [al.geo.country, al.geo.city].filter(Boolean).join(", ") : "";
   return `
-    <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+    <div class="summary-box ${al.severity === "CRITICAL" ? "crit" : ""}">
+      <span class="headline">${escapeHtml(al.alert_reason || "Alert")}</span>
+      From ${ipLink(al.source_ip)} over ${escapeHtml(al.protocol)}, ${escapeHtml(timeAgo(al.timestamp))}.
+    </div>
+
+    <div class="badge-row">
       ${badgeSeverity(al.severity)}
       ${badgeProtocol(al.protocol)}
-      <span class="badge">SCORE ${fmtNum(al.score)}</span>
-      ${al.technique ? `<span class="badge" style="color:var(--state-accent);">${escapeHtml(al.technique)} ${escapeHtml(al.technique_name)}</span>` : ""}
-      ${(al.tags || []).map(badgeTag).join("")}
+      <span class="badge">Score ${fmtNum(al.score)}</span>
+      ${al.technique ? `<span class="badge" title="${escapeHtml(al.technique_name)}">${escapeHtml(al.technique)}</span>` : ""}
+      ${asList(al.tags).map(badgeTag).join("")}
     </div>
 
-    <div class="panel">
-      <div class="panel-head">
-        <span class="panel-title">DETECTION REASON</span>
-      </div>
-      <div class="panel-body mono" style="color:var(--text-bright);word-break:break-word;">
-        ${escapeHtml(al.alert_reason || "-")}
-      </div>
+    ${credentialsBlock(al.credentials, al.protocol)}
+
+    ${
+      pd.command
+        ? `<div class="term-box">
+            <div class="term-head"><span>Command typed</span><button class="btn sm" data-copy="${escapeHtml(pd.command)}">Copy</button></div>
+            <div class="term-body">
+              <div class="term-line flag-${classifyCommand(pd.command)}">
+                <span class="term-idx">$</span><span class="term-cmd">${escapeHtml(pd.command)}</span>
+              </div>
+            </div>
+          </div>`
+        : ""
+    }
+
+    ${al.recommendation ? `<div class="section-title">What to do</div><div>${escapeHtml(al.recommendation)}</div>` : ""}
+
+    <div class="section-title">Details</div>
+    ${kv([
+      ["When", escapeHtml(fmtLocal(al.timestamp))],
+      ["Source", `${ipLink(al.source_ip)}${al.source_port ? `<span class="cell-muted">:${escapeHtml(al.source_port)}</span>` : ""}`],
+      ["Target port", escapeHtml(al.target_port ?? "—")],
+      ["Session", al.session_id ? `<span class="ip-link mono" data-filter-query="sid:${escapeHtml(al.session_id)}" data-filter-view="sessions">${escapeHtml(shortId(al.session_id, 16))}</span>` : "—"],
+      al.technique ? ["MITRE", `${escapeHtml(al.technique)} · ${escapeHtml(al.technique_name || "")}${al.tactic ? ` <span class="cell-muted">(${escapeHtml(al.tactic)})</span>` : ""}`] : null,
+      geo ? ["Location", escapeHtml(geo)] : null,
+    ])}
+
+    <div class="btn-group">
+      <button class="btn sm" data-filter-query="ip:${escapeHtml(al.source_ip)}" data-filter-view="alerts">All alerts from this IP</button>
     </div>
-
-    ${renderCredentialsBlock(al.credentials, al.protocol)}
-
-    <div class="kv-grid">
-      <div class="kv-k">TIMESTAMP</div><div class="kv-v">${escapeHtml(fmtDateTime(al.timestamp))}</div>
-      <div class="kv-k">SOURCE IP</div>
-      <div class="kv-v">
-        <span class="ip-link" data-inspect-ip="${escapeHtml(al.source_ip)}">${escapeHtml(al.source_ip)}</span>
-        ${al.source_port ? `:${escapeHtml(al.source_port)}` : ""}
-        <button class="btn" style="margin-left:6px;height:18px;" data-filter-query="ip:${escapeHtml(al.source_ip)}">FILTER IP</button>
-      </div>
-      <div class="kv-k">TARGET PORT</div><div class="kv-v">${escapeHtml(al.target_port ?? "-")} (${escapeHtml(al.node_id)})</div>
-      <div class="kv-k">SESSION ID</div>
-      <div class="kv-v">
-        ${al.session_id ? `<span class="ip-link" data-filter-query="sid:${escapeHtml(al.session_id)}">${escapeHtml(al.session_id)}</span>` : "-"}
-      </div>
-      <div class="kv-k">EVENT TYPE</div><div class="kv-v">${escapeHtml(al.event_type)}</div>
-      <div class="kv-k">MITRE TACTIC</div><div class="kv-v">${escapeHtml(al.tactic || "-")}</div>
-      <div class="kv-k">GEO LOCATION</div><div class="kv-v">${escapeHtml(geoStr)}</div>
-    </div>
-
-    ${pd.command ? `
-      <div class="term-box">
-        <div class="term-head"><span>CAPTURED COMMAND</span><button class="btn" data-copy="${escapeHtml(pd.command)}">COPY</button></div>
-        <div class="term-body">
-          <div class="term-line flag-${classifyCommand(pd.command)}">
-            <span class="term-idx">$</span>
-            <span class="term-cmd">${escapeHtml(pd.command)}</span>
-          </div>
-        </div>
-      </div>
-    ` : ""}
-
-    ${al.recommendation ? `
-      <div class="panel">
-        <div class="panel-head"><span class="panel-title">MITIGATION GUIDANCE</span></div>
-        <div class="panel-body mono" style="color:var(--text-secondary);">${escapeHtml(al.recommendation)}</div>
-      </div>
-    ` : ""}
   `;
 }
 
-function renderSessionBody(s, tab) {
-  if (tab === "raw") {
-    return `
-      <div class="btn-group">
-        <button class="btn" data-copy="${escapeHtml(JSON.stringify(s, null, 2))}">COPY JSON</button>
-      </div>
-      <pre class="code-block tall">${escapeHtml(JSON.stringify(s, null, 2))}</pre>
-    `;
+/* ---------- Session ---------- */
+
+function sessionStory(s) {
+  const parts = [`${ipLink(s.source_ip)} connected over ${escapeHtml(s.protocol)}`];
+  if (s.protocol === "HTTP") {
+    const n = asList(s.http_requests).length;
+    if (n) parts.push(`sent ${plural(n, "flagged request", "flagged requests")}`);
+  } else {
+    if (s.login_attempts) parts.push(`tried ${plural(s.login_attempts, "password", "passwords")}`);
+    if (s.successful_login) parts.push(`<strong>logged in as ${escapeHtml(s.successful_login)}</strong>`);
+    const cmds = asList(s.commands).length;
+    if (cmds) parts.push(`ran ${plural(cmds, "command", "commands")}`);
+    const dl = asList(s.downloads).length;
+    if (dl) parts.push(`<strong>tried to download ${plural(dl, "file", "files")}</strong>`);
   }
+  if (s.honeytoken_hit) parts.push(`<strong>read a decoy secret</strong>`);
+  const last = parts.pop();
+  return parts.length ? `${parts.join(", ")} and ${last}.` : `${last}.`;
+}
+
+function sessionBody(s, tab) {
+  if (tab === "raw") return rawTab(s);
 
   if (tab === "replay") {
     if (s.protocol === "HTTP") {
-      const reqs = s.http_requests || [];
-      if (!reqs.length) {
-        return `<div class="empty-state">NO ALERTED HTTP REQUEST PAYLOADS LINKED TO THIS SESSION IN THE RECENT 500-ALERT BUFFER.</div>`;
-      }
+      const reqs = asList(s.http_requests);
+      if (!reqs.length) return `<div class="empty-state">No flagged HTTP requests for this connection.</div>`;
       return reqs
         .map(
           (r, i) => `
           <div class="http-req-item">
-            <div class="http-req-head">
-              <span class="cell-strong">#${i + 1} ${escapeHtml(r.method || "REQ")} ${escapeHtml(r.path || "/")}</span>
-              ${badgeSeverity(r.severity)}
-            </div>
-            <div class="cell-muted">UTC: ${escapeHtml(fmtDateTime(r.timestamp))} | UA: ${escapeHtml(r.user_agent || "-")}</div>
+            <div class="http-req-head"><span>${i + 1}. ${escapeHtml(r.method || "GET")} ${escapeHtml(r.path || "/")}</span>${badgeSeverity(r.severity)}</div>
+            <div class="cell-muted">${escapeHtml(fmtLocal(r.timestamp))}${r.user_agent ? ` · ${escapeHtml(r.user_agent)}` : ""}</div>
             <div>${escapeHtml(r.reason)}</div>
-            ${renderCredentialsBlock(r.credentials, "HTTP")}
+            ${credentialsBlock(r.credentials, "HTTP")}
             ${r.raw_data ? `<pre class="code-block">${escapeHtml(r.raw_data)}</pre>` : ""}
-          </div>
-        `
+          </div>`
         )
         .join("");
     }
 
-    // SSH / Telnet / FTP Terminal Replay
-    const cmds = s.commands || [];
+    const cmds = asList(s.commands);
     return `
       <div class="term-box">
         <div class="term-head">
-          <span>${escapeHtml(s.protocol)} // ${escapeHtml(s.node_id || "gateway")} (${cmds.length} COMMANDS)</span>
-          <button class="btn" data-copy="${escapeHtml(cmds.join("\n"))}">COPY TRANSCRIPT</button>
+          <span>${plural(cmds.length, "command", "commands")}</span>
+          ${cmds.length ? `<button class="btn sm" data-copy="${escapeHtml(cmds.join("\n"))}">Copy all</button>` : ""}
         </div>
         <div class="term-body">
-          ${s.successful_login ? `
-            <div class="term-line">
-              <span class="term-idx">AUTH</span>
-              <span class="term-cmd" style="color:var(--sev-critical);">LOGIN ACCEPTED -> ${escapeHtml(s.successful_login)}</span>
-            </div>` : ""}
+          ${s.successful_login ? `<div class="term-line"><span class="term-idx"></span><span class="term-cmd" style="color:var(--sev-critical);">Logged in as ${escapeHtml(s.successful_login)}</span></div>` : ""}
           ${
             cmds.length
               ? cmds
                   .map((cmd, idx) => {
                     const flag = classifyCommand(cmd);
-                    return `
-                      <div class="term-line ${flag ? "flag-" + flag : ""}">
-                        <span class="term-idx">${idx + 1}</span>
-                        <span class="term-cmd"><span class="term-prompt">root@gateway:~#</span>${escapeHtml(cmd)}</span>
-                      </div>`;
+                    return `<div class="term-line ${flag ? "flag-" + flag : ""}"><span class="term-idx">${idx + 1}</span><span class="term-cmd"><span class="term-prompt">#</span>${escapeHtml(cmd)}</span></div>`;
                   })
                   .join("")
-              : `<div class="empty-state">NO SHELL COMMANDS EXECUTED IN THIS SESSION.</div>`
+              : `<div class="empty-state">No commands were typed in this session.</div>`
           }
         </div>
       </div>
       ${
-        (s.downloads || []).length
-          ? `<div class="panel">
-              <div class="panel-head"><span class="panel-title">EXTRACTED MALWARE URLS (${s.downloads.length})</span></div>
-              <div class="panel-body flush"><pre class="code-block">${escapeHtml(s.downloads.join("\n"))}</pre></div>
-            </div>`
+        asList(s.downloads).length
+          ? `<div class="section-title">Files it tried to download</div><pre class="code-block">${escapeHtml(asList(s.downloads).join("\n"))}</pre>`
           : ""
       }
+      <p class="muted-note">Highlighted lines: red = decoy secret, orange = download or Mirai, yellow = crypto-miner checks.</p>
     `;
   }
 
-  // Summary tab
+  const stages = asList(s.stages);
+  const related = asList(s.related_alerts);
   return `
-    <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+    <div class="summary-box ${s.successful_login ? "crit" : ""}">${sessionStory(s)}</div>
+
+    <div class="badge-row">
       ${badgeProtocol(s.protocol)}
       ${badgeSeverity(s.max_severity)}
-      <span class="badge">RISK ${fmtNum(s.risk_score)}/100</span>
-      ${(s.family_labels || []).map((f) => `<span class="badge tag-SCANNER_WEB">${escapeHtml(f)}</span>`).join("")}
-      ${(s.tags || []).map(badgeTag).join("")}
+      <span class="badge">Risk ${fmtNum(s.risk_score)}/100</span>
+      ${asList(s.family_labels).map((f) => `<span class="badge">${escapeHtml(f)}</span>`).join("")}
     </div>
 
-    <div class="kv-grid">
-      <div class="kv-k">SESSION ID</div><div class="kv-v">${escapeHtml(s.session_id)}</div>
-      <div class="kv-k">SOURCE IP</div>
-      <div class="kv-v">
-        <span class="ip-link" data-inspect-ip="${escapeHtml(s.source_ip)}">${escapeHtml(s.source_ip)}</span>
-        <button class="btn" style="margin-left:6px;height:18px;" data-filter-query="ip:${escapeHtml(s.source_ip)}">FILTER</button>
-      </div>
-      <div class="kv-k">WINDOW</div><div class="kv-v">${escapeHtml(fmtDateTime(s.start))} -> ${escapeHtml(fmtDateTime(s.end))}</div>
-      <div class="kv-k">DURATION</div><div class="kv-v">${escapeHtml(s.duration_label)}</div>
-      <div class="kv-k">LOGIN TRIES</div><div class="kv-v">${fmtNum(s.login_attempts)} ${s.successful_login ? `// OK: ${escapeHtml(s.successful_login)}` : ""}</div>
-      <div class="kv-k">KILL CHAIN</div><div class="kv-v">${renderStagePips(s.stages)} <span class="cell-muted" style="margin-left:6px;">${escapeHtml((s.stages || []).join(" > "))}</span></div>
-    </div>
+    ${kv([
+      ["Started", escapeHtml(fmtLocal(s.start))],
+      ["Ended", s.end ? escapeHtml(fmtLocal(s.end)) : '<span class="cell-muted">still open</span>'],
+      ["Source", ipLink(s.source_ip)],
+      ["How far", `${renderStagePips(stages)} <span class="cell-muted" style="margin-left:6px;">${escapeHtml(stages.map(stageLabel).join(" → ") || "—")}</span>`],
+      ["Session ID", `<span class="mono">${escapeHtml(s.session_id)}</span>`],
+    ])}
 
     ${
-      (s.passwords || []).length
-        ? `<div class="panel">
-            <div class="panel-head">
-              <span class="panel-title">PASSWORDS ATTEMPTED (${s.passwords.length})</span>
-              <button class="btn" data-action="toggle-mask">${maskPasswords ? "UNMASK" : "MASK"}</button>
-            </div>
-            <div class="panel-body mono" style="word-break:break-all;">
-              ${s.passwords.map((p) => `<span class="badge" style="margin:2px;">${escapeHtml(maskVal(p))}</span>`).join("")}
-            </div>
-          </div>`
+      asList(s.passwords).length
+        ? `<div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>Passwords tried (${fmtNum(asList(s.passwords).length)})</span>
+            <button class="btn sm ghost" data-action="toggle-mask">${maskPasswords ? "Show" : "Hide"}</button>
+          </div>
+          <div class="badge-row">${asList(s.passwords).slice(0, 60).map((p) => `<span class="badge mono">${escapeHtml(maskVal(p))}</span>`).join("")}</div>`
         : ""
     }
 
-    <div class="panel">
-      <div class="panel-head">
-        <span class="panel-title">CORRELATED ALERTS (${(s.related_alerts || []).length})</span>
-      </div>
-      <div class="panel-body flush">
-        ${
-          (s.related_alerts || []).length
-            ? `<table class="soc-table">
-                <thead><tr><th style="width:68px;">SEV</th><th>REASON</th><th style="width:46px;" class="num">PTS</th></tr></thead>
-                <tbody>
-                  ${s.related_alerts
-                    .slice(0, 20)
-                    .map(
-                      (a) => `<tr>
-                        <td>${badgeSeverity(a.severity)}</td>
-                        <td title="${escapeHtml(a.alert_reason)}">${escapeHtml(a.alert_reason)}</td>
-                        <td class="num">${fmtNum(a.score)}</td>
-                      </tr>`
-                    )
-                    .join("")}
-                </tbody>
-              </table>`
-            : `<div class="empty-state">NO ALERTS LINKED IN RECENT 500-ALERT WINDOW</div>`
-        }
-      </div>
-    </div>
+    ${
+      related.length
+        ? `<div class="section-title">Alerts in this session (${fmtNum(related.length)})</div>
+          <div>${related
+            .slice(0, 15)
+            .map((a) => `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;">${badgeSeverity(a.severity)}<span>${escapeHtml(a.alert_reason)}</span></div>`)
+            .join("")}</div>`
+        : ""
+    }
   `;
 }
 
-function renderAttackerBody(detail, tab, loading) {
-  if (loading) {
-    return `<div class="empty-state">LOADING ATTACKER DOSSIER FOR ${escapeHtml(detail.ip)}...</div>`;
-  }
+/* ---------- Attacker ---------- */
+
+function attackerBody(detail, tab, loading) {
+  if (loading) return `<div class="empty-state">Loading ${escapeHtml(detail.ip)}…</div>`;
   if (detail.error) {
-    return `<div class="empty-state" style="color:var(--sev-critical);">${escapeHtml(detail.error)}</div>`;
+    return `<div class="error-panel"><h3>Could not load this IP</h3><p>${escapeHtml(detail.error)}</p></div>`;
   }
   const p = detail.profile || {};
-  if (tab === "raw") {
-    return `<pre class="code-block tall">${escapeHtml(JSON.stringify(detail, null, 2))}</pre>`;
-  }
+  if (tab === "raw") return rawTab(detail);
 
   if (tab === "activity") {
-    const cmds = p.commands || [];
-    const creds = detail.credentials_seen || [];
+    const cmds = asList(p.commands);
+    const creds = asList(detail.credentials_seen);
     return `
-      <div class="panel">
-        <div class="panel-head"><span class="panel-title">CAPTURED COMMANDS (${cmds.length})</span></div>
-        <div class="panel-body flush">
-          <pre class="code-block">${escapeHtml(cmds.length ? cmds.join("\n") : "(none)")}</pre>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head"><span class="panel-title">CREDENTIALS TESTED (${creds.length})</span></div>
-        <div class="panel-body flush">
-          ${
-            creds.length
-              ? `<table class="soc-table">
-                  <thead><tr><th>USER</th><th>PASSWORD</th><th style="width:66px;">AUTH</th></tr></thead>
-                  <tbody>
-                    ${creds
-                      .map(
-                        (c) => `<tr>
-                          <td>${escapeHtml(c.username)}</td>
-                          <td>${escapeHtml(maskVal(c.password))}</td>
-                          <td>${c.success ? '<span class="badge sev-CRITICAL">OK</span>' : '<span class="badge sev-NONE">FAIL</span>'}</td>
-                        </tr>`
-                      )
-                      .join("")}
-                  </tbody>
-                </table>`
-              : `<div class="empty-state">NO CREDENTIALS RECORDED</div>`
-          }
-        </div>
+      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>Logins tried (${fmtNum(creds.length)})</span>
+        ${creds.length ? `<button class="btn sm ghost" data-action="toggle-mask">${maskPasswords ? "Show passwords" : "Hide passwords"}</button>` : ""}
       </div>
       ${
-        (detail.user_agents || []).length
-          ? `<div class="panel">
-              <div class="panel-head"><span class="panel-title">HTTP USER-AGENTS (${detail.user_agents.length})</span></div>
-              <div class="panel-body flush"><pre class="code-block">${escapeHtml(detail.user_agents.join("\n"))}</pre></div>
-            </div>`
+        creds.length
+          ? `<table class="soc-table"><thead><tr><th>User</th><th>Password</th><th style="width:100px;">Result</th></tr></thead><tbody>
+              ${creds
+                .map(
+                  (c) => `<tr><td class="mono">${escapeHtml(c.username)}</td><td class="mono">${escapeHtml(maskVal(c.password))}</td>
+                  <td>${c.success ? '<span class="badge sev-CRITICAL">Accepted</span>' : '<span class="badge sev-NONE">Rejected</span>'}</td></tr>`
+                )
+                .join("")}
+            </tbody></table>`
+          : `<div class="muted-note">None recorded.</div>`
+      }
+      <div class="section-title">Commands (${fmtNum(cmds.length)})</div>
+      ${cmds.length ? `<pre class="code-block">${escapeHtml(cmds.join("\n"))}</pre>` : `<div class="muted-note">None recorded.</div>`}
+      ${
+        asList(detail.user_agents).length
+          ? `<div class="section-title">HTTP user agents</div><pre class="code-block">${escapeHtml(asList(detail.user_agents).join("\n"))}</pre>`
           : ""
       }
     `;
   }
 
+  const okLogins = asList(p.successful_logins).length;
+  const geo = p.geo ? [p.geo.country, p.geo.city].filter(Boolean).join(", ") : "";
+  const story = [
+    `First seen ${escapeHtml(timeAgo(p.first_seen))}, last seen ${escapeHtml(timeAgo(p.last_seen))}.`,
+    `${plural(p.total_alerts || 0, "alert", "alerts")} across ${plural(p.sessions || 0, "session", "sessions")}.`,
+    p.login_attempts ? `Tried ${plural(p.login_attempts, "login", "logins")}${okLogins ? `, <strong>${plural(okLogins, "succeeded", "succeeded")}</strong>` : ", none worked"}.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const stages = asList(p.stages);
+
   return `
-    <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+    <div class="summary-box ${okLogins ? "crit" : ""}">${story}</div>
+
+    <div class="badge-row">
       ${badgeSeverity(p.overall_severity || p.worst_severity)}
-      <span class="badge">SCORE ${fmtNum(p.threat_score)}</span>
-      <span class="badge">ALERTS ${fmtNum(p.total_alerts)}</span>
-      <span class="badge">SESSIONS ${fmtNum(p.sessions)}</span>
-      ${(p.protocols || []).map(badgeProtocol).join("")}
-      ${(detail.families || []).map((f) => `<span class="badge tag-SCANNER_WEB">${escapeHtml(f)}</span>`).join("")}
+      <span class="badge">Score ${fmtNum(p.threat_score)}</span>
+      ${asList(p.protocols).map(badgeProtocol).join("")}
+      ${asList(detail.families).map((f) => `<span class="badge">${escapeHtml(f)}</span>`).join("")}
     </div>
 
     <div class="btn-group">
-      <button class="btn primary" data-filter-query="ip:${escapeHtml(p.ip)}">FILTER WORKSPACE BY IP</button>
-      <button class="btn" data-copy="${escapeHtml(p.ip)}">COPY IP</button>
-      <button class="btn" data-copy="iptables -I INPUT 1 -s ${escapeHtml(p.ip)} -j DROP">COPY IPTABLES DROP</button>
+      <button class="btn sm primary" data-filter-query="ip:${escapeHtml(p.ip)}" data-filter-view="alerts">Show its alerts</button>
+      <button class="btn sm" data-filter-query="ip:${escapeHtml(p.ip)}" data-filter-view="sessions">Show its sessions</button>
+      <button class="btn sm" data-copy="${escapeHtml(p.ip)}">Copy IP</button>
     </div>
 
-    <div class="kv-grid">
-      <div class="kv-k">IP ADDRESS</div><div class="kv-v cell-strong">${escapeHtml(p.ip)}</div>
-      <div class="kv-k">FIRST SEEN</div><div class="kv-v">${escapeHtml(fmtDateTime(p.first_seen))}</div>
-      <div class="kv-k">LAST SEEN</div><div class="kv-v">${escapeHtml(fmtDateTime(p.last_seen))}</div>
-      <div class="kv-k">LOGIN TRIES</div><div class="kv-v">${fmtNum(p.login_attempts)} (OK: ${(p.successful_logins || []).length})</div>
-      <div class="kv-k">KILL CHAIN</div><div class="kv-v">${renderStagePips(p.stages)} <span class="cell-muted">${escapeHtml((p.stages || []).join(" > "))}</span></div>
-      <div class="kv-k">GEOIP</div><div class="kv-v">${p.geo ? escapeHtml(`${p.geo.country || "?"} / ${p.geo.city || "?"}`) : "N/A"}</div>
-    </div>
+    ${kv([
+      ["First seen", `${escapeHtml(fmtLocal(p.first_seen))}`],
+      ["Last seen", agoCell(p.last_seen)],
+      ["How far", `${renderStagePips(stages)} <span class="cell-muted" style="margin-left:6px;">${escapeHtml(stages.map(stageLabel).join(" → ") || "—")}</span>`],
+      geo ? ["Location", escapeHtml(geo)] : null,
+    ])}
 
     ${
-      (p.recommendations || []).length
-        ? `<div class="panel">
-            <div class="panel-head"><span class="panel-title">RECOMMENDED ACTIONS</span></div>
-            <div class="panel-body mono" style="display:flex;flex-direction:column;gap:5px;color:var(--text-secondary);">
-              ${p.recommendations.map((r) => `<div>- ${escapeHtml(r)}</div>`).join("")}
-            </div>
-          </div>`
+      asList(p.recommendations).length
+        ? `<div class="section-title">What to do</div>
+          <ul style="margin:0;padding-left:18px;">${asList(p.recommendations).map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>`
         : ""
     }
+
+    <div class="section-title">Block it</div>
+    <pre class="code-block">iptables -I INPUT 1 -s ${escapeHtml(p.ip)} -j DROP</pre>
+    <div class="btn-group"><button class="btn sm" data-copy="iptables -I INPUT 1 -s ${escapeHtml(p.ip)} -j DROP">Copy rule</button></div>
   `;
+}
+
+/* ---------- Campaign / family (from the Campaigns page or the graph) ---------- */
+
+function groupBody(kind, g, tab) {
+  if (tab === "raw") return rawTab(g);
+  const ips = asList(g.ips).length ? asList(g.ips) : g.meta && g.meta.ip ? [g.meta.ip] : [];
+  const reasons = asList(g.reasons).length ? asList(g.reasons) : asList(g.meta && g.meta.reasons);
+  const traits = asList(g.common_behavior).length ? asList(g.common_behavior) : asList(g.meta && g.meta.traits);
+  return `
+    <div class="summary-box">
+      ${
+        kind === "campaign"
+          ? `${plural(g.size || ips.length, "IP", "IPs")} working together. Linked by: ${escapeHtml(reasons.join("; ") || "shared infrastructure")}.`
+          : kind === "family"
+          ? `${plural(g.size || ips.length, "IP", "IPs")} that behave alike.`
+          : kind === "server"
+          ? `Malware server <span class="mono">${escapeHtml(g.label || "")}</span>, used by linked attackers to download files.`
+          : `<span class="mono">${escapeHtml(g.label || "")}</span>`
+      }
+    </div>
+    ${traits.length ? `<div class="section-title">Common behaviour</div><div class="badge-row">${traits.map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
+    ${asList(g.servers).length ? `<div class="section-title">Malware servers</div><pre class="code-block">${escapeHtml(asList(g.servers).join("\n"))}</pre>` : ""}
+    ${ips.length ? `<div class="section-title">IPs (${fmtNum(ips.length)})</div><div class="chip-list">${ips.map(ipLink).join("")}</div>` : ""}
+  `;
+}
+
+/* ---------- Panel ---------- */
+
+const KINDS = {
+  alert: (d) => ({
+    kicker: "Alert",
+    title: `${d.source_ip || "?"} · ${d.protocol || ""}`,
+    tabs: [
+      ["summary", "Summary"],
+      ["payload", "Payload"],
+      ["raw", "Raw JSON"],
+    ],
+  }),
+  session: (d) => ({
+    kicker: "Session",
+    title: `${d.source_ip || "?"} · ${d.protocol || ""}`,
+    tabs: [
+      ["summary", "Summary"],
+      ["replay", d.protocol === "HTTP" ? "Requests" : "Replay"],
+      ["raw", "Raw JSON"],
+    ],
+  }),
+  attacker: (d) => ({
+    kicker: "Attacker",
+    title: (d.profile && d.profile.ip) || d.ip || "?",
+    tabs: [
+      ["summary", "Summary"],
+      ["activity", "Logins & commands"],
+      ["raw", "Raw JSON"],
+    ],
+  }),
+};
+
+function groupMeta(kind, d) {
+  const names = { campaign: "Campaign", family: "Behaviour family", server: "Malware server", ip: "IP" };
+  return {
+    kicker: names[kind] || "Details",
+    title: d.name || d.label || "",
+    tabs: [
+      ["summary", "Summary"],
+      ["raw", "Raw JSON"],
+    ],
+  };
+}
+
+function bodyFor(kind, data, tab, loading) {
+  if (kind === "alert") return alertBody(data, tab);
+  if (kind === "session") return sessionBody(data, tab);
+  if (kind === "attacker") return attackerBody(data, tab, loading);
+  return groupBody(kind, data, tab);
 }
 
 export function renderInspector() {
@@ -441,61 +475,33 @@ export function renderInspector() {
   pane.classList.remove("collapsed");
   resizer.classList.remove("collapsed");
 
-  const { kind, data, tab, loading } = st.inspector;
-  let title = "INSPECTOR";
-  let tabs = [];
-  let bodyHtml = "";
+  const { kind, data, loading } = st.inspector;
+  const meta = KINDS[kind] ? KINDS[kind](data) : groupMeta(kind, data);
+  const tab = meta.tabs.some(([id]) => id === st.inspector.tab) ? st.inspector.tab : "summary";
 
-  if (kind === "alert") {
-    title = `ALERT // ${data.protocol} // ${data.source_ip}`;
-    tabs = [
-      { id: "summary", label: "SUMMARY" },
-      { id: "payload", label: "PAYLOAD & CREDS" },
-      { id: "raw", label: "RAW JSON" },
-    ];
-    bodyHtml = renderAlertBody(data, tab);
-  } else if (kind === "session") {
-    title = `SESSION // ${shortId(data.session_id, 14)} // ${data.protocol}`;
-    tabs = [
-      { id: "summary", label: "SUMMARY" },
-      { id: "replay", label: data.protocol === "HTTP" ? "HTTP REQUESTS" : "TERMINAL REPLAY" },
-      { id: "raw", label: "RAW JSON" },
-    ];
-    bodyHtml = renderSessionBody(data, tab);
-  } else if (kind === "attacker") {
-    const ip = (data.profile && data.profile.ip) || data.ip || "?";
-    title = `ATTACKER DOSSIER // ${ip}`;
-    tabs = [
-      { id: "summary", label: "DOSSIER" },
-      { id: "activity", label: "COMMANDS & CREDS" },
-      { id: "raw", label: "RAW JSON" },
-    ];
-    bodyHtml = renderAttackerBody(data, tab, loading);
-  } else {
-    title = `${String(kind || "ITEM").toUpperCase()} INSPECTOR`;
-    tabs = [{ id: "raw", label: "DETAILS" }];
-    bodyHtml = `<pre class="code-block tall">${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+  let body;
+  try {
+    body = bodyFor(kind, data, tab, loading);
+  } catch (err) {
+    console.error("[inspector]", err);
+    body = `<div class="error-panel"><h3>Could not show these details</h3><p>Some data has an unexpected format. The Raw JSON tab still works.</p></div>`;
   }
 
   pane.innerHTML = `
     <div class="inspector-header">
-      <span class="inspector-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
-      <button class="btn" data-action="close-inspector">CLOSE [ESC]</button>
+      <div style="min-width:0;">
+        <div class="inspector-kicker">${escapeHtml(meta.kicker)}</div>
+        <div class="inspector-title" title="${escapeHtml(meta.title)}">${escapeHtml(meta.title)}</div>
+      </div>
+      <button class="btn sm ghost" data-action="close-inspector" title="Close (Esc)">Close</button>
     </div>
     <div class="inspector-tabs">
-      ${tabs
-        .map(
-          (t) =>
-            `<button class="inspector-tab ${tab === t.id ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`
-        )
-        .join("")}
+      ${meta.tabs.map(([id, label]) => `<button class="inspector-tab ${tab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}
     </div>
-    <div class="inspector-content">${bodyHtml}</div>
+    <div class="inspector-content">${body}</div>
   `;
 
-  pane.querySelector('[data-action="close-inspector"]')?.addEventListener("click", () => {
-    store.closeInspector();
-  });
+  pane.querySelector('[data-action="close-inspector"]')?.addEventListener("click", () => store.closeInspector());
 
   pane.querySelectorAll(".inspector-tab").forEach((btn) => {
     btn.addEventListener("click", () => store.setInspectorTab(btn.dataset.tab));
@@ -518,9 +524,11 @@ export function renderInspector() {
 
   pane.querySelectorAll("[data-filter-query]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      store.setQuery(btn.dataset.filterQuery);
+      const expr = btn.dataset.filterQuery;
+      if (btn.dataset.filterView) store.setView(btn.dataset.filterView);
+      store.setQuery(expr);
       const qInput = document.getElementById("dsl-query-input");
-      if (qInput) qInput.value = btn.dataset.filterQuery;
+      if (qInput) qInput.value = expr;
     });
   });
 }

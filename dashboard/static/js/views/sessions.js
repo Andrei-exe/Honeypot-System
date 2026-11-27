@@ -1,24 +1,33 @@
 /**
- * View 3: SESSIONS EXPLORER & REPLAY LAUNCHER
- * Explicitly supports HTTP sessions (session_id per TCP connection, without session_start/end)
- * and monitors SessionStore saturation (2000-session cap).
+ * Sessions page: one row per connection, with replay of what the attacker typed.
+ * HTTP sessions have one session_id per TCP connection and no start/end events.
  */
 
 import { inspectAttacker } from "../components/inspector.js";
 import {
+  asList,
   badgeProtocol,
-  badgeSeverity,
-  badgeTag,
   escapeHtml,
   fmtNum,
-  fmtTime,
   renderStagePips,
-  shortId,
+  timeCell,
 } from "../core/escape.js";
+import { findNewKeys } from "../core/fresh.js";
 import { filterItems } from "../core/query.js";
+import { rowKey } from "../core/selection.js";
 import { store } from "../core/store.js";
 
+const PAGE_SIZE = 100;
+const KIND_TABS = [
+  { id: "all", label: "All" },
+  { id: "interactive", label: "SSH · Telnet · FTP" },
+  { id: "http", label: "HTTP" },
+  { id: "no-scanners", label: "Hide web scanners" },
+];
+
 let lastRows = [];
+let shown = PAGE_SIZE;
+let shownFor = "";
 
 export function getSessionsRows() {
   return lastRows;
@@ -35,138 +44,142 @@ function sortSessions(list, sortCfg) {
   });
 }
 
+function durationText(s) {
+  const d = s.duration_seconds;
+  if (s.protocol === "HTTP") return d ? `${Number(d).toFixed(1)} s` : "1 request";
+  if (d === null || d === undefined) return "still open";
+  if (d < 60) return `${Number(d).toFixed(1)} s`;
+  return `${Math.floor(d / 60)} min ${Math.round(d % 60)} s`;
+}
+
+function loginText(s) {
+  if (s.successful_login) {
+    return `<span class="badge sev-CRITICAL" title="${escapeHtml(s.successful_login)}">Logged in</span>`;
+  }
+  const n = s.login_attempts || 0;
+  return n ? `<span class="cell-muted">${fmtNum(n)} tr${n === 1 ? "y" : "ies"}</span>` : `<span class="cell-muted">—</span>`;
+}
+
 export function renderSessions(container, state) {
   const data = state.data.sessions;
   if (!data) {
-    container.innerHTML = `<div class="empty-state">LOADING SESSIONSTORE SUMMARIES...</div>`;
+    container.innerHTML = `<div class="empty-state">Loading sessions…</div>`;
     lastRows = [];
     return;
   }
 
-  const health = data.health || {};
-  const protoCounts = health.by_protocol || {};
-  const sampleN = Math.max(1, health.sample_size || 1);
-  const segW = (p) => (((protoCounts[p] || 0) / sampleN) * 100).toFixed(1);
-
-  let rows = data.sessions || [];
-  if (state.sessionFilter === "interactive") {
-    rows = rows.filter((s) => s.kind === "interactive");
-  } else if (state.sessionFilter === "http") {
-    rows = rows.filter((s) => s.protocol === "HTTP");
-  } else if (state.sessionFilter === "no-scanners") {
-    rows = rows.filter((s) => !s.is_web_scanner);
+  const filterId = `${state.sessionFilter}|${state.query}`;
+  if (filterId !== shownFor) {
+    shown = PAGE_SIZE;
+    shownFor = filterId;
   }
+
+  const all = asList(data.sessions);
+  const fresh = findNewKeys("sessions", all.map((s) => rowKey("sessions", s)));
+
+  let rows = all;
+  if (state.sessionFilter === "interactive") rows = rows.filter((s) => s.kind === "interactive");
+  else if (state.sessionFilter === "http") rows = rows.filter((s) => s.protocol === "HTTP");
+  else if (state.sessionFilter === "no-scanners") rows = rows.filter((s) => !s.is_web_scanner);
 
   const { items: filtered } = filterItems(rows, state.query, "session");
   const sorted = sortSessions(filtered, state.sort.sessions);
-  lastRows = sorted;
+  lastRows = sorted.slice(0, shown);
 
+  const health = data.health || {};
   const sortCfg = state.sort.sessions || { key: "start", dir: "desc" };
-  const thCls = (k) =>
-    `sortable${sortCfg.key === k ? (sortCfg.dir === "asc" ? " sort-asc" : " sort-desc") : ""}`;
+  const th = (k, label, width, extra = "") =>
+    `<th style="width:${width}px;" class="sortable ${extra} ${sortCfg.key === k ? (sortCfg.dir === "asc" ? "sort-asc" : "sort-desc") : ""}" data-sort="${k}">${label}</th>`;
+
+  const loggedIn = all.filter((s) => s.successful_login).length;
+  const withCmds = all.filter((s) => asList(s.commands).length > 0).length;
+
+  const storageNote = health.eviction_risk
+    ? `<div class="honeytoken-banner"><div><strong>Session storage is almost full (${health.saturation_pct || 0}%).</strong> Mostly HTTP scanners (${health.http_share_pct || 0}%). Older sessions will be dropped first.</div></div>`
+    : "";
 
   container.innerHTML = `
     <div class="stack-8">
-      <!-- SESSIONSTORE PRESSURE + PROTOCOL TOGGLES -->
-      <div class="panel">
-        <div class="panel-head">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="panel-title">SESSIONSTORE EXPLORER</span>
-            <span class="badge">${fmtNum(sorted.length)} SHOWN / ${fmtNum(data.total || 0)} STORED (MAX ${fmtNum(health.capacity || 2000)})</span>
-            ${
-              health.eviction_risk
-                ? `<span class="badge sev-CRITICAL">EVICTION RISK: HTTP SCANNERS AT ${health.http_share_pct}%</span>`
-                : `<span class="badge ${health.pressure === "ELEVATED" ? "sev-MEDIUM" : "proto-HTTP"}">BUFFER ${health.saturation_pct || 0}% // ${escapeHtml(health.pressure || "NOMINAL")}</span>`
-            }
-          </div>
-          <div class="btn-group">
-            <a class="btn" href="/api/v1/export/sessions.csv">EXPORT CSV</a>
-            <a class="btn" href="/api/v1/export/sessions.json">EXPORT JSON</a>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Sessions</h1>
+          <div class="inline-stats">
+            <span><strong>${fmtNum(data.total || 0)}</strong> stored</span>
+            <span class="${loggedIn ? "crit" : ""}"><strong>${fmtNum(loggedIn)}</strong> logged in</span>
+            <span><strong>${fmtNum(withCmds)}</strong> ran commands</span>
           </div>
         </div>
-        <div class="panel-body stack-8">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-            <div class="btn-group">
-              <button class="btn ${state.sessionFilter === "all" ? "active" : ""}" data-sfilter="all">ALL (${fmtNum(data.returned || 0)})</button>
-              <button class="btn ${state.sessionFilter === "interactive" ? "active" : ""}" data-sfilter="interactive">INTERACTIVE SSH/TELNET/FTP</button>
-              <button class="btn ${state.sessionFilter === "http" ? "active" : ""}" data-sfilter="http">HTTP SESSIONS (${fmtNum(protoCounts.HTTP || 0)})</button>
-              <button class="btn ${state.sessionFilter === "no-scanners" ? "active" : ""}" data-sfilter="no-scanners">HIDE WEB SCANNERS</button>
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;font-family:var(--font-mono);font-size:10px;color:var(--text-secondary);">
-              <span>SSH:${protoCounts.SSH || 0}</span>
-              <span>TELNET:${protoCounts.TELNET || 0}</span>
-              <span>FTP:${protoCounts.FTP || 0}</span>
-              <span>HTTP:${protoCounts.HTTP || 0}</span>
-            </div>
+        <div class="page-actions">
+          <div class="seg">
+            ${KIND_TABS.map(
+              (t) => `<button class="${state.sessionFilter === t.id ? "active" : ""}" data-sfilter="${t.id}">${t.label}</button>`
+            ).join("")}
           </div>
-          <div class="meter-track">
-            <div class="meter-seg ssh" style="width:${segW("SSH")}%"></div>
-            <div class="meter-seg telnet" style="width:${segW("TELNET")}%"></div>
-            <div class="meter-seg ftp" style="width:${segW("FTP")}%"></div>
-            <div class="meter-seg http" style="width:${segW("HTTP")}%"></div>
-          </div>
+          <a class="btn" href="/api/v1/export/sessions.csv">Export CSV</a>
+          <a class="btn ghost" href="/api/v1/export/sessions.json">JSON</a>
         </div>
       </div>
 
-      <!-- SESSIONS TABLE -->
+      ${storageNote}
+
       <div class="panel">
         <div class="panel-body flush">
-          <div class="table-scroll bounded-lg">
+          <div class="table-scroll bounded-lg" data-scroll-key="sessions-table">
             <table class="soc-table">
               <thead>
                 <tr>
-                  <th style="width:74px;" class="${thCls("start")}" data-sort="start">START</th>
-                  <th style="width:68px;" class="${thCls("protocol")}" data-sort="protocol">PROTO</th>
-                  <th style="width:128px;" class="${thCls("source_ip")}" data-sort="source_ip">SOURCE IP</th>
-                  <th style="width:112px;">SESSION ID</th>
-                  <th style="width:86px;">DURATION</th>
-                  <th style="width:110px;" class="${thCls("login_attempts")}" data-sort="login_attempts">AUTH</th>
-                  <th style="width:52px;" class="num">CMDS</th>
-                  <th style="width:82px;" class="${thCls("stage_count")}" data-sort="stage_count">STAGES</th>
-                  <th>FAMILY / TAGS</th>
-                  <th style="width:56px;" class="num ${thCls("risk_score")}" data-sort="risk_score">RISK</th>
-                  <th style="width:72px;">ACTION</th>
+                  ${th("start", "Started", 110)}
+                  ${th("protocol", "Protocol", 90)}
+                  ${th("source_ip", "Source IP", 150)}
+                  <th style="width:100px;">Duration</th>
+                  ${th("login_attempts", "Login", 110)}
+                  <th style="width:90px;" class="num">Commands</th>
+                  ${th("stage_count", "How far", 100)}
+                  <th>Notes</th>
+                  ${th("risk_score", "Risk", 70, "num")}
+                  <th style="width:90px;"></th>
                 </tr>
               </thead>
               <tbody>
                 ${
-                  sorted.length
-                    ? sorted
+                  lastRows.length
+                    ? lastRows
                         .map((s, idx) => {
-                          const hasReplay = (s.commands || []).length > 0 || (s.http_requests || []).length > 0;
-                          const authHtml = s.successful_login
-                            ? `<span class="badge sev-CRITICAL" title="${escapeHtml(s.successful_login)}">OK (${fmtNum(s.login_attempts)})</span>`
-                            : `<span class="cell-muted">${fmtNum(s.login_attempts)} tries</span>`;
+                          const key = rowKey("sessions", s);
+                          const cmds = asList(s.commands).length;
+                          const hasReplay = cmds > 0 || asList(s.http_requests).length > 0;
+                          const note = asList(s.family_labels)[0] || asList(s.tags)[0] || "";
                           return `
-                            <tr class="sev-row-${escapeHtml(s.max_severity)} ${idx === state.selectedRowIndex ? "selected" : ""}" data-row-idx="${idx}">
-                              <td class="cell-muted">${escapeHtml(fmtTime(s.start))}</td>
+                            <tr class="sev-row-${escapeHtml(s.max_severity)} ${key === state.selectedKey ? "selected" : ""} ${fresh.has(key) ? "is-new" : ""}" data-row-idx="${idx}" data-row-key="${escapeHtml(key || "")}">
+                              <td>${timeCell(s.start)}</td>
                               <td>${badgeProtocol(s.protocol)}</td>
                               <td><span class="ip-link" data-inspect-ip="${escapeHtml(s.source_ip)}">${escapeHtml(s.source_ip)}</span></td>
-                              <td class="cell-muted" title="${escapeHtml(s.session_id)}">${escapeHtml(shortId(s.session_id, 13))}</td>
-                              <td class="cell-muted">${escapeHtml(s.duration_label)}</td>
-                              <td>${authHtml}</td>
-                              <td class="num ${(s.commands || []).length > 0 ? "cell-strong" : "cell-muted"}">${fmtNum((s.commands || []).length)}</td>
+                              <td class="cell-muted">${escapeHtml(durationText(s))}</td>
+                              <td>${loginText(s)}</td>
+                              <td class="num ${cmds ? "cell-strong" : "cell-muted"}">${cmds ? fmtNum(cmds) : "—"}</td>
                               <td>${renderStagePips(s.stages)}</td>
-                              <td>
-                                ${(s.family_labels || []).slice(0, 1).map((f) => `<span class="badge tag-SCANNER_WEB">${escapeHtml(f)}</span>`).join(" ")}
-                                ${(s.tags || []).slice(0, 3).map(badgeTag).join(" ")}
-                              </td>
-                              <td class="num cell-strong">${fmtNum(s.risk_score)}</td>
-                              <td>
-                                <button class="btn ${hasReplay ? "primary" : ""}" style="height:19px;padding:0 5px;" data-replay-idx="${idx}">
-                                  ${s.protocol === "HTTP" ? "HTTP" : "REPLAY"}
-                                </button>
-                              </td>
+                              <td class="cell-muted" title="${escapeHtml(asList(s.tags).join(", "))}">${escapeHtml(String(note).toLowerCase().replace(/_/g, " "))}</td>
+                              <td class="num">${fmtNum(s.risk_score)}</td>
+                              <td>${hasReplay ? `<button class="btn sm" data-replay-idx="${idx}">${s.protocol === "HTTP" ? "Requests" : "Replay"}</button>` : ""}</td>
                             </tr>`;
                         })
                         .join("")
-                    : `<tr><td colspan="11" class="empty-state">NO SESSIONS MATCH CURRENT FILTER</td></tr>`
+                    : `<tr><td colspan="10" class="empty-state">No sessions match this filter</td></tr>`
                 }
               </tbody>
             </table>
           </div>
+          ${
+            sorted.length > lastRows.length
+              ? `<div class="table-foot">
+                  <span>Showing ${fmtNum(lastRows.length)} of ${fmtNum(sorted.length)}</span>
+                  <button class="btn sm" id="sessions-more">Show ${fmtNum(Math.min(PAGE_SIZE, sorted.length - lastRows.length))} more</button>
+                </div>`
+              : ""
+          }
         </div>
       </div>
+      <p class="muted-note">"How far" shows the attack stages reached: connected, tried to log in, logged in, ran commands, downloaded files, set up persistence.</p>
     </div>
   `;
 
@@ -174,8 +187,13 @@ export function renderSessions(container, state) {
     btn.addEventListener("click", () => store.setSessionFilter(btn.dataset.sfilter));
   });
 
-  container.querySelectorAll("th[data-sort]").forEach((th) => {
-    th.addEventListener("click", () => store.setSort("sessions", th.dataset.sort));
+  container.querySelector("#sessions-more")?.addEventListener("click", () => {
+    shown += PAGE_SIZE;
+    renderSessions(container, store.get());
+  });
+
+  container.querySelectorAll("th[data-sort]").forEach((el) => {
+    el.addEventListener("click", () => store.setSort("sessions", el.dataset.sort));
   });
 
   container.querySelectorAll("[data-inspect-ip]").forEach((el) => {
@@ -185,24 +203,21 @@ export function renderSessions(container, state) {
     });
   });
 
+  const open = (idx, tab) => {
+    const item = lastRows[idx];
+    if (!item) return;
+    store.set({ selectedKey: rowKey("sessions", item) }, "selection");
+    store.openInspector("session", item, tab);
+  };
+
   container.querySelectorAll("[data-replay-idx]").forEach((btn) => {
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      const idx = Number(btn.dataset.replayIdx);
-      const item = sorted[idx];
-      if (!item) return;
-      store.set({ selectedRowIndex: idx }, "selection");
-      store.openInspector("session", item, "replay");
+      open(Number(btn.dataset.replayIdx), "replay");
     });
   });
 
   container.querySelectorAll("tbody tr[data-row-idx]").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const idx = Number(tr.dataset.rowIdx);
-      const item = sorted[idx];
-      if (!item) return;
-      store.set({ selectedRowIndex: idx }, "selection");
-      store.openInspector("session", item, "summary");
-    });
+    tr.addEventListener("click", () => open(Number(tr.dataset.rowIdx), "summary"));
   });
 }

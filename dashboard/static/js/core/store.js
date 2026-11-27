@@ -22,7 +22,7 @@ class SocStore {
       refreshMs: 4000,
       sessionFilter: "all", // all | interactive | http | no-scanners
       defenseFormat: "nftables",
-      selectedRowIndex: -1,
+      selectedKey: null,
       inspector: {
         open: false,
         kind: null, // alert | session | attacker | campaign | family | technique
@@ -81,7 +81,7 @@ class SocStore {
     this._state = {
       ...this._state,
       view,
-      selectedRowIndex: -1,
+      selectedKey: null,
     };
     this._emit("view");
   }
@@ -90,7 +90,7 @@ class SocStore {
     this._state = {
       ...this._state,
       query: String(query || ""),
-      selectedRowIndex: -1,
+      selectedKey: null,
     };
     this._emit("query");
   }
@@ -99,7 +99,7 @@ class SocStore {
     this._state = {
       ...this._state,
       sessionFilter: mode,
-      selectedRowIndex: -1,
+      selectedKey: null,
     };
     this._emit("sessionFilter");
   }

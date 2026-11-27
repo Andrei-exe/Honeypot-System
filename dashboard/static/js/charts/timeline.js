@@ -1,19 +1,55 @@
 /**
- * Multi-protocol chart on an HTML5 2D Canvas (HiDPI, 90° corners, interactive crosshair).
+ * Stacked bar chart of alerts over time, split by protocol (HTML5 canvas, HiDPI).
  */
 
 const PROTO_COLORS = {
-  SSH: "#4b91d9",
-  TELNET: "#e07b24",
-  FTP: "#a371f7",
-  HTTP: "#2ea043",
-  OTHER: "#7d8a9c",
+  SSH: "#6b9ce8",
+  TELNET: "#e8924a",
+  FTP: "#a98be0",
+  HTTP: "#4cb36b",
+  OTHER: "#828c99",
+};
+
+const PROTO_LABELS = {
+  SSH: "SSH",
+  TELNET: "Telnet",
+  FTP: "FTP",
+  HTTP: "HTTP",
+  OTHER: "Other",
 };
 
 const ORDER = ["SSH", "TELNET", "FTP", "HTTP", "OTHER"];
 
+/** Bucket label in the viewer's local time (the backend sends UTC labels and a unix "ts"). */
+function bucketLabel(b, full) {
+  if (typeof b.ts !== "number") return full ? `${b.label} UTC` : b.label;
+  const d = new Date(b.ts * 1000);
+  return full
+    ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+const FONT = '12px system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+const COLOR_AXIS_TEXT = "#77818e";
+const COLOR_GRID = "#212730";
+const COLOR_LEGEND = "#a3acb8";
+const COLOR_CRITICAL = "#ef5b5b";
+
+function roundedTopRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+}
+
 export class TimelineChart {
-  constructor(containerEl, { height = 185, onSelectBucket = null } = {}) {
+  constructor(containerEl, { height = 200, onSelectBucket = null } = {}) {
     this.container = containerEl;
     this.height = height;
     this.onSelectBucket = onSelectBucket;
@@ -65,15 +101,13 @@ export class TimelineChart {
 
   _metrics() {
     const rect = this.container.getBoundingClientRect();
-    const w = Math.max(240, Math.floor(rect.width));
-    const h = this.height;
     return {
-      w,
-      h,
-      padL: 38,
-      padR: 12,
-      padT: 20,
-      padB: 24,
+      w: Math.max(240, Math.floor(rect.width)),
+      h: this.height,
+      padL: 36,
+      padR: 8,
+      padT: 30,
+      padB: 26,
     };
   }
 
@@ -95,17 +129,18 @@ export class TimelineChart {
     this.hoverIdx = idx;
 
     const b = this.data.buckets[idx];
+    const protoParts = ORDER.filter((p) => b[p]).map((p) => `${PROTO_LABELS[p]} ${b[p]}`);
     const lines = [
-      `UTC  ${b.label}`,
-      `TOT  ${b.total} (CRIT:${b.CRITICAL || 0} HIGH:${b.HIGH || 0})`,
-      `SSH:${b.SSH || 0} TEL:${b.TELNET || 0} FTP:${b.FTP || 0} HTTP:${b.HTTP || 0}`,
+      bucketLabel(b, true),
+      `${b.total} alert${b.total === 1 ? "" : "s"}${b.CRITICAL ? ` (${b.CRITICAL} critical)` : ""}`,
     ];
+    if (protoParts.length) lines.push(protoParts.join(" · "));
     this.tooltip.textContent = lines.join("\n");
     this.tooltip.style.display = "block";
 
     const tipW = this.tooltip.offsetWidth || 180;
     const left = mx + 14 + tipW > m.w ? Math.max(4, mx - tipW - 12) : mx + 12;
-    const top = Math.max(6, Math.min(m.h - 68, my - 12));
+    const top = Math.max(6, Math.min(m.h - 72, my - 12));
     this.tooltip.style.left = `${left}px`;
     this.tooltip.style.top = `${top}px`;
 
@@ -122,37 +157,38 @@ export class TimelineChart {
 
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#06080b";
-    ctx.fillRect(0, 0, m.w, m.h);
+    ctx.clearRect(0, 0, m.w, m.h);
+    ctx.font = FONT;
 
     const buckets = (this.data && this.data.buckets) || [];
     const plotW = m.w - m.padL - m.padR;
     const plotH = m.h - m.padT - m.padB;
 
-    // Compact legend, top-right
-    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
-    let lx = m.w - m.padR;
-    for (let i = ORDER.length - 2; i >= 0; i--) {
-      const proto = ORDER[i];
-      const tw = ctx.measureText(proto).width;
-      lx -= tw + 16;
+    // Legend, top-left
+    let lx = m.padL;
+    for (const proto of ORDER.slice(0, 4)) {
       ctx.fillStyle = PROTO_COLORS[proto];
-      ctx.fillRect(lx, 6, 7, 7);
-      ctx.fillStyle = "#8d9bb0";
-      ctx.fillText(proto, lx + 10, 13);
+      ctx.beginPath();
+      ctx.arc(lx + 4, 10, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = COLOR_LEGEND;
+      ctx.fillText(PROTO_LABELS[proto], lx + 12, 14);
+      lx += ctx.measureText(PROTO_LABELS[proto]).width + 30;
     }
 
     if (!buckets.length) {
-      ctx.fillStyle = "#647285";
-      ctx.fillText("NO TELEMETRY BUCKETS IN BUFFER", m.padL + 10, m.padT + plotH / 2);
+      ctx.fillStyle = COLOR_AXIS_TEXT;
+      ctx.textAlign = "center";
+      ctx.fillText("No alerts in this time range", m.padL + plotW / 2, m.padT + plotH / 2);
+      ctx.textAlign = "left";
       return;
     }
 
     const maxTotal = Math.max(4, ...buckets.map((b) => b.total || 0));
     const yTicks = 4;
 
-    // Horizontal grid lines + Y labels
-    ctx.strokeStyle = "#161d27";
+    // Grid lines and Y labels
+    ctx.strokeStyle = COLOR_GRID;
     ctx.lineWidth = 1;
     ctx.textAlign = "right";
     for (let i = 0; i <= yTicks; i++) {
@@ -162,70 +198,54 @@ export class TimelineChart {
       ctx.moveTo(m.padL, y);
       ctx.lineTo(m.w - m.padR, y);
       ctx.stroke();
-
-      const val = Math.round(maxTotal * ratio);
-      ctx.fillStyle = "#647285";
-      ctx.fillText(String(val), m.padL - 5, y + 3);
+      ctx.fillStyle = COLOR_AXIS_TEXT;
+      ctx.fillText(String(Math.round(maxTotal * ratio)), m.padL - 8, y + 4);
     }
     ctx.textAlign = "left";
 
-    // Bars stacked by protocol (0px border-radius)
     const step = plotW / buckets.length;
-    const barW = Math.max(2, Math.floor(step - 2));
+    const gap = Math.max(2, Math.min(6, step * 0.25));
+    const barW = Math.max(2, step - gap);
 
     for (let i = 0; i < buckets.length; i++) {
       const b = buckets[i];
-      const x = Math.floor(m.padL + i * step) + 1;
+      const x = m.padL + i * step + gap / 2;
 
       if (i === this.hoverIdx) {
-        ctx.fillStyle = "rgba(88, 166, 255, 0.12)";
-        ctx.fillRect(Math.floor(m.padL + i * step), m.padT, Math.ceil(step), plotH);
+        ctx.fillStyle = "rgba(107, 156, 232, 0.08)";
+        ctx.fillRect(m.padL + i * step, m.padT, step, plotH);
       }
 
+      const segments = ORDER.filter((p) => b[p]);
       let curY = m.padT + plotH;
-      for (const proto of ORDER) {
-        const v = b[proto] || 0;
-        if (!v) continue;
-        const segH = Math.max(1, (v / maxTotal) * plotH);
+      segments.forEach((proto, sIdx) => {
+        const segH = Math.max(1, (b[proto] / maxTotal) * plotH);
         curY -= segH;
         ctx.fillStyle = PROTO_COLORS[proto];
-        ctx.fillRect(x, Math.round(curY), barW, Math.ceil(segH));
-      }
+        if (sIdx === segments.length - 1) {
+          roundedTopRect(ctx, x, curY, barW, segH, 3);
+        } else {
+          ctx.fillRect(x, curY, barW, segH);
+        }
+      });
 
-      // 2px red mark above the bar if the bucket has CRITICAL alerts
+      // Small red dot above buckets that contain critical alerts
       if (b.CRITICAL > 0) {
-        ctx.fillStyle = "#e5484d";
-        ctx.fillRect(x, Math.max(m.padT, Math.round(curY) - 3), barW, 2);
+        ctx.fillStyle = COLOR_CRITICAL;
+        ctx.beginPath();
+        ctx.arc(x + barW / 2, Math.max(m.padT + 3, curY - 6), 2.5, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
 
-    // X / Y axes (1px hairline)
-    ctx.strokeStyle = "#2b3647";
-    ctx.beginPath();
-    ctx.moveTo(m.padL + 0.5, m.padT);
-    ctx.lineTo(m.padL + 0.5, m.padT + plotH + 0.5);
-    ctx.lineTo(m.w - m.padR, m.padT + plotH + 0.5);
-    ctx.stroke();
-
-    // X labels (6 ticks)
+    // X labels
     const xLabelCount = Math.min(6, buckets.length);
-    ctx.fillStyle = "#647285";
+    ctx.fillStyle = COLOR_AXIS_TEXT;
     ctx.textAlign = "center";
     for (let k = 0; k < xLabelCount; k++) {
       const idx = Math.floor((k * (buckets.length - 1)) / Math.max(1, xLabelCount - 1));
-      const x = m.padL + idx * step + step / 2;
-      ctx.fillText(buckets[idx].label, x, m.h - 7);
+      ctx.fillText(bucketLabel(buckets[idx], false), m.padL + idx * step + step / 2, m.h - 6);
     }
     ctx.textAlign = "left";
-
-    // Vertical crosshair on hover
-    if (this.hoverIdx >= 0) {
-      const cx = Math.round(m.padL + this.hoverIdx * step + step / 2) + 0.5;
-      ctx.strokeStyle = "rgba(216, 222, 233, 0.35)";
-      ctx.beginPath();
-      ctx.moveTo(cx, m.padT);
-      ctx.lineTo(cx, m.padT + plotH);
-      ctx.stroke();
-    }
   }
 }

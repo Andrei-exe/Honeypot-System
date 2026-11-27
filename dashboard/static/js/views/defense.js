@@ -1,140 +1,136 @@
 /**
- * View 7: DEFENSE, FIREWALL RULESET GENERATOR & EXPORT CENTER
+ * Blocklist page: firewall rules for the attacker IPs, suggested fixes and downloads.
+ * Nothing here is applied automatically: the user copies or downloads the rules.
  */
 
 import { inspectAttacker } from "../components/inspector.js";
-import { badgeProtocol, copyText, escapeHtml, fmtNum } from "../core/escape.js";
+import { asList, badgeProtocol, copyText, escapeHtml, fmtNum } from "../core/escape.js";
 import { store } from "../core/store.js";
 
 const FORMATS = [
-  { id: "nftables", label: "NFTABLES (.NFT)" },
-  { id: "iptables", label: "IPTABLES (.SH)" },
-  { id: "ufw", label: "UFW (.SH)" },
-  { id: "fail2ban", label: "FAIL2BAN" },
-  { id: "plain", label: "PLAIN IP LIST" },
+  { id: "nftables", label: "nftables" },
+  { id: "iptables", label: "iptables" },
+  { id: "ufw", label: "ufw" },
+  { id: "fail2ban", label: "fail2ban" },
+  { id: "plain", label: "IP list" },
+];
+
+const DOWNLOADS = [
+  { href: "/api/v1/export/report.md", label: "Incident report", hint: "Markdown summary" },
+  { href: "/api/v1/export/alerts.csv", label: "Alerts", hint: "CSV" },
+  { href: "/api/v1/export/sessions.csv", label: "Sessions", hint: "CSV" },
+  { href: "/api/v1/export/navigator.json", label: "ATT&CK layer", hint: "for MITRE Navigator" },
 ];
 
 export function renderDefense(container, state) {
   const data = state.data.defense;
   if (!data) {
-    container.innerHTML = `<div class="empty-state">BUILDING BLOCKLIST RULESETS & MITIGATION RECOMMENDATIONS...</div>`;
+    container.innerHTML = `<div class="empty-state">Building firewall rules…</div>`;
     return;
   }
 
-  const activeFmt = state.defenseFormat || "nftables";
+  const fmt = FORMATS.some((f) => f.id === state.defenseFormat) ? state.defenseFormat : "nftables";
   const formats = data.formats || {};
-  const previewText = formats[activeFmt] || "# No rules generated";
-  const recs = data.recommendations || [];
-  const blockedIps = data.blocked_ips || [];
+  const rules = formats[fmt] || "# No rules generated yet";
+  const recs = asList(data.recommendations);
+  const blockedIps = asList(data.blocked_ips);
 
   container.innerHTML = `
     <div class="stack-8">
-      <!-- EXPORT CENTER RIBBON -->
-      <div class="panel">
-        <div class="panel-head">
-          <span class="panel-title">INCIDENT RESPONSE & EXPORT CENTER</span>
-          <span class="panel-meta">IN-MEMORY GENERATION // ZERO DISK WRITES (READ-ONLY CONTAINER)</span>
-        </div>
-        <div class="panel-body" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-          <div class="btn-group">
-            <a class="btn primary" href="/api/v1/export/report.md">INCIDENT REPORT (.MD)</a>
-            <a class="btn" href="/api/v1/export/alerts.csv">ALERTS (.CSV)</a>
-            <a class="btn" href="/api/v1/export/alerts.json">ALERTS (.JSON)</a>
-            <a class="btn" href="/api/v1/export/sessions.csv">SESSIONS (.CSV)</a>
-            <a class="btn" href="/api/v1/export/sessions.json">SESSIONS (.JSON)</a>
-            <a class="btn" href="/api/v1/export/navigator.json">MITRE ATT&CK LAYER (.JSON)</a>
-          </div>
-          <span class="badge sev-HIGH">BLOCKLIST TARGETS: ${fmtNum(data.blocked_ip_count || 0)} IP(S)</span>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Blocklist</h1>
+          <p class="page-sub">${fmtNum(data.blocked_ip_count || blockedIps.length)} IP${(data.blocked_ip_count || blockedIps.length) === 1 ? "" : "s"} qualify for blocking. Rules are generated here; nothing is applied automatically.</p>
         </div>
       </div>
 
-      <!-- FIREWALL GENERATOR + RECOMMENDATIONS -->
       <div class="grid-asymmetric">
         <div class="panel">
           <div class="panel-head">
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-              <span class="panel-title">FIREWALL BLOCKLIST GENERATOR</span>
-              <div class="btn-group">
-                ${FORMATS.map(
-                  (f) =>
-                    `<button class="btn ${activeFmt === f.id ? "active" : ""}" data-def-fmt="${f.id}">${f.label}</button>`
-                ).join("")}
-              </div>
+            <div class="seg">
+              ${FORMATS.map((f) => `<button class="${fmt === f.id ? "active" : ""}" data-def-fmt="${f.id}">${f.label}</button>`).join("")}
             </div>
             <div class="btn-group">
-              <button class="btn" id="btn-copy-rules">COPY RULES</button>
-              <a class="btn primary" href="/api/v1/export/blocklist?fmt=${encodeURIComponent(activeFmt)}">DOWNLOAD</a>
+              <button class="btn" id="btn-copy-rules">Copy</button>
+              <a class="btn primary" href="/api/v1/export/blocklist?fmt=${encodeURIComponent(fmt)}">Download</a>
             </div>
           </div>
-          <div class="panel-body flush">
-            <pre class="code-block tall" id="defense-code-preview">${escapeHtml(previewText)}</pre>
+          <div class="panel-body">
+            <pre class="code-block tall" data-scroll-key="defense-rules">${escapeHtml(rules)}</pre>
+            <p class="muted-note" style="margin:10px 0 0;">Review the list before applying it on a real firewall.</p>
           </div>
         </div>
 
         <div class="stack-8">
           <div class="panel">
-            <div class="panel-head">
-              <span class="panel-title">PRIORITIZED MITIGATIONS (${recs.length})</span>
-              <span class="panel-meta">FROM RECENT ALERTS</span>
-            </div>
+            <div class="panel-head"><span class="panel-title">Downloads</span></div>
             <div class="panel-body flush">
-              <div class="table-scroll bounded-md">
-                ${
-                  recs.length
-                    ? `<table class="soc-table">
-                        <thead><tr><th style="width:48px;" class="num">HITS</th><th style="width:94px;">PROTOS</th><th>RECOMMENDATION</th></tr></thead>
-                        <tbody>
-                          ${recs
-                            .map(
-                              (r) => `
-                              <tr>
-                                <td class="num cell-strong">${fmtNum(r.count)}</td>
-                                <td>${(r.protocols || []).slice(0, 2).map(badgeProtocol).join(" ")}</td>
-                                <td style="white-space:normal;padding:4px 7px;">${escapeHtml(r.text)}</td>
-                              </tr>`
-                            )
-                            .join("")}
-                        </tbody>
-                      </table>`
-                    : `<div class="empty-state">NO MITIGATION RECOMMENDATIONS YET</div>`
-                }
+              <div class="plain-list">
+                ${DOWNLOADS.map(
+                  (d) => `
+                  <div class="plain-list-row">
+                    <div><a href="${d.href}">${escapeHtml(d.label)}</a></div>
+                    <span class="cell-muted" style="font-size:13px;">${escapeHtml(d.hint)}</span>
+                  </div>`
+                ).join("")}
               </div>
             </div>
           </div>
 
           <div class="panel">
-            <div class="panel-head">
-              <span class="panel-title">ACTIVE BLOCKLIST IPS (${blockedIps.length})</span>
-              <span class="panel-meta">CLICK IP FOR DOSSIER</span>
-            </div>
+            <div class="panel-head"><span class="panel-title">IPs on the list</span></div>
             <div class="panel-body">
               ${
                 blockedIps.length
-                  ? `<div style="display:flex;flex-wrap:wrap;gap:4px;">
+                  ? `<div class="chip-list">
                       ${blockedIps
-                        .map(
-                          (ip) =>
-                            `<span class="badge ip-link" data-inspect-ip="${escapeHtml(ip)}">${escapeHtml(ip)}</span>`
-                        )
+                        .slice(0, 60)
+                        .map((ip) => `<span class="ip-link" data-inspect-ip="${escapeHtml(ip)}">${escapeHtml(ip)}</span>`)
                         .join("")}
+                      ${blockedIps.length > 60 ? `<span class="cell-muted">+${fmtNum(blockedIps.length - 60)} more</span>` : ""}
                     </div>`
-                  : `<div class="empty-state">NO IPS QUALIFY FOR BLOCKLIST YET</div>`
+                  : `<div class="empty-state">No IPs qualify yet</div>`
               }
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span class="panel-title">Suggested fixes</span>
+          <span class="panel-meta">most frequent first</span>
+        </div>
+        <div class="panel-body flush">
+          ${
+            recs.length
+              ? `<div class="plain-list">
+                  ${recs
+                    .map(
+                      (r) => `
+                    <div class="plain-list-row">
+                      <div style="min-width:0;">
+                        <div>${escapeHtml(r.text)}</div>
+                        <div class="badge-row" style="margin-top:4px;">${asList(r.protocols).slice(0, 3).map(badgeProtocol).join("")}</div>
+                      </div>
+                      <span class="count" title="Alerts that suggested this">${fmtNum(r.count)}×</span>
+                    </div>`
+                    )
+                    .join("")}
+                </div>`
+              : `<div class="empty-state">No suggestions yet</div>`
+          }
         </div>
       </div>
     </div>
   `;
 
   container.querySelectorAll("[data-def-fmt]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      store.set({ defenseFormat: btn.dataset.defFmt }, "defenseFormat");
-    });
+    btn.addEventListener("click", () => store.set({ defenseFormat: btn.dataset.defFmt }, "defenseFormat"));
   });
 
   container.querySelector("#btn-copy-rules")?.addEventListener("click", () => {
-    copyText(previewText, `Copied ${activeFmt.toUpperCase()} ruleset`);
+    copyText(rules, `Copied ${fmt} rules`);
   });
 
   container.querySelectorAll("[data-inspect-ip]").forEach((el) => {

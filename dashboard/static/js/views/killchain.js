@@ -1,16 +1,11 @@
 /**
- * View 6: KILL-CHAIN FUNNEL, MITRE ATT&CK MATRIX & HONEYTOKEN / BOT SIGNATURES
+ * Attack techniques page: how far attackers got, which MITRE ATT&CK techniques
+ * were seen, decoy (honeytoken) access and known bot signatures.
  */
 
 import { KillChainFunnel } from "../charts/funnel.js";
 import { inspectAttacker } from "../components/inspector.js";
-import {
-  badgeProtocol,
-  badgeSeverity,
-  escapeHtml,
-  fmtNum,
-  fmtTime,
-} from "../core/escape.js";
+import { asList, badgeProtocol, escapeHtml, fmtNum, timeCell } from "../core/escape.js";
 import { store } from "../core/store.js";
 
 let funnelInst = null;
@@ -22,7 +17,7 @@ export function destroyKillchain() {
   }
 }
 
-function pivotDsl(expr, view) {
+function pivot(expr, view) {
   store.setView(view);
   store.setQuery(expr);
   const qInput = document.getElementById("dsl-query-input");
@@ -33,78 +28,59 @@ export function renderKillchain(container, state) {
   destroyKillchain();
   const data = state.data.killchain;
   if (!data) {
-    container.innerHTML = `<div class="empty-state">BUILDING MITRE ATT&CK MATRIX & KILL-CHAIN TELEMETRY...</div>`;
+    container.innerHTML = `<div class="empty-state">Loading attack techniques…</div>`;
     return;
   }
 
-  const matrix = data.matrix || [];
-  const honeytokens = data.honeytokens || [];
+  const matrix = asList(data.matrix);
+  const honeytokens = asList(data.honeytokens);
   const bots = data.bot_signatures || {};
-  const techniques = (data.navigator && data.navigator.techniques) || [];
+  const techniques = asList(data.navigator && data.navigator.techniques);
   const maxTechScore = Math.max(1, ...techniques.map((t) => t.score || 0));
 
-  function heatClass(score) {
-    const ratio = score / maxTechScore;
+  const heatClass = (score) => {
+    const ratio = (score || 0) / maxTechScore;
     if (ratio >= 0.6) return "mitre-heat-high";
     if (ratio >= 0.25) return "mitre-heat-med";
     return "mitre-heat-low";
-  }
+  };
 
   const botSamples = [
-    ...(bots.mirai_samples || []).map((a) => ({ ...a, _botKind: "MIRAI" })),
-    ...(bots.miner_samples || []).map((a) => ({ ...a, _botKind: "CRYPTOMINER" })),
-  ].slice(0, 25);
+    ...asList(bots.mirai_samples).map((a) => ({ ...a, _bot: "Mirai" })),
+    ...asList(bots.miner_samples).map((a) => ({ ...a, _bot: "Crypto-miner" })),
+  ].slice(0, 20);
 
   container.innerHTML = `
     <div class="stack-8">
-      <!-- TOP ROW: KILL-CHAIN FUNNEL + BOT/HONEYTOKEN COUNTERS -->
-      <div class="grid-asymmetric">
-        <div class="panel">
-          <div class="panel-head">
-            <span class="panel-title">SESSION KILL-CHAIN CONVERSION (${fmtNum(data.total_sessions || 0)} SESSIONS)</span>
-            <span class="panel-meta">CLICK ANY STAGE TO PIVOT INTO SESSIONS</span>
-          </div>
-          <div class="panel-body">
-            <div id="kc-funnel-canvas"></div>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Attack techniques</h1>
+          <div class="inline-stats">
+            <span><strong>${fmtNum(techniques.length)}</strong> MITRE technique${techniques.length === 1 ? "" : "s"} seen</span>
+            <span class="${honeytokens.length ? "crit" : ""}"><strong>${fmtNum(honeytokens.length)}</strong> honeytoken hit${honeytokens.length === 1 ? "" : "s"}</span>
+            <span><strong>${fmtNum(bots.mirai_count || 0)}</strong> Mirai</span>
+            <span><strong>${fmtNum(bots.miner_count || 0)}</strong> crypto-miner</span>
           </div>
         </div>
-
-        <div class="panel">
-          <div class="panel-head">
-            <span class="panel-title">SPECIALIZED DETECTIONS (ROUTER PERSONA)</span>
-            <a class="btn primary" href="/api/v1/export/navigator.json">EXPORT ATT&CK LAYER</a>
-          </div>
-          <div class="panel-body stack-8">
-            <div class="kv-grid">
-              <div class="kv-k">ATT&CK TECHS</div>
-              <div class="kv-v cell-strong">${fmtNum(techniques.length)} OBSERVED TECHNIQUES</div>
-              <div class="kv-k">HONEYTOKENS</div>
-              <div class="kv-v ${honeytokens.length ? "cell-strong" : "cell-muted"}" style="${honeytokens.length ? "color:var(--sev-critical);" : ""}">
-                ${fmtNum(honeytokens.length)} HIT(S) (/etc/hostapd.conf, /etc/ppp/chap-secrets)
-              </div>
-              <div class="kv-k">MIRAI PROBES</div>
-              <div class="kv-v">
-                ${fmtNum(bots.mirai_count || 0)} EVENT(S)
-                <button class="btn" style="margin-left:8px;height:18px;" data-pivot="tag:mirai">FILTER</button>
-              </div>
-              <div class="kv-k">CRYPTOMINERS</div>
-              <div class="kv-v">
-                ${fmtNum(bots.miner_count || 0)} EVENT(S) (nproc / free / crontab)
-                <button class="btn" style="margin-left:8px;height:18px;" data-pivot="tag:cryptominer">FILTER</button>
-              </div>
-            </div>
-            <div class="mono" style="font-size:10px;color:var(--text-muted);">
-              ATT&CK Navigator JSON layer matches v4.5 enterprise-attack format and can be imported directly into MITRE ATT&CK Navigator.
-            </div>
-          </div>
+        <div class="page-actions">
+          <a class="btn" href="/api/v1/export/navigator.json" title="Import this file in the MITRE ATT&CK Navigator">Export ATT&amp;CK layer</a>
         </div>
       </div>
 
-      <!-- MITRE ATT&CK TACTICS MATRIX -->
       <div class="panel">
         <div class="panel-head">
-          <span class="panel-title">MITRE ATT&CK OBSERVED MATRIX</span>
-          <span class="panel-meta">CLICK TECHNIQUE CELL TO FILTER ALERTS BY CODE</span>
+          <span class="panel-title">How far attackers got</span>
+          <span class="panel-meta">${fmtNum(data.total_sessions || 0)} sessions · click a stage to see them</span>
+        </div>
+        <div class="panel-body">
+          <div id="kc-funnel-canvas"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span class="panel-title">MITRE ATT&amp;CK techniques</span>
+          <span class="panel-meta">click a technique to see its alerts</span>
         </div>
         <div class="panel-body">
           ${
@@ -116,16 +92,13 @@ export function renderKillchain(container, state) {
                       <div class="mitre-col">
                         <div class="mitre-col-head">
                           <span>${escapeHtml(col.tactic)}</span>
-                          <span class="cell-muted">${col.techniques.length}</span>
+                          <span class="cell-muted">${asList(col.techniques).length}</span>
                         </div>
-                        ${col.techniques
+                        ${asList(col.techniques)
                           .map(
                             (t) => `
-                            <div class="mitre-cell ${heatClass(t.score)}" data-tech="${escapeHtml(t.id)}">
-                              <div class="mitre-id">
-                                <span>${escapeHtml(t.id)}</span>
-                                <span>${fmtNum(t.score)}x</span>
-                              </div>
+                            <div class="mitre-cell ${heatClass(t.score)}" data-tech="${escapeHtml(t.id)}" title="Show alerts for ${escapeHtml(t.id)}">
+                              <div class="mitre-id"><span>${escapeHtml(t.id)}</span><span>${fmtNum(t.score)}×</span></div>
                               <div class="mitre-name">${escapeHtml(t.name)}</div>
                             </div>`
                           )
@@ -134,67 +107,73 @@ export function renderKillchain(container, state) {
                     )
                     .join("")}
                 </div>`
-              : `<div class="empty-state">NO MITRE ATT&CK TECHNIQUES MAPPED YET</div>`
+              : `<div class="empty-state">No techniques mapped yet</div>`
           }
         </div>
       </div>
 
-      <!-- BOTTOM ROW: HONEYTOKEN EVENTS + MIRAI / CRYPTOMINER SAMPLES -->
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">HONEYTOKEN ACCESS LOG (${honeytokens.length})</span>
-            <span class="panel-meta">DECOY CREDENTIALS & CONFIG FILES</span>
+            <span class="panel-title">Decoy file access</span>
+            <span class="panel-meta">/etc/hostapd.conf, /etc/ppp/chap-secrets</span>
           </div>
           <div class="panel-body flush">
             ${
               honeytokens.length
-                ? `<table class="soc-table">
-                    <thead><tr><th style="width:72px;">UTC</th><th style="width:120px;">IP</th><th style="width:62px;">PROTO</th><th>EVENT</th></tr></thead>
-                    <tbody>
-                      ${honeytokens
-                        .map(
-                          (h, idx) => `
+                ? `<div class="table-scroll bounded-md" data-scroll-key="kc-honey">
+                    <table class="soc-table">
+                      <thead><tr><th style="width:110px;">Time</th><th style="width:150px;">Source IP</th><th style="width:90px;">Protocol</th><th>What happened</th></tr></thead>
+                      <tbody>
+                        ${honeytokens
+                          .map(
+                            (h, idx) => `
                           <tr class="sev-row-CRITICAL" data-honey-idx="${idx}">
-                            <td class="cell-muted">${escapeHtml(fmtTime(h.timestamp))}</td>
+                            <td>${timeCell(h.timestamp)}</td>
                             <td><span class="ip-link" data-inspect-ip="${escapeHtml(h.source_ip)}">${escapeHtml(h.source_ip)}</span></td>
                             <td>${badgeProtocol(h.protocol)}</td>
                             <td title="${escapeHtml(h.alert_reason)}">${escapeHtml(h.alert_reason)}</td>
                           </tr>`
-                        )
-                        .join("")}
-                    </tbody>
-                  </table>`
-                : `<div class="empty-state">NO HONEYTOKEN READS OR REUSE EVENTS IN RECENT BUFFER</div>`
+                          )
+                          .join("")}
+                      </tbody>
+                    </table>
+                  </div>`
+                : `<div class="empty-state">Nobody has opened the decoy files yet</div>`
             }
           </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">MIRAI & CRYPTOMINER PROBE SAMPLES (${botSamples.length})</span>
-            <span class="panel-meta">BUSYBOX / NPROC / CRONTAB / FREE</span>
+            <span class="panel-title">Known bots</span>
+            <div class="panel-meta">
+              <button class="btn sm" data-pivot="tag:mirai">Mirai alerts</button>
+              <button class="btn sm" data-pivot="tag:cryptominer">Miner alerts</button>
+            </div>
           </div>
           <div class="panel-body flush">
             ${
               botSamples.length
-                ? `<table class="soc-table">
-                    <thead><tr><th style="width:72px;">UTC</th><th style="width:94px;">CLASS</th><th style="width:118px;">IP</th><th>COMMAND / REASON</th></tr></thead>
-                    <tbody>
-                      ${botSamples
-                        .map(
-                          (b, idx) => `
-                          <tr class="sev-row-${escapeHtml(b.severity)}" data-bot-idx="${idx}">
-                            <td class="cell-muted">${escapeHtml(fmtTime(b.timestamp))}</td>
-                            <td><span class="badge tag-${b._botKind}">${b._botKind}</span></td>
+                ? `<div class="table-scroll bounded-md" data-scroll-key="kc-bots">
+                    <table class="soc-table">
+                      <thead><tr><th style="width:110px;">Time</th><th style="width:120px;">Bot</th><th style="width:150px;">Source IP</th><th>Command</th></tr></thead>
+                      <tbody>
+                        ${botSamples
+                          .map(
+                            (b, idx) => `
+                          <tr data-bot-idx="${idx}">
+                            <td>${timeCell(b.timestamp)}</td>
+                            <td>${escapeHtml(b._bot)}</td>
                             <td><span class="ip-link" data-inspect-ip="${escapeHtml(b.source_ip)}">${escapeHtml(b.source_ip)}</span></td>
-                            <td title="${escapeHtml(b.alert_reason)}">${escapeHtml((b.payload_details && b.payload_details.command) || b.alert_reason)}</td>
+                            <td class="mono" title="${escapeHtml(b.alert_reason)}">${escapeHtml((b.payload_details && b.payload_details.command) || b.alert_reason)}</td>
                           </tr>`
-                        )
-                        .join("")}
-                    </tbody>
-                  </table>`
-                : `<div class="empty-state">NO MIRAI OR CRYPTOMINER SIGNATURES IN RECENT BUFFER</div>`
+                          )
+                          .join("")}
+                      </tbody>
+                    </table>
+                  </div>`
+                : `<div class="empty-state">No Mirai or crypto-miner activity seen</div>`
             }
           </div>
         </div>
@@ -205,18 +184,18 @@ export function renderKillchain(container, state) {
   const fnEl = container.querySelector("#kc-funnel-canvas");
   if (fnEl) {
     funnelInst = new KillChainFunnel(fnEl, {
-      height: 196,
-      onStageClick: (stage) => pivotDsl(`stage:"${stage}"`, "sessions"),
+      height: 210,
+      onStageClick: (stage) => pivot(`stage:"${stage}"`, "sessions"),
     });
     funnelInst.setData(data.funnel);
   }
 
   container.querySelectorAll("[data-tech]").forEach((el) => {
-    el.addEventListener("click", () => pivotDsl(`tech:${el.dataset.tech}`, "alerts"));
+    el.addEventListener("click", () => pivot(`tech:${el.dataset.tech}`, "alerts"));
   });
 
   container.querySelectorAll("[data-pivot]").forEach((btn) => {
-    btn.addEventListener("click", () => pivotDsl(btn.dataset.pivot, "alerts"));
+    btn.addEventListener("click", () => pivot(btn.dataset.pivot, "alerts"));
   });
 
   container.querySelectorAll("[data-inspect-ip]").forEach((el) => {
@@ -236,7 +215,7 @@ export function renderKillchain(container, state) {
   container.querySelectorAll("tr[data-bot-idx]").forEach((tr) => {
     tr.addEventListener("click", () => {
       const item = botSamples[Number(tr.dataset.botIdx)];
-      if (item) store.openInspector("alert", item, "payload");
+      if (item) store.openInspector("alert", item, "summary");
     });
   });
 }

@@ -67,7 +67,8 @@ def normalize_alert(alert, index=0):
     severity = (alert.get("severity") or "NONE").upper()
 
     return {
-        "id": f"alrt-{index}-{alert.get('session_id') or 'nosess'}-{alert.get('timestamp') or ''}",
+        "id": alert.get("alert_id") or f"alrt-{index}-{alert.get('session_id') or 'nosess'}-{alert.get('timestamp') or ''}",
+        "alert_id": alert.get("alert_id") or "",
         "timestamp": alert.get("timestamp") or "",
         "processed_at": alert.get("processed_at") or "",
         "node_id": alert.get("node_id") or "gateway",

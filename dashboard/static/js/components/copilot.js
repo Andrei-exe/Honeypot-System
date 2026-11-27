@@ -1,5 +1,6 @@
 /**
- * Local SOC Copilot UI component (offline, zero-LLM).
+ * Assistant side panel. Runs offline: answers come from /api/v1/copilot,
+ * which reads the live data from the threat engine (no external LLM).
  */
 
 import { copyText, escapeHtml, showToast } from "../core/escape.js";
@@ -7,13 +8,13 @@ import { store } from "../core/store.js";
 import { inspectAttacker } from "./inspector.js";
 
 const QUICK_PROMPTS = [
-  { label: "BRIEFING", q: "summary" },
-  { label: "TOP IPS", q: "top attackers" },
-  { label: "HONEYTOKENS", q: "honeytokens" },
-  { label: "AUTH / CREDS", q: "credentials" },
-  { label: "MIRAI / MINERS", q: "mirai" },
-  { label: "T1110", q: "T1110" },
-  { label: "HELP", q: "help" },
+  { label: "Summary", q: "summary" },
+  { label: "Top attackers", q: "top attackers" },
+  { label: "Honeytokens", q: "honeytokens" },
+  { label: "Credentials", q: "credentials" },
+  { label: "Mirai / miners", q: "mirai" },
+  { label: "Brute force (T1110)", q: "T1110" },
+  { label: "What can I ask?", q: "help" },
 ];
 
 let isOpen = false;
@@ -53,7 +54,7 @@ function runAction(action) {
     return;
   }
   if (action.type === "copy" && action.value) {
-    copyText(action.value, "Copied firewall command");
+    copyText(action.value, "Firewall command copied");
   }
 }
 
@@ -65,10 +66,7 @@ function appendMessage(role, payload) {
   box.className = `copilot-msg ${role}`;
 
   if (role === "user") {
-    box.innerHTML = `
-      <div class="copilot-msg-role">ANALYST &gt;</div>
-      <div>${escapeHtml(payload)}</div>
-    `;
+    box.innerHTML = `<div>${escapeHtml(payload)}</div>`;
   } else {
     const facts = Array.isArray(payload.facts) ? payload.facts : [];
     const actions = Array.isArray(payload.actions) ? payload.actions : [];
@@ -83,32 +81,24 @@ function appendMessage(role, payload) {
             .join("")}
         </div>`
       : "";
-    const codeHtml = payload.code
-      ? `<pre class="copilot-code">${escapeHtml(payload.code)}</pre>`
-      : "";
+    const codeHtml = payload.code ? `<pre class="copilot-code">${escapeHtml(payload.code)}</pre>` : "";
     const actionsHtml = actions.length
       ? `<div class="copilot-actions">
           ${actions
-            .map(
-              (a, i) =>
-                `<button type="button" class="btn" data-act-idx="${i}">${escapeHtml(a.label)}</button>`
-            )
+            .map((a, i) => `<button type="button" class="btn" data-act-idx="${i}">${escapeHtml(a.label)}</button>`)
             .join("")}
         </div>`
       : "";
 
     box.innerHTML = `
-      <div class="copilot-msg-role">SOC COPILOT // LIVE</div>
-      <div>${escapeHtml(payload.reply || "No response")}</div>
+      <div>${escapeHtml(payload.reply || "No answer.")}</div>
       ${factsHtml}
       ${codeHtml}
       ${actionsHtml}
     `;
 
     box.querySelectorAll("[data-act-idx]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        runAction(actions[Number(btn.dataset.actIdx)]);
-      });
+      btn.addEventListener("click", () => runAction(actions[Number(btn.dataset.actIdx)]));
     });
   }
 
@@ -129,13 +119,13 @@ async function sendPrompt(text) {
     });
     const data = await resp.json();
     if (!resp.ok) {
-      appendMessage("bot", { reply: data.error || "Copilot request failed." });
+      appendMessage("bot", { reply: data.error || "The assistant could not answer." });
       return;
     }
     appendMessage("bot", data);
   } catch {
-    appendMessage("bot", { reply: "Unable to reach dashboard copilot endpoint." });
-    showToast("Copilot request failed");
+    appendMessage("bot", { reply: "Could not reach the assistant. Is the dashboard server running?" });
+    showToast("Assistant request failed", true);
   }
 }
 
@@ -158,16 +148,15 @@ export function initCopilot() {
 
   drawer.innerHTML = `
     <div class="copilot-head">
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span class="led ok"></span>
-        <span class="cell-strong">SOC COPILOT</span>
-        <span class="cell-muted">OFFLINE // LIVE TELEMETRY</span>
+      <div>
+        <div class="copilot-title">Assistant</div>
+        <div class="copilot-subtitle">Answers from the live honeypot data</div>
       </div>
-      <button type="button" class="btn" id="copilot-close">ESC</button>
+      <button type="button" class="btn ghost" id="copilot-close">Close</button>
     </div>
-    <div class="copilot-chips" id="copilot-chips">
+    <div class="copilot-chips">
       ${QUICK_PROMPTS.map(
-        (p) => `<button type="button" class="btn" data-quick-q="${escapeHtml(p.q)}">${escapeHtml(p.label)}</button>`
+        (p) => `<button type="button" class="chip" data-quick-q="${escapeHtml(p.q)}">${escapeHtml(p.label)}</button>`
       ).join("")}
     </div>
     <div class="copilot-messages" id="copilot-messages"></div>
@@ -179,9 +168,9 @@ export function initCopilot() {
         maxlength="300"
         autocomplete="off"
         spellcheck="false"
-        placeholder="Ask: summary, top IPs, T1110, block 172.21.0.3..."
+        placeholder="Ask about an IP, a technique, or how to block someone…"
       >
-      <button type="submit" class="btn primary">ASK</button>
+      <button type="submit" class="btn primary">Ask</button>
     </form>
   `;
 
@@ -212,8 +201,6 @@ export function initCopilot() {
   });
 
   appendMessage("bot", {
-    reply: "SOC Copilot ready. Click a quick chip above or ask about any IP, MITRE code (e.g. T1110), honeytokens, or firewall rules.",
-    facts: [],
-    actions: [],
+    reply: "Hi! Pick a question above or ask about an IP address, a MITRE technique like T1110, honeytokens, or firewall rules.",
   });
 }

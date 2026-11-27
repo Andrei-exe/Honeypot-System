@@ -1,0 +1,190 @@
+/* Page-level pieces shared by every view: headers, toggles, banners, new-row flash. */
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Segmented toggle (tabs inside a page) */
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+}
+
+.seg button {
+  height: 28px;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.seg button:hover {
+  color: var(--text-bright);
+}
+
+.seg button.active {
+  background: var(--bg-selected);
+  color: var(--text-bright);
+  font-weight: 550;
+}
+
+.btn.sm {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.time-cell {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted-note {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Rows that arrived with the latest refresh */
+@keyframes row-flash {
+  from { background: rgba(107, 156, 232, 0.2); }
+  to   { background: transparent; }
+}
+
+.soc-table tbody tr.is-new td {
+  animation: row-flash 2.4s ease-out;
+}
+
+/* "Show more" footer under long tables */
+.table-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Connection lost banner (data stays on screen) */
+.offline-banner {
+  margin: 10px 24px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--sev-medium-border);
+  border-radius: var(--radius);
+  background: var(--sev-medium-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.offline-banner.hidden {
+  display: none;
+}
+
+/* Shown instead of a page that failed to render */
+.error-panel {
+  padding: 24px;
+  border: 1px solid var(--sev-critical-border);
+  border-radius: var(--radius);
+  background: var(--sev-critical-bg);
+}
+
+.error-panel h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  color: var(--text-bright);
+}
+
+.error-panel p {
+  margin: 0 0 12px;
+  color: var(--text-secondary);
+}
+
+.error-panel code {
+  display: block;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  background: var(--bg-terminal);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Simple vertical list (recommendations, decoy files...) */
+.plain-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.plain-list-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 14px;
+}
+
+.plain-list-row:first-child {
+  border-top: none;
+}
+
+.plain-list-row .count {
+  flex-shrink: 0;
+  min-width: 40px;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-list .ip-link {
+  padding: 2px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+}
+
+/* Small inline stats line under a page title */
+.inline-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.inline-stats strong {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+.inline-stats .crit strong {
+  color: var(--sev-critical);
+}

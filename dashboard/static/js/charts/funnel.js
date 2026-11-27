@@ -1,18 +1,38 @@
 /**
- * Kill-chain funnel on an HTML5 2D Canvas (6 stages, conversion rates, 0px rounding).
+ * "How far attackers got": one horizontal bar per attack stage (HTML5 canvas, HiDPI).
  */
 
-const STAGE_COLORS = [
-  "#3b82c4",
-  "#4b91d9",
-  "#cfa82b",
-  "#e07b24",
-  "#e5484d",
-  "#ff2e4c",
-];
+const STAGE_COLORS = ["#6b9ce8", "#6b9ce8", "#d6b347", "#e8924a", "#ef5b5b", "#ef5b5b"];
+
+const STAGE_LABELS = {
+  conectare: "Connected",
+  "incercare login": "Tried to log in",
+  "login reusit": "Logged in",
+  comenzi: "Ran commands",
+  descarcare: "Downloaded files",
+  persistenta: "Set up persistence",
+};
+
+const FONT = '13px system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+
+function roundRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, h / 2, w / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+  ctx.fill();
+}
 
 export class KillChainFunnel {
-  constructor(containerEl, { height = 195, onStageClick = null } = {}) {
+  constructor(containerEl, { height = 200, onStageClick = null } = {}) {
     this.container = containerEl;
     this.height = height;
     this.onStageClick = onStageClick;
@@ -30,9 +50,8 @@ export class KillChainFunnel {
     this._onMove = (ev) => {
       if (!this.stages.length) return;
       const rect = this.canvas.getBoundingClientRect();
-      const my = ev.clientY - rect.top;
-      const rowH = (this.height - 16) / this.stages.length;
-      const idx = Math.floor((my - 8) / rowH);
+      const rowH = this.height / this.stages.length;
+      const idx = Math.floor((ev.clientY - rect.top) / rowH);
       const next = idx >= 0 && idx < this.stages.length ? idx : -1;
       if (next !== this.hoverIdx) {
         this.hoverIdx = next;
@@ -72,7 +91,7 @@ export class KillChainFunnel {
 
   draw() {
     const rect = this.container.getBoundingClientRect();
-    const w = Math.max(220, Math.floor(rect.width));
+    const w = Math.max(240, Math.floor(rect.width));
     const h = this.height;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -83,56 +102,53 @@ export class KillChainFunnel {
 
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#06080b";
-    ctx.fillRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = FONT;
+    ctx.textBaseline = "middle";
 
     if (!this.stages.length) {
-      ctx.font = '11px "IBM Plex Mono", ui-monospace, monospace';
-      ctx.fillStyle = "#647285";
-      ctx.fillText("NO KILL-CHAIN SESSION DATA", 12, h / 2);
+      ctx.fillStyle = "#77818e";
+      ctx.textAlign = "center";
+      ctx.fillText("No sessions yet", w / 2, h / 2);
+      ctx.textAlign = "left";
       return;
     }
 
-    const labelW = 118;
-    const rightW = 86;
-    const barMaxW = Math.max(40, w - labelW - rightW - 14);
-    const maxVal = Math.max(1, this.stages[0].sessions || 0, ...this.stages.map((s) => s.sessions || 0));
-    const rowH = (h - 16) / this.stages.length;
-
-    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
+    const labelW = 150;
+    const rightW = 110;
+    const barMaxW = Math.max(40, w - labelW - rightW);
+    const first = Math.max(1, this.stages[0].sessions || 0);
+    const maxVal = Math.max(first, ...this.stages.map((s) => s.sessions || 0));
+    const rowH = h / this.stages.length;
+    const barH = Math.min(14, rowH * 0.5);
 
     this.stages.forEach((item, idx) => {
-      const y = Math.floor(8 + idx * rowH);
+      const cy = idx * rowH + rowH / 2;
       const count = item.sessions || 0;
-      const pct = maxVal > 0 ? Math.round((count / maxVal) * 100) : 0;
-      const barW = count > 0 ? Math.max(3, Math.round((count / maxVal) * barMaxW)) : 0;
+      const pct = Math.round((count / first) * 100);
+      const barW = count > 0 ? Math.max(4, (count / maxVal) * barMaxW) : 0;
+      const hover = idx === this.hoverIdx;
 
-      if (idx === this.hoverIdx) {
-        ctx.fillStyle = "#121822";
-        ctx.fillRect(2, y, w - 4, rowH - 2);
+      if (hover) {
+        ctx.fillStyle = "rgba(255,255,255,0.03)";
+        ctx.fillRect(0, idx * rowH, w, rowH);
       }
 
-      // Left label
-      ctx.fillStyle = idx === this.hoverIdx ? "#f0f4fa" : "#9aa7b8";
-      ctx.fillText(`${idx + 1}. ${String(item.stage || "").toUpperCase()}`, 8, y + rowH * 0.62);
+      ctx.fillStyle = hover ? "#f2f4f7" : "#a3acb8";
+      ctx.fillText(STAGE_LABELS[item.stage] || String(item.stage || ""), 4, cy);
 
-      // Background track
-      const barY = Math.floor(y + (rowH - 12) / 2);
-      ctx.fillStyle = "#11161e";
-      ctx.fillRect(labelW, barY, barMaxW, 12);
-      ctx.strokeStyle = "#1e2633";
-      ctx.strokeRect(labelW + 0.5, barY + 0.5, barMaxW - 1, 11);
-
-      // Actual bar
+      ctx.fillStyle = "#1f252d";
+      roundRect(ctx, labelW, cy - barH / 2, barMaxW, barH, barH / 2);
       if (barW > 0) {
         ctx.fillStyle = STAGE_COLORS[idx % STAGE_COLORS.length];
-        ctx.fillRect(labelW, barY, barW, 12);
+        roundRect(ctx, labelW, cy - barH / 2, barW, barH, barH / 2);
       }
 
-      // Value + percentage on the right
       ctx.textAlign = "right";
-      ctx.fillStyle = count > 0 ? "#d8dee9" : "#647285";
-      ctx.fillText(`${count} (${pct}%)`, w - 8, y + rowH * 0.62);
+      ctx.fillStyle = count > 0 ? "#d5dae1" : "#77818e";
+      ctx.fillText(`${count.toLocaleString("en-US")}`, w - 52, cy);
+      ctx.fillStyle = "#77818e";
+      ctx.fillText(`${pct}%`, w - 4, cy);
       ctx.textAlign = "left";
     });
   }

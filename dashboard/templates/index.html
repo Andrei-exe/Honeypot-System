@@ -3,149 +3,125 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HONEYPOT // SOC TELEMETRY CONSOLE</title>
+  <title>Honeypot Dashboard</title>
   <link rel="stylesheet" href="/static/css/tokens.css">
   <link rel="stylesheet" href="/static/css/layout.css">
   <link rel="stylesheet" href="/static/css/components.css">
   <link rel="stylesheet" href="/static/css/tables.css">
   <link rel="stylesheet" href="/static/css/inspector.css">
   <link rel="stylesheet" href="/static/css/copilot.css">
+  <link rel="stylesheet" href="/static/css/pages.css">
 </head>
 <body>
   <div class="soc-shell">
-    <!-- TOP TELEMETRY RIBBON (34px) -->
     <header class="topbar">
       <div class="topbar-left">
         <div class="brand-block">
           <span class="brand-mark"></span>
-          <span>HONEYPOT<span class="brand-sub">//SOC</span></span>
+          <span>Honeypot</span>
         </div>
-        <div class="telemetry-strip">
-          <div class="telemetry-cell">
-            <span class="led ok" id="tel-status-led"></span>
-            <span class="telemetry-val" id="tel-status-text">CONNECTING</span>
-          </div>
-          <div class="telemetry-cell">
-            <span class="telemetry-label">API</span>
-            <span class="telemetry-val" id="tel-latency">--ms</span>
-          </div>
-          <div class="telemetry-cell">
-            <span class="telemetry-label">SESSIONS</span>
-            <span class="telemetry-val" id="tel-buffer">--/2000</span>
-          </div>
-          <div class="telemetry-cell">
-            <span class="telemetry-label">GEOIP</span>
-            <span class="telemetry-val" id="tel-geoip">OFF</span>
-          </div>
-          <div class="telemetry-cell">
-            <span class="telemetry-label">SYNC</span>
-            <span class="telemetry-val" id="tel-sync">--:--:--</span>
-          </div>
-        </div>
+        <span class="status-pill" id="tel-status">
+          <span class="led" id="tel-status-led"></span>
+          <span id="tel-status-text">Connecting…</span>
+        </span>
+        <span class="topbar-muted" id="tel-sync"></span>
       </div>
 
       <div class="topbar-right">
-        <div class="btn-group">
-          <button class="btn live-on" id="btn-live" title="Toggle auto-refresh [Space]">LIVE 4S</button>
-          <button class="btn" id="btn-refresh" title="Force refresh [r]">REFRESH</button>
-          <button class="btn" id="btn-palette" title="Command Palette [Ctrl+K]">CMD [CTRL+K]</button>
-          <button class="btn" id="btn-copilot" title="Local SOC Copilot [F1]">COPILOT [F1]</button>
-        </div>
+        <button class="btn live-on" id="btn-live" title="Refresh automatically every 4 seconds (Space)">Live</button>
+        <button class="btn" id="btn-refresh" title="Refresh now (R)">Refresh</button>
+        <button class="btn" id="btn-palette" title="Search commands and pages (Ctrl+K)">Commands</button>
+        <button class="btn primary" id="btn-copilot" title="Ask the assistant (F1)">Assistant</button>
+        <button class="btn icon ghost" id="btn-help" title="Keyboard shortcuts">?</button>
+      </div>
+
+      <div class="help-pop hidden" id="help-pop">
+        <h4>Keyboard shortcuts</h4>
+        <div class="help-row"><span>Search / filter</span><kbd>/</kbd></div>
+        <div class="help-row"><span>Commands</span><kbd>Ctrl K</kbd></div>
+        <div class="help-row"><span>Assistant</span><kbd>F1</kbd></div>
+        <div class="help-row"><span>Switch page</span><kbd>1 – 7</kbd></div>
+        <div class="help-row"><span>Move through rows</span><kbd>J / K</kbd></div>
+        <div class="help-row"><span>Open selected row</span><kbd>Enter</kbd></div>
+        <div class="help-row"><span>Pause live updates</span><kbd>Space</kbd></div>
+        <div class="help-row"><span>Refresh</span><kbd>R</kbd></div>
+        <div class="help-row"><span>Close panel</span><kbd>Esc</kbd></div>
       </div>
     </header>
 
-    <!-- MAIN BODY: LEFT RAIL + WORKSPACE + SPLIT-PANE INSPECTOR -->
     <div class="soc-body">
-      <nav class="nav-rail" aria-label="SOC Modules">
-        <div class="nav-section-title">OPERATIONS</div>
+      <nav class="nav-rail" aria-label="Pages">
+        <div class="nav-section-title">Monitor</div>
         <button class="nav-item active" data-view="overview">
-          <span class="nav-item-main"><span class="nav-key">1</span><span>COCKPIT</span></span>
+          <span class="nav-item-main">Overview</span>
         </button>
         <button class="nav-item" data-view="alerts">
-          <span class="nav-item-main"><span class="nav-key">2</span><span>ALERTS</span></span>
+          <span class="nav-item-main">Alerts</span>
           <span class="nav-count" id="nav-cnt-alerts">0</span>
         </button>
         <button class="nav-item" data-view="sessions">
-          <span class="nav-item-main"><span class="nav-key">3</span><span>SESSIONS</span></span>
+          <span class="nav-item-main">Sessions</span>
           <span class="nav-count" id="nav-cnt-sessions">0</span>
         </button>
 
-        <div class="nav-section-title">INTELLIGENCE</div>
+        <div class="nav-section-title">Investigate</div>
         <button class="nav-item" data-view="campaigns">
-          <span class="nav-item-main"><span class="nav-key">4</span><span>CAMPAIGNS</span></span>
+          <span class="nav-item-main">Campaigns</span>
           <span class="nav-count" id="nav-cnt-campaigns">0</span>
         </button>
         <button class="nav-item" data-view="attackers">
-          <span class="nav-item-main"><span class="nav-key">5</span><span>ATTACKERS</span></span>
+          <span class="nav-item-main">Attackers</span>
           <span class="nav-count" id="nav-cnt-attackers">0</span>
         </button>
         <button class="nav-item" data-view="killchain">
-          <span class="nav-item-main"><span class="nav-key">6</span><span>KILL-CHAIN</span></span>
-          <span class="nav-count" id="nav-cnt-honeytokens">0</span>
+          <span class="nav-item-main">Attack techniques</span>
+          <span class="nav-count" id="nav-cnt-honeytokens" title="Honeytoken hits">0</span>
         </button>
 
-        <div class="nav-section-title">RESPONSE</div>
+        <div class="nav-section-title">Respond</div>
         <button class="nav-item" data-view="defense">
-          <span class="nav-item-main"><span class="nav-key">7</span><span>DEFENSE</span></span>
+          <span class="nav-item-main">Blocklist</span>
         </button>
 
         <div class="nav-rail-footer">
-          <div>NODE: GATEWAY ROUTER</div>
-          <div>SERVICES: SSH TEL FTP HTTP</div>
-          <div style="margin-top:4px;color:var(--text-secondary);">KEYS: 1-7 / J K ENTER ESC</div>
+          Gateway router honeypot<br>
+          SSH · Telnet · FTP · HTTP
         </div>
       </nav>
 
       <div class="workspace-col">
-        <!-- DSL QUERY TOOLBAR -->
         <div class="query-toolbar">
           <div class="query-wrap">
-            <span class="query-prefix">DSL &gt;</span>
+            <span class="query-prefix" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            </span>
             <input
               type="text"
               id="dsl-query-input"
               class="query-input"
               autocomplete="off"
               spellcheck="false"
-              placeholder='Filter: proto:ssh,telnet sev:high+ ip:172.21.* -proto:http has:creds tag:"scanner web" [/]'
+              placeholder="Search by IP, username, command… or filter, e.g. sev:high+ proto:ssh"
             >
-            <span class="query-status" id="dsl-query-status">0 FILTERS</span>
-            <button class="query-clear" id="dsl-query-clear" title="Clear query">CLR</button>
+            <span class="query-status" id="dsl-query-status"></span>
+            <button class="query-clear" id="dsl-query-clear" title="Clear search">Clear</button>
           </div>
-          <div class="btn-group">
-            <button class="btn" data-dsl-append="sev:high+">HIGH+</button>
-            <button class="btn" data-dsl-append="-proto:http">NO-HTTP</button>
-            <button class="btn" data-dsl-append="has:creds">CREDS</button>
-            <button class="btn" data-dsl-append="has:honeytoken">HONEYTOKEN</button>
+          <div class="chip-group">
+            <button class="chip" data-dsl-append="sev:high+">High &amp; critical</button>
+            <button class="chip" data-dsl-append="has:creds">With credentials</button>
+            <button class="chip" data-dsl-append="has:honeytoken">Honeytokens</button>
+            <button class="chip" data-dsl-append="-proto:http">Hide HTTP</button>
           </div>
         </div>
 
-        <!-- ACTIVE WORKSPACE -->
         <main class="workspace-main" id="workspace-main"></main>
       </div>
 
-      <!-- DRAGGABLE SPLIT-PANE INSPECTOR -->
-      <div class="inspector-resizer collapsed" id="inspector-resizer" title="Drag to resize inspector"></div>
-      <aside class="inspector-pane collapsed" id="inspector-pane" aria-label="Detail Inspector"></aside>
+      <div class="inspector-resizer collapsed" id="inspector-resizer" title="Drag to resize"></div>
+      <aside class="inspector-pane collapsed" id="inspector-pane" aria-label="Details"></aside>
     </div>
-
-    <!-- BOTTOM STATUS FOOTER (24px) -->
-    <footer class="status-footer">
-      <div class="footer-group">
-        <span id="foot-view">MODULE: OVERVIEW</span>
-        <span id="foot-error">MEM-ONLY // ZERO-OUTBOUND</span>
-      </div>
-      <div class="footer-group">
-        <span>[/] SEARCH</span>
-        <span>[CTRL+K] PALETTE</span>
-        <span>[J/K] NAVIGATE</span>
-        <span>[SPACE] PAUSE</span>
-        <span>[R] REFRESH</span>
-      </div>
-    </footer>
   </div>
 
-  <!-- COMMAND PALETTE MODAL -->
   <div class="palette-backdrop" id="palette-backdrop">
     <div class="palette-box">
       <input
@@ -154,13 +130,13 @@
         class="palette-input"
         autocomplete="off"
         spellcheck="false"
-        placeholder="Type a command, view, DSL preset or export..."
+        placeholder="Go to a page, apply a filter or export…"
       >
       <div class="palette-list" id="palette-list"></div>
     </div>
   </div>
 
-  <aside class="copilot-drawer hidden" id="copilot-drawer" aria-label="SOC Copilot"></aside>
+  <aside class="copilot-drawer hidden" id="copilot-drawer" aria-label="Assistant"></aside>
   <div class="toast-container" id="toast-container"></div>
   <script type="module" src="/static/js/main.js"></script>
 </body>

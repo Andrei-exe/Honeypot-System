@@ -1,130 +1,147 @@
 /**
- * View 4: CAMPAIGNS, BEHAVIORAL FAMILIES & INTERACTIVE CORRELATION GRAPH
+ * Campaigns page: attackers that are linked to each other.
+ * A campaign = IPs that share a malware server or most of their password list.
+ * A family = IPs that behave alike (same protocols and commands).
  */
 
 import { CorrelationGraph } from "../charts/graph.js";
 import { inspectAttacker } from "../components/inspector.js";
-import { escapeHtml, fmtNum } from "../core/escape.js";
+import { asList, escapeHtml, fmtNum } from "../core/escape.js";
 import { store } from "../core/store.js";
 
 let graphInst = null;
+let lastSignature = "";
 
 export function destroyCampaigns() {
+  lastSignature = "";
   if (graphInst) {
     graphInst.destroy();
     graphInst = null;
   }
 }
 
+function campaignName(idx) {
+  return `Campaign ${idx + 1}`;
+}
+
 export function renderCampaigns(container, state) {
-  destroyCampaigns();
   const data = state.data.campaigns;
   if (!data) {
-    container.innerHTML = `<div class="empty-state">COMPUTING CORRELATION GRAPH & BEHAVIORAL CLUSTERS...</div>`;
+    destroyCampaigns();
+    container.innerHTML = `<div class="empty-state">Grouping related attackers…</div>`;
     return;
   }
 
-  const campaigns = data.campaigns || [];
-  const families = data.families || [];
-  const graph = data.graph || { nodes: [], edges: [] };
+  // The live refresh brings the same groups most of the time. Redrawing would
+  // restart the graph layout every 4 seconds, so skip it when nothing changed.
+  const signature = JSON.stringify([data.campaigns, data.families]);
+  if (signature === lastSignature && graphInst && container.contains(graphInst.container)) return;
+  destroyCampaigns();
+  lastSignature = signature;
+
+  const campaigns = asList(data.campaigns);
+  const families = asList(data.families);
+  const graph = { nodes: asList(data.graph && data.graph.nodes), edges: asList(data.graph && data.graph.edges) };
 
   container.innerHTML = `
     <div class="stack-8">
-      <!-- INTERACTIVE FORCE-DIRECTED GRAPH -->
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Campaigns</h1>
+          <p class="page-sub">Attackers that look like they work together or run the same tool.</p>
+        </div>
+        <div class="inline-stats">
+          <span><strong>${fmtNum(data.total_campaigns || 0)}</strong> campaign${data.total_campaigns === 1 ? "" : "s"}</span>
+          <span><strong>${fmtNum(data.total_families || 0)}</strong> behaviour famil${data.total_families === 1 ? "y" : "ies"}</span>
+        </div>
+      </div>
+
+      ${
+        graph.nodes.length
+          ? `
       <div class="panel">
         <div class="panel-head">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span class="panel-title">BOTNET & BEHAVIORAL CORRELATION GRAPH</span>
-            <span class="badge">${fmtNum(graph.nodes.length)} NODES // ${fmtNum(graph.edges.length)} EDGES</span>
-            <span class="panel-meta">DRAG NODES // SCROLL ZOOM // CLICK IP TO OPEN DOSSIER</span>
+          <span class="panel-title">How attackers are linked</span>
+          <div class="panel-meta">
+            <span>drag to move · scroll to zoom · click an IP for details</span>
+            <button class="btn sm" id="btn-graph-reset">Reset view</button>
           </div>
-          <button class="btn" id="btn-graph-reset">RESET VIEW</button>
         </div>
         <div class="panel-body">
           <div id="camp-graph-canvas"></div>
         </div>
-      </div>
+      </div>`
+          : ""
+      }
 
-      <!-- CAMPAIGNS + FAMILIES SIDE BY SIDE -->
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">CORRELATED CAMPAIGNS (${fmtNum(data.total_campaigns || 0)})</span>
-            <span class="panel-meta">SHARED MALWARE HOST / PASSWORD DICTIONARY</span>
+            <span class="panel-title">Campaigns</span>
+            <span class="panel-meta">shared malware server or passwords</span>
           </div>
           <div class="panel-body flush">
             ${
               campaigns.length
-                ? `<table class="soc-table">
-                    <thead>
-                      <tr>
-                        <th style="width:74px;">ID</th>
-                        <th style="width:52px;" class="num">IPS</th>
-                        <th>LINK REASONS</th>
-                        <th>MEMBERS / INFRASTRUCTURE</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${campaigns
-                        .map(
-                          (c, idx) => `
-                          <tr data-camp-idx="${idx}">
-                            <td class="cell-strong" style="color:var(--sev-critical);">CAMP-${String(idx + 1).padStart(2, "0")}</td>
-                            <td class="num cell-strong">${fmtNum(c.size)}</td>
-                            <td title="${escapeHtml((c.reasons || []).join(", "))}">${escapeHtml((c.reasons || []).join("; ") || "-")}</td>
-                            <td>
-                              ${(c.ips || [])
-                                .slice(0, 6)
-                                .map((ip) => `<span class="ip-link" style="margin-right:6px;" data-inspect-ip="${escapeHtml(ip)}">${escapeHtml(ip)}</span>`)
-                                .join("")}
-                              ${(c.servers || []).map((s) => `<span class="badge sev-HIGH">HOST:${escapeHtml(s)}</span>`).join(" ")}
-                            </td>
-                          </tr>`
-                        )
-                        .join("")}
-                    </tbody>
-                  </table>`
-                : `<div class="empty-state">NO CORRELATED CAMPAIGNS YET (REQUIRES >= 2 IPS SHARING MALWARE OR >=60% PASSWORD OVERLAP)</div>`
+                ? `<div class="plain-list">
+                    ${campaigns
+                      .map(
+                        (c, idx) => `
+                      <div class="plain-list-row" data-camp-idx="${idx}" style="cursor:pointer;">
+                        <div style="min-width:0;">
+                          <div class="cell-strong">${campaignName(idx)}</div>
+                          <div class="cell-muted" style="font-size:13px;">${escapeHtml(asList(c.reasons).join("; ") || "linked activity")}</div>
+                          <div class="chip-list" style="margin-top:6px;">
+                            ${asList(c.ips)
+                              .slice(0, 8)
+                              .map((ip) => `<span class="ip-link" data-inspect-ip="${escapeHtml(ip)}">${escapeHtml(ip)}</span>`)
+                              .join("")}
+                            ${asList(c.ips).length > 8 ? `<span class="cell-muted">+${asList(c.ips).length - 8} more</span>` : ""}
+                          </div>
+                          ${
+                            asList(c.servers).length
+                              ? `<div class="cell-muted" style="font-size:13px;margin-top:6px;">Malware from: <span class="mono">${asList(c.servers).map(escapeHtml).join(", ")}</span></div>`
+                              : ""
+                          }
+                        </div>
+                        <span class="count">${fmtNum(c.size)} IPs</span>
+                      </div>`
+                      )
+                      .join("")}
+                  </div>`
+                : `<div class="empty-state">No campaigns yet. They appear when 2 or more IPs share a malware server or most of their passwords.</div>`
             }
           </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
-            <span class="panel-title">BEHAVIORAL FAMILIES (${fmtNum(data.total_families || 0)})</span>
-            <span class="panel-meta">JACCARD CLUSTERING ON PROTOCOLS & COMMANDS</span>
+            <span class="panel-title">Behaviour families</span>
+            <span class="panel-meta">same protocols and commands</span>
           </div>
           <div class="panel-body flush">
             ${
               families.length
-                ? `<table class="soc-table">
-                    <thead>
-                      <tr>
-                        <th style="width:170px;">FAMILY LABEL</th>
-                        <th style="width:50px;" class="num">IPS</th>
-                        <th>COMMON SIGNATURES</th>
-                        <th style="width:74px;">PIVOT</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${families
-                        .map(
-                          (f, idx) => `
-                          <tr data-fam-idx="${idx}">
-                            <td class="cell-strong" style="color:var(--state-accent);" title="${escapeHtml(f.label)}">${escapeHtml(f.label)}</td>
-                            <td class="num cell-strong">${fmtNum(f.size)}</td>
-                            <td title="${escapeHtml((f.common_behavior || []).join(", "))}">
-                              ${(f.common_behavior || []).slice(0, 5).map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}
-                            </td>
-                            <td>
-                              <button class="btn" style="height:19px;padding:0 5px;" data-fam-filter="${escapeHtml(f.label)}">FILTER</button>
-                            </td>
-                          </tr>`
-                        )
-                        .join("")}
-                    </tbody>
-                  </table>`
-                : `<div class="empty-state">NO BEHAVIORAL FAMILIES CLUSTERED YET (REQUIRES >= 2 SIMILAR IPS)</div>`
+                ? `<div class="plain-list">
+                    ${families
+                      .map(
+                        (f, idx) => `
+                      <div class="plain-list-row" data-fam-idx="${idx}" style="cursor:pointer;">
+                        <div style="min-width:0;">
+                          <div class="cell-strong">${escapeHtml(f.label || "Unnamed family")}</div>
+                          <div class="badge-row" style="margin-top:6px;">
+                            ${asList(f.common_behavior).slice(0, 5).map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join("")}
+                          </div>
+                        </div>
+                        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+                          <span class="count">${fmtNum(f.size)} IPs</span>
+                          <button class="btn sm" data-fam-filter="${escapeHtml(f.label || "")}">Sessions</button>
+                        </div>
+                      </div>`
+                      )
+                      .join("")}
+                  </div>`
+                : `<div class="empty-state">No families yet. They appear when 2 or more IPs behave alike.</div>`
             }
           </div>
         </div>
@@ -135,12 +152,12 @@ export function renderCampaigns(container, state) {
   const host = container.querySelector("#camp-graph-canvas");
   if (host) {
     graphInst = new CorrelationGraph(host, {
-      height: 360,
+      height: 380,
       onNodeClick: (node) => {
         if (node.kind === "ip" && node.meta && node.meta.ip) {
           inspectAttacker(node.meta.ip);
         } else {
-          store.openInspector(node.kind, node, "raw");
+          store.openInspector(node.kind, node, "summary");
         }
       },
     });
@@ -169,17 +186,18 @@ export function renderCampaigns(container, state) {
     });
   });
 
-  container.querySelectorAll("tr[data-camp-idx]").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const c = campaigns[Number(tr.dataset.campIdx)];
-      if (c) store.openInspector("campaign", c, "raw");
+  container.querySelectorAll("[data-camp-idx]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const idx = Number(row.dataset.campIdx);
+      const c = campaigns[idx];
+      if (c) store.openInspector("campaign", { ...c, name: campaignName(idx) }, "summary");
     });
   });
 
-  container.querySelectorAll("tr[data-fam-idx]").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const f = families[Number(tr.dataset.famIdx)];
-      if (f) store.openInspector("family", f, "raw");
+  container.querySelectorAll("[data-fam-idx]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const f = families[Number(row.dataset.famIdx)];
+      if (f) store.openInspector("family", f, "summary");
     });
   });
 }

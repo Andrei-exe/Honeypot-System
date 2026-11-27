@@ -1,23 +1,27 @@
 /**
- * Interactive force-directed graph on a 2D Canvas for campaigns, families and IP correlations.
- * Supports: dragging nodes, pan (drag on the background), zoom (scroll) and click-to-inspect.
+ * Force-directed graph (HTML5 canvas) of campaigns, behaviour families and attacker IPs.
+ * Drag a node to move it, drag the background to pan, scroll to zoom, click for details.
  */
 
 const NODE_STYLE = {
-  campaign: { fill: "#291215", stroke: "#e5484d", text: "#ff8c8f", size: 11 },
-  family:   { fill: "#101e2e", stroke: "#4b91d9", text: "#79c0ff", size: 10 },
-  server:   { fill: "#261b0b", stroke: "#e07b24", text: "#f2a65a", size: 10 },
-  ip:       { fill: "#141a24", stroke: "#8d9bb0", text: "#d8dee9", size: 7 },
+  campaign: { fill: "rgba(239, 91, 91, 0.18)", stroke: "#ef5b5b", text: "#f4a3a3", size: 10 },
+  family:   { fill: "rgba(107, 156, 232, 0.18)", stroke: "#6b9ce8", text: "#a9c6f1", size: 9 },
+  server:   { fill: "rgba(232, 146, 74, 0.18)", stroke: "#e8924a", text: "#f1bb8d", size: 9 },
+  ip:       { fill: "#1f252d", stroke: "#828c99", text: "#d5dae1", size: 6 },
 };
+
+const NODE_NAMES = { campaign: "Campaign", family: "Behaviour family", server: "Malware server", ip: "Attacker IP" };
 
 const EDGE_COLOR = {
-  campaign_member: "rgba(229, 72, 77, 0.45)",
-  malware_host:    "rgba(224, 123, 36, 0.55)",
-  behavior_cluster:"rgba(75, 145, 217, 0.38)",
+  campaign_member: "rgba(239, 91, 91, 0.35)",
+  malware_host: "rgba(232, 146, 74, 0.45)",
+  behavior_cluster: "rgba(107, 156, 232, 0.3)",
 };
 
+const FONT = '12px system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+
 export class CorrelationGraph {
-  constructor(containerEl, { height = 410, onNodeClick = null } = {}) {
+  constructor(containerEl, { height = 380, onNodeClick = null } = {}) {
     this.container = containerEl;
     this.height = height;
     this.onNodeClick = onNodeClick;
@@ -39,6 +43,7 @@ export class CorrelationGraph {
     this.container.style.height = `${height}px`;
 
     this.canvas = document.createElement("canvas");
+    this.canvas.style.cursor = "grab";
     this.tooltip = document.createElement("div");
     this.tooltip.className = "canvas-tooltip";
     this.container.appendChild(this.canvas);
@@ -81,6 +86,14 @@ export class CorrelationGraph {
         this.draw();
         return;
       }
+      if (ev.target !== this.canvas) {
+        if (this.hovered) {
+          this.hovered = null;
+          this.tooltip.style.display = "none";
+          this.draw();
+        }
+        return;
+      }
 
       const hit = this._hitTest(p.x, p.y);
       if (hit !== this.hovered) {
@@ -90,32 +103,22 @@ export class CorrelationGraph {
       }
       if (hit) {
         const rect = this.canvas.getBoundingClientRect();
-        const mx = ev.clientX - rect.left;
-        const my = ev.clientY - rect.top;
-        const metaLines = [`[${hit.kind.toUpperCase()}] ${hit.label}`];
-        if (hit.meta && hit.meta.reasons && hit.meta.reasons.length) {
-          metaLines.push(`Link: ${hit.meta.reasons.join(", ")}`);
-        }
-        if (hit.meta && hit.meta.traits && hit.meta.traits.length) {
-          metaLines.push(`Traits: ${hit.meta.traits.slice(0, 4).join(", ")}`);
-        }
-        metaLines.push("Click to inspect / pivot");
-        this.tooltip.textContent = metaLines.join("\n");
+        const lines = [`${NODE_NAMES[hit.kind] || "Node"}: ${hit.label}`];
+        if (hit.meta && hit.meta.reasons && hit.meta.reasons.length) lines.push(`Linked by: ${hit.meta.reasons.join(", ")}`);
+        if (hit.meta && hit.meta.traits && hit.meta.traits.length) lines.push(`Behaviour: ${hit.meta.traits.slice(0, 4).join(", ")}`);
+        lines.push("Click for details");
+        this.tooltip.textContent = lines.join("\n");
         this.tooltip.style.display = "block";
-        this.tooltip.style.left = `${Math.min(rect.width - 210, mx + 12)}px`;
-        this.tooltip.style.top = `${Math.max(6, my - 10)}px`;
+        this.tooltip.style.left = `${Math.max(4, Math.min(rect.width - 240, ev.clientX - rect.left + 12))}px`;
+        this.tooltip.style.top = `${Math.max(6, ev.clientY - rect.top - 10)}px`;
       } else {
         this.tooltip.style.display = "none";
       }
     };
 
     this._onUp = (ev) => {
-      const moved = this._downPos
-        ? Math.hypot(ev.clientX - this._downPos.x, ev.clientY - this._downPos.y)
-        : 99;
-      if (this.dragNode && moved < 5 && this.onNodeClick) {
-        this.onNodeClick(this.dragNode);
-      }
+      const moved = this._downPos ? Math.hypot(ev.clientX - this._downPos.x, ev.clientY - this._downPos.y) : 99;
+      if (this.dragNode && moved < 5 && this.onNodeClick) this.onNodeClick(this.dragNode);
       this.dragNode = null;
       this.panning = false;
     };
@@ -135,6 +138,7 @@ export class CorrelationGraph {
 
   destroy() {
     if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = null;
     this._ro.disconnect();
     this.canvas.removeEventListener("mousedown", this._onDown);
     window.removeEventListener("mousemove", this._onMove);
@@ -143,8 +147,8 @@ export class CorrelationGraph {
   }
 
   setData(graphData) {
-    const rawNodes = (graphData && graphData.nodes) || [];
-    const rawEdges = (graphData && graphData.edges) || [];
+    const rawNodes = Array.isArray(graphData && graphData.nodes) ? graphData.nodes : [];
+    const rawEdges = Array.isArray(graphData && graphData.edges) ? graphData.edges : [];
 
     const prevMap = new Map(this.nodes.map((n) => [n.id, n]));
     const count = Math.max(1, rawNodes.length);
@@ -164,11 +168,7 @@ export class CorrelationGraph {
 
     this.nodeById = new Map(this.nodes.map((n) => [n.id, n]));
     this.edges = rawEdges
-      .map((e) => ({
-        source: this.nodeById.get(e.source),
-        target: this.nodeById.get(e.target),
-        kind: e.kind,
-      }))
+      .map((e) => ({ source: this.nodeById.get(e.source), target: this.nodeById.get(e.target), kind: e.kind }))
       .filter((e) => e.source && e.target);
 
     this._ticks = 110;
@@ -202,7 +202,6 @@ export class CorrelationGraph {
     const n = nodes.length;
     if (!n) return;
 
-    // Simplified Coulomb repulsion
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
       for (let j = i + 1; j < n; j++) {
@@ -221,13 +220,11 @@ export class CorrelationGraph {
       }
     }
 
-    // Attraction along edges
     for (const e of this.edges) {
       const dx = e.target.x - e.source.x;
       const dy = e.target.y - e.source.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const desired = 78;
-      const k = (dist - desired) * 0.035;
+      const k = (dist - 78) * 0.035;
       const fx = (dx / dist) * k;
       const fy = (dy / dist) * k;
       e.source.vx += fx;
@@ -236,7 +233,6 @@ export class CorrelationGraph {
       e.target.vy -= fy;
     }
 
-    // Light gravity toward the center + damping
     for (const node of nodes) {
       if (node === this.dragNode) continue;
       node.vx += -node.x * 0.012;
@@ -252,10 +248,7 @@ export class CorrelationGraph {
     const rect = this.canvas.getBoundingClientRect();
     const cx = rect.width / 2 + this.offset.x;
     const cy = rect.height / 2 + this.offset.y;
-    return {
-      x: (ev.clientX - rect.left - cx) / this.scale,
-      y: (ev.clientY - rect.top - cy) / this.scale,
-    };
+    return { x: (ev.clientX - rect.left - cx) / this.scale, y: (ev.clientY - rect.top - cy) / this.scale };
   }
 
   _hitTest(wx, wy) {
@@ -263,9 +256,7 @@ export class CorrelationGraph {
       const n = this.nodes[i];
       const st = NODE_STYLE[n.kind] || NODE_STYLE.ip;
       const r = st.size + 4;
-      if (Math.abs(wx - n.x) <= r && Math.abs(wy - n.y) <= r) {
-        return n;
-      }
+      if ((wx - n.x) ** 2 + (wy - n.y) ** 2 <= r * r) return n;
     }
     return null;
   }
@@ -283,29 +274,14 @@ export class CorrelationGraph {
 
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#06080b";
-    ctx.fillRect(0, 0, w, h);
-
-    // Subtle 24px technical grid
-    ctx.strokeStyle = "#0e131b";
-    ctx.lineWidth = 1;
-    for (let gx = 0; gx < w; gx += 28) {
-      ctx.beginPath();
-      ctx.moveTo(gx + 0.5, 0);
-      ctx.lineTo(gx + 0.5, h);
-      ctx.stroke();
-    }
-    for (let gy = 0; gy < h; gy += 28) {
-      ctx.beginPath();
-      ctx.moveTo(0, gy + 0.5);
-      ctx.lineTo(w, gy + 0.5);
-      ctx.stroke();
-    }
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = FONT;
 
     if (!this.nodes.length) {
-      ctx.font = '11px "IBM Plex Mono", ui-monospace, monospace';
-      ctx.fillStyle = "#647285";
-      ctx.fillText("NO CORRELATED CAMPAIGNS OR FAMILIES YET (NEED >= 2 LINKED IPS)", 16, h / 2);
+      ctx.fillStyle = "#77818e";
+      ctx.textAlign = "center";
+      ctx.fillText("No linked attackers yet", w / 2, h / 2);
+      ctx.textAlign = "left";
       return;
     }
 
@@ -313,10 +289,9 @@ export class CorrelationGraph {
     ctx.translate(w / 2 + this.offset.x, h / 2 + this.offset.y);
     ctx.scale(this.scale, this.scale);
 
-    // Edges
     for (const e of this.edges) {
       const highlight = this.hovered && (e.source === this.hovered || e.target === this.hovered);
-      ctx.strokeStyle = highlight ? "#d8dee9" : (EDGE_COLOR[e.kind] || "#354357");
+      ctx.strokeStyle = highlight ? "#d5dae1" : EDGE_COLOR[e.kind] || "#3a4350";
       ctx.lineWidth = highlight ? 1.5 : 1;
       ctx.beginPath();
       ctx.moveTo(e.source.x, e.source.y);
@@ -324,53 +299,41 @@ export class CorrelationGraph {
       ctx.stroke();
     }
 
-    // Nodes (strict squares/diamonds, no rounding)
-    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
     for (const node of this.nodes) {
       const st = NODE_STYLE[node.kind] || NODE_STYLE.ip;
-      const sz = st.size;
       const isHover = node === this.hovered;
-
       ctx.fillStyle = st.fill;
-      ctx.strokeStyle = isHover ? "#f0f4fa" : st.stroke;
-      ctx.lineWidth = isHover ? 2 : 1.2;
+      ctx.strokeStyle = isHover ? "#f2f4f7" : st.stroke;
+      ctx.lineWidth = isHover ? 2 : 1.4;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, st.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
 
-      if (node.kind === "campaign" || node.kind === "server") {
-        // Diamond (square rotated by 45°)
-        ctx.beginPath();
-        ctx.moveTo(node.x, node.y - sz);
-        ctx.lineTo(node.x + sz, node.y);
-        ctx.lineTo(node.x, node.y + sz);
-        ctx.lineTo(node.x - sz, node.y);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        ctx.fillRect(node.x - sz, node.y - sz, sz * 2, sz * 2);
-        ctx.strokeRect(node.x - sz, node.y - sz, sz * 2, sz * 2);
+      // Only label group nodes, hovered nodes, or IPs when zoomed in: keeps the graph readable
+      if (node.kind !== "ip" || isHover || this.scale >= 1.4) {
+        ctx.fillStyle = isHover ? "#ffffff" : st.text;
+        ctx.fillText(node.label, node.x + st.size + 5, node.y + 4);
       }
-
-      ctx.fillStyle = isHover ? "#ffffff" : st.text;
-      ctx.fillText(node.label, node.x + sz + 5, node.y + 3);
     }
 
     ctx.restore();
 
-    // Fixed legend, bottom-left
-    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
     const items = [
-      ["CAMPAIGN", "#e5484d"],
-      ["FAMILY", "#4b91d9"],
-      ["MALWARE HOST", "#e07b24"],
-      ["ATTACKER IP", "#8d9bb0"],
+      ["Campaign", "#ef5b5b"],
+      ["Family", "#6b9ce8"],
+      ["Malware server", "#e8924a"],
+      ["Attacker IP", "#828c99"],
     ];
-    let lx = 10;
+    let lx = 4;
     for (const [label, col] of items) {
       ctx.fillStyle = col;
-      ctx.fillRect(lx, h - 16, 7, 7);
-      ctx.fillStyle = "#8d9bb0";
-      ctx.fillText(label, lx + 11, h - 9);
-      lx += ctx.measureText(label).width + 24;
+      ctx.beginPath();
+      ctx.arc(lx + 4, h - 12, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#a3acb8";
+      ctx.fillText(label, lx + 12, h - 8);
+      lx += ctx.measureText(label).width + 30;
     }
   }
 }

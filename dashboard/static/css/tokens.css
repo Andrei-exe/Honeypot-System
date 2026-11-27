@@ -1,84 +1,80 @@
-/* ==========================================================================
-   HONEYPOT SOC CONSOLE // DESIGN TOKENS
-   Strict industrial aesthetic: 0px border-radius, 1px hairlines, 0 box-shadow
-   ========================================================================== */
+/* Design tokens: colors, fonts and sizes shared by every stylesheet. */
 
 :root {
-  /* Surfaces (90% monochrome graphite/steel) */
-  --bg-canvas: #080a0e;
-  --bg-panel: #0d1117;
-  --bg-panel-alt: #11161e;
-  --bg-header: #141a24;
-  --bg-hover: #18202c;
-  --bg-selected: #1c2736;
-  --bg-input: #0a0d12;
-  --bg-terminal: #06080b;
+  /* Surfaces */
+  --bg-canvas: #0f1216;
+  --bg-panel: #161a20;
+  --bg-panel-alt: #1a1f26;
+  --bg-header: #1a1f26;
+  --bg-hover: #1f252d;
+  --bg-selected: #222b38;
+  --bg-input: #12161b;
+  --bg-terminal: #11151a;
 
-  /* Hairline borders */
-  --border-subtle: #1b222d;
-  --border-default: #242e3d;
-  --border-strong: #354357;
-  --border-focus: #5a8fd6;
+  /* Borders */
+  --border-subtle: #212730;
+  --border-default: #2a313b;
+  --border-strong: #3a4350;
+  --border-focus: #6b9ce8;
 
   /* Text */
-  --text-primary: #d8dee9;
-  --text-secondary: #9aa7b8;
-  --text-muted: #647285;
-  --text-bright: #f0f4fa;
-  --text-inverse: #080a0e;
+  --text-primary: #d5dae1;
+  --text-secondary: #a3acb8;
+  --text-muted: #77818e;
+  --text-bright: #f2f4f7;
+  --text-inverse: #0f1216;
 
-  /* Semantic signals (no glow) */
-  --sev-critical: #e5484d;
-  --sev-critical-bg: #291215;
-  --sev-critical-border: #6e2328;
+  /* Severity */
+  --sev-critical: #ef5b5b;
+  --sev-critical-bg: rgba(239, 91, 91, 0.12);
+  --sev-critical-border: rgba(239, 91, 91, 0.35);
 
-  --sev-high: #e07b24;
-  --sev-high-bg: #291a0d;
-  --sev-high-border: #6e3e14;
+  --sev-high: #e8924a;
+  --sev-high-bg: rgba(232, 146, 74, 0.12);
+  --sev-high-border: rgba(232, 146, 74, 0.35);
 
-  --sev-medium: #cfa82b;
-  --sev-medium-bg: #26200d;
-  --sev-medium-border: #635116;
+  --sev-medium: #d6b347;
+  --sev-medium-bg: rgba(214, 179, 71, 0.12);
+  --sev-medium-border: rgba(214, 179, 71, 0.35);
 
-  --sev-low: #4b91d9;
-  --sev-low-bg: #101e2e;
-  --sev-low-border: #254b73;
+  --sev-low: #6b9ce8;
+  --sev-low-bg: rgba(107, 156, 232, 0.12);
+  --sev-low-border: rgba(107, 156, 232, 0.35);
 
-  --sev-none: #647285;
-  --sev-none-bg: #141921;
-  --sev-none-border: #28313f;
+  --sev-none: #77818e;
+  --sev-none-bg: rgba(119, 129, 142, 0.12);
+  --sev-none-border: rgba(119, 129, 142, 0.3);
 
-  /* Operational states */
-  --state-ok: #2ea043;
-  --state-ok-bg: #0f2416;
-  --state-ok-border: #215730;
-  --state-warn: #d4a72c;
-  --state-warn-bg: #261f0b;
-  --state-accent: #58a6ff;
+  /* States */
+  --state-ok: #4cb36b;
+  --state-ok-bg: rgba(76, 179, 107, 0.12);
+  --state-ok-border: rgba(76, 179, 107, 0.35);
+  --state-warn: #d6b347;
+  --state-warn-bg: rgba(214, 179, 71, 0.12);
+  --state-accent: #6b9ce8;
 
-  /* Protocol colors (for Canvas charts & badges) */
-  --proto-ssh: #4b91d9;
-  --proto-telnet: #e07b24;
-  --proto-ftp: #a371f7;
-  --proto-http: #2ea043;
-  --proto-other: #7d8a9c;
+  /* Protocols (charts and badges) */
+  --proto-ssh: #6b9ce8;
+  --proto-telnet: #e8924a;
+  --proto-ftp: #a98be0;
+  --proto-http: #4cb36b;
+  --proto-other: #828c99;
 
-  /* Typography (zero external dependencies / CDN) */
-  --font-mono: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", "Fira Code",
-               ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --font-sans: "IBM Plex Sans", "Inter", system-ui, -apple-system, "Segoe UI",
-               Roboto, Helvetica, Arial, sans-serif;
+  /* Fonts (no CDN) */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
-  /* Structural dimensions */
-  --topbar-h: 34px;
-  --subbar-h: 36px;
-  --footer-h: 24px;
-  --rail-w: 184px;
-  --inspector-w: 470px;
-  --row-h: 27px;
-  --radius: 0px;
+  /* Sizes */
+  --topbar-h: 56px;
+  --subbar-h: 56px;
+  --footer-h: 0px;
+  --rail-w: 210px;
+  --inspector-w: 460px;
+  --row-h: 38px;
+  --radius: 8px;
+  --radius-sm: 5px;
 
-  /* Z-index */
+  /* Layers */
   --z-sticky: 10;
   --z-resizer: 20;
   --z-dropdown: 40;
@@ -90,8 +86,6 @@
 *::before,
 *::after {
   box-sizing: border-box;
-  border-radius: 0 !important;
-  box-shadow: none !important;
 }
 
 html,
@@ -104,17 +98,20 @@ body {
   background: var(--bg-canvas);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
 code,
 pre,
 kbd,
-.mono,
-.num {
+.mono {
   font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.num {
   font-variant-numeric: tabular-nums;
 }
 
@@ -127,16 +124,17 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Industrial 6px scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-canvas);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border-default);
+  border-radius: 10px;
+  border: 2px solid var(--bg-canvas);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
