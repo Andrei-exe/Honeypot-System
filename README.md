@@ -46,6 +46,7 @@ flowchart LR
   - On shutdown (`docker stop`, a server reboot, an update), it stops accepting connections, ends the open sessions and delivers its last events before it exits, usually within a second.
 - **threat-engine:**
   - Receives the events (`POST /api/events`, protected by a token) and evaluates each one in real time. It flags successful logins, brute force, download attempts, dangerous commands and malicious HTTP paths, with severities from LOW to CRITICAL.
+  - Stores events and alerts in a SQLite database (`/data/honeypot.db`, on the `engine-data` volume). Each batch is saved in one transaction, all or nothing; if the database is busy or the disk is full, the agent gets a 503, keeps the batch and sends it again. Every event is also appended to a journal (`/data/received_events.jsonl`), exactly as received, so the database can be rebuilt from it.
   - `main.py` runs an offline analysis that produces per-session summaries and a kill-chain funnel.
 - **dashboard:**
   - A live view of the alerts: summary cards, charts, top attacking IPs and an alert table refreshed every 5 seconds.
@@ -106,6 +107,15 @@ All settings live in `.env`; see `.env.example` for every option. Apply changes 
 | Live alerts | `docker logs -f threat-engine` |
 | Offline analysis | `docker compose run --rm threat-engine python main.py --input /data/received_events.jsonl --include-internal` |
 | Resource usage | `docker stats --no-stream` |
+| Copy of the database, to open in a SQLite viewer | see below |
+
+To look at the data (for example in DB Browser for SQLite), take a consistent copy with `VACUUM INTO` and open the copy, never the live file: the database runs in WAL mode, so a plain copy of `honeypot.db` taken while the threat engine writes can be incomplete.
+
+```bash
+docker exec threat-engine python -c "import sqlite3; sqlite3.connect('/data/honeypot.db').execute(\"VACUUM INTO '/data/backup.db'\")"
+docker cp threat-engine:/data/backup.db honeypot-backup.db
+docker exec threat-engine python -c "import os; os.remove('/data/backup.db')"
+```
 
 The offline analysis runs with the threat engine's 512 MB limit and needs about 6 times the size of `received_events.jsonl` in memory. If it gets killed (exit code 137) on a large file, run it with a higher limit:
 
@@ -148,7 +158,7 @@ The Compose project name is fixed to `honeypot-system` (`name:` in `docker-compo
 
   In a local load test (see [Load testing](#load-testing)), the agent held 800 simultaneous sessions with about 30 MB of memory, and handled about 160 SSH login attempts per second with a quarter of one core (a wrong password is answered after about 300 ms, as Dropbear does). A process that goes over its memory limit is killed and the container restarts.
 - **Automatic restart:** every container comes back after a crash or a server reboot (`restart: unless-stopped`). A container you stop yourself stays stopped.
-- **Log rotation:** Docker keeps at most 100 MB of logs for the agent (5 files of 20 MB) and 30 MB for each Python container (3 files of 10 MB), so a busy server cannot fill its disk. Older lines are deleted, which means `docker logs honeypot-agent` shows only recent events. The full history is kept by the threat engine in `received_events.jsonl`.
+- **Log rotation:** Docker keeps at most 100 MB of logs for the agent (5 files of 20 MB) and 30 MB for each Python container (3 files of 10 MB), so a busy server cannot fill its disk. Older lines are deleted, which means `docker logs honeypot-agent` shows only recent events. The full history is kept by the threat engine, in its database and in the `received_events.jsonl` journal.
 
 ## Deploying to a server
 

@@ -4,6 +4,7 @@
 import os
 import random
 import re
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -11,7 +12,7 @@ from filters import (check_event, command_words, is_internal, build_alert, alert
                      BruteForceTracker, HONEYTOKENS, COMMAND_PATTERNS, COMMAND_WORDS, HTTP_RULES)
 from events import validate_event
 from engine import Engine
-from storage import JsonlStorage, MemoryStorage
+from storage import SqliteStorage, MemoryStorage
 from scoring import score_to_severity
 from sessions import group_sessions, session_summary, STAGES
 from recommendations import DEFAULT_RECOMMENDATION
@@ -428,18 +429,6 @@ def test_ready_for_the_database():
     except OSError:
         pass
     assert broken.stats.total_events == 0 and broken.tracker.failures == {} and not broken.seen.ids
-    with tempfile.TemporaryDirectory() as folder:       # la JSONL: fisierele sunt taiate inapoi
-        events_file = os.path.join(folder, "events.jsonl")
-        with open(events_file, "w", encoding="utf-8") as f:
-            f.write('{"vechi": 1}\n')
-        os.mkdir(os.path.join(folder, "alerts.jsonl"))  # un folder in locul fisierului: alertele nu se pot scrie
-        jsonl = JsonlStorage(events_file, os.path.join(folder, "alerts.jsonl"), os.path.join(folder, "r.jsonl"))
-        try:
-            jsonl.save([{"nou": 1}], [{"b": 2}])
-            assert False, "trebuia sa arunce OSError"
-        except OSError:
-            pass
-        assert list(jsonl.iter_events()) == [{"vechi": 1}]
 
     # 5. corelarea si clustering-ul nu mai compara toate perechile, dar gasesc aceleasi grupuri
     summaries = random_summaries(1, 300)
@@ -459,6 +448,94 @@ def test_ready_for_the_database():
     assert restarted.campaigns() is restarted.campaigns()   # si rezultatul sta in cache
 
 
+# --- baza de date (SQLite) ------------------------------------------------
+
+def count(storage, table):
+    return storage.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def lines(path):
+    with open(path, encoding="utf-8") as f:
+        return [line for line in f if line.strip()]
+
+
+def test_sqlite_storage():
+    now = datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc)
+    attacker = "91.240.118.172"
+    attack = [failed_login(attacker, n, now + timedelta(seconds=n)) for n in range(5)]
+    tricky = full(event_type="command_exec", when=now, event_id="abc123", payload_details={
+        "command": "echo '; DROP TABLE events; -- \u0000 ăîșț \U0001F600", "extracted_url": "http://x/a"})
+    other_format = full(event_type="session_start", ip="5.6.7.8", timestamp="2026-11-27T11:00:00+02:00")
+
+    with tempfile.TemporaryDirectory() as folder:
+        db = os.path.join(folder, "honeypot.db")
+        journal = os.path.join(folder, "received_events.jsonl")
+        rejected = os.path.join(folder, "rejected_events.jsonl")
+        storage = SqliteStorage(db, journal, rejected)
+        try:
+            # setarile din CLAUDE.md: WAL, fara fisiere temporare, asteapta cand baza e ocupata, chei straine
+            settings = [storage.conn.execute(f"PRAGMA {name}").fetchone()[0]
+                        for name in ("journal_mode", "temp_store", "busy_timeout", "foreign_keys")]
+            assert settings == ["wal", 2, 5000, 1]
+
+            # un lot: evenimentele + alertele in baza, evenimentele si in jurnal, respinsul doar in fisier
+            engine = Engine(storage)
+            result = engine.ingest(attack + [tricky, other_format, {**tricky, "source_ip": None}])
+            assert result["accepted"] == 7 and result["rejected"] == 1
+            assert count(storage, "events") == 7 and len(lines(journal)) == 7 and len(lines(rejected)) == 1
+            assert count(storage, "alerts") == result["alerts_generated"] == 3   # cont critic, brute force, wget
+
+            # ce iese din baza e exact ce a intrat, in aceeasi ordine (cu tot cu ' -- NUL, diacritice, emoji)
+            saved = list(storage.iter_events())
+            assert [e["event_id"] for e in saved] == [e["event_id"] for e in storage_order(attack, tricky, other_format)]
+            assert saved[5]["payload_details"]["command"] == tricky["payload_details"]["command"]
+            assert [a["rule"] for a in storage.iter_alerts()] == ["critical_user_login", "brute_force",
+                                                                  "download_attempt"]
+
+            # timestamp-ul din coloana e mereu UTC, ca la agent (altfel ORDER BY ar amesteca formatele)
+            times = dict(storage.conn.execute("SELECT event_id, timestamp FROM events"))
+            assert times[saved[6]["event_id"]] == "2026-11-27T09:00:00.000Z"
+            assert times["abc123"] == "2026-11-27T09:00:00.000Z"
+
+            # acelasi lot de la un engine nou (fara id-urile in RAM): baza il refuza singura, fara eroare
+            Engine(storage).ingest(attack + [tricky])
+            assert count(storage, "events") == 7 and count(storage, "alerts") == 3
+
+            # totul sau nimic: daca o alerta nu se poate scrie, nici evenimentele lotului nu raman
+            fresh = full(ip="9.9.9.9", when=now)
+            fresh["event_id"] = "fresh1"
+            for bad_alert in ({"alert_id": "x", "event_id": "fresh1", "timestamp": fresh["timestamp"],
+                               "source_ip": "9.9.9.9", "rule": None, "score": 1, "severity": "LOW"},
+                              {"alert_id": "y", "event_id": "nu-exista", "timestamp": fresh["timestamp"],
+                               "source_ip": "9.9.9.9", "rule": "port_probe", "score": 1, "severity": "LOW"}):
+                try:
+                    storage.save([fresh], [bad_alert])
+                    assert False, "trebuia sa arunce sqlite3.IntegrityError"
+                except sqlite3.IntegrityError:
+                    pass
+                assert count(storage, "events") == 7 and count(storage, "alerts") == 3
+            # ...dar jurnalul le are (scris primul): la refacerea bazei, event_id arunca dublurile
+            assert len(lines(journal)) == 7 + 6 + 2
+        finally:
+            storage.close()
+
+        # repornire: alta conexiune la acelasi fisier -> engine-ul reface aceleasi statistici si alerte
+        storage = SqliteStorage(db, journal, rejected)
+        try:
+            restarted = Engine(storage)
+            assert restarted.load() == {"events": 7, "alerts": 3, "skipped": 0}
+            assert restarted.stats.to_dict() == engine.stats.to_dict()
+            assert [a["alert_id"] for a in restarted.recent_alerts] == [a["alert_id"] for a in engine.recent_alerts]
+            assert restarted.ingest(attack)["duplicates"] == 5
+        finally:
+            storage.close()
+
+
+def storage_order(attack, tricky, other_format):
+    """Ordinea in care engine-ul le-a salvat, cu event_id-urile date de validare."""
+    return [validate_event(e)[0] for e in attack + [tricky, other_format]]
+
+
 if __name__ == "__main__":
     tests = [
         test_score_bands, test_command_words, test_id_is_a_whole_word, test_download_is_serious,
@@ -471,6 +548,7 @@ if __name__ == "__main__":
         test_command_injection_in_url, test_honeytoken_file_read, test_honeytoken_login_beats_brute_force,
         test_honeytoken_alerts_are_tagged, test_correlation_links_honeytoken_reader_and_user,
         test_session_keeps_usernames, test_honeytokens_match_the_agent, test_ready_for_the_database,
+        test_sqlite_storage,
     ]
     for test in tests:
         test()

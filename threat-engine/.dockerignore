@@ -3,6 +3,9 @@
 # data (events, alerts) - it contains passwords from attacks; in the container it lives on the volume, in /data
 *.jsonl
 *.json
+*.db
+*.db-wal
+*.db-shm
 
 # generated Python files / virtual environments
 __pycache__/

@@ -1,33 +1,58 @@
 # storage.py - unde se salveaza evenimentele, alertele si evenimentele respinse.
 #
-# Acum: fisiere JSONL (JsonlStorage). Baza de date va fi o clasa noua cu ACELEASI metode:
-#   save(events, alerts, rejected)  un lot intreg, totul sau nimic (in DB: o singura tranzactie)
-#   iter_events() / iter_alerts()   la pornire, ce e deja salvat (in DB: SELECT ... ORDER BY)
-# Restul codului (engine.py) nu stie daca sub el e un fisier sau o baza de date.
+# SqliteStorage (receiver.py): baza de date SQLite = un singur fisier (/data/honeypot.db), plus
+# jurnalul received_events.jsonl (fiecare eveniment exact cum a venit), din care baza se poate reface.
+# MemoryStorage (main.py, teste): totul in liste, in RAM.
+# Amandoua au aceleasi metode, deci engine.py nu stie ce e dedesubt:
+#   save(events, alerts, rejected)  un lot intreg, totul sau nimic
+#   iter_events() / iter_alerts()   la pornire, ce e deja salvat, in ordinea in care s-a salvat
 #
 # Ce se salveaza:
 #   evenimentul = exact ce a trimis agentul + event_id (vezi events.py)
 #   alerta      = alert_id, event_id, codul regulii, scorul... FARA copia evenimentului (filters.build_alert)
-#   respinsul   = {received_at, reason, item}: ce n-a trecut de validare, ca sa nu se piarda nimic
+#   respinsul   = {received_at, reason, item}: ce n-a trecut de validare (doar in fisier, se citeste de mana)
 
 import json
-import os
+import sqlite3
+from datetime import timezone
+
+from events import parse_time
+
+# Coloane pentru ce se cauta des + "data" = tot obiectul, ca JSON (nu se pierde nimic).
+# STRICT: SQLite refuza un text intr-o coloana INTEGER (fara el, accepta orice in orice coloana).
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    event_id   TEXT PRIMARY KEY,
+    timestamp  TEXT NOT NULL,     -- UTC, mereu ca la agent: 2026-11-27T09:37:47.901Z
+    event_type TEXT NOT NULL,
+    source_ip  TEXT NOT NULL,
+    protocol   TEXT NOT NULL,
+    session_id TEXT,
+    data       TEXT NOT NULL      -- evenimentul intreg, JSON
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id   TEXT PRIMARY KEY,
+    event_id   TEXT NOT NULL REFERENCES events (event_id),
+    timestamp  TEXT NOT NULL,
+    source_ip  TEXT NOT NULL,
+    rule       TEXT NOT NULL,     -- codul regulii ("brute_force"); textul se face la afisare (texts.py)
+    score      INTEGER NOT NULL,
+    severity   TEXT NOT NULL,
+    data       TEXT NOT NULL      -- alerta intreaga, JSON
+) STRICT;
+"""
 
 
-def iter_jsonl(path):
-    """Citeste un fisier JSONL LINIE CU LINIE (generator): memoria ramane marginita,
-    oricat de mare ar fi fisierul. Liniile stricate sunt sarite."""
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line == "":
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+def to_json(item):
+    return json.dumps(item, ensure_ascii=False)
+
+
+def utc_text(timestamp):
+    """'2026-10-23T12:16:05+02:00' -> '2026-10-23T10:16:05.000Z': acelasi format ca la agent, ca
+    ORDER BY timestamp sa fie corect si pentru evenimentele scrise altfel (mock, generatoare)."""
+    when = parse_time(timestamp).astimezone(timezone.utc)
+    return when.strftime("%Y-%m-%dT%H:%M:%S.") + f"{when.microsecond // 1000:03d}Z"
 
 
 def append_lines(path, items, ascii_only=False):
@@ -37,38 +62,51 @@ def append_lines(path, items, ascii_only=False):
         f.write(text)
 
 
-class JsonlStorage:
-    def __init__(self, events_file, alerts_file, rejected_file):
-        self.events_file = events_file
-        self.alerts_file = alerts_file
+class SqliteStorage:
+    def __init__(self, db_file, journal_file, rejected_file):
+        self.journal_file = journal_file
         self.rejected_file = rejected_file
+        # O singura conexiune. engine.py o foloseste doar sub lock-ul lui (si la pornire, inainte de
+        # cereri), deci niciodata din doua thread-uri deodata: check_same_thread=False e sigur.
+        self.conn = sqlite3.connect(db_file, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")   # cine citeste nu asteapta dupa cine scrie
+        self.conn.execute("PRAGMA temp_store=MEMORY")  # fara fisiere temporare: containerul e read-only
+        self.conn.execute("PRAGMA busy_timeout=5000")  # baza ocupata (ex. un backup): asteapta pana la 5s
+        self.conn.execute("PRAGMA foreign_keys=ON")    # o alerta trimite mereu la un eveniment salvat
+        self.conn.executescript(SCHEMA)                # IF NOT EXISTS: la prima pornire creeaza tabelele
 
     def save(self, events, alerts, rejected=()):
-        """Salveaza un lot: totul sau nimic. Daca o scriere pica (disc plin), taiem fisierele
-        inapoi la marimea de dinainte, ca un lot retrimis sa nu apara de doua ori."""
-        # respinsele cu ascii_only: pot avea text care nu se poate scrie altfel (ex. "\ud800")
-        parts = [(self.events_file, events, False), (self.alerts_file, alerts, False),
-                 (self.rejected_file, rejected, True)]
-        sizes = {}
-        try:
-            for path, items, ascii_only in parts:
-                if not items:
-                    continue
-                sizes[path] = os.path.getsize(path) if os.path.exists(path) else 0
-                append_lines(path, items, ascii_only)
-        except BaseException:
-            for path, size in sizes.items():
-                try:
-                    os.truncate(path, size)
-                except OSError:
-                    pass
-            raise
+        """Un lot: intai fisierele, la final tranzactia. Daca ceva pica, baza ramane cum era (ROLLBACK),
+        agentul primeste 503 si retrimite lotul. In fisiere pot ramane linii in plus (lotul retrimis);
+        la refacerea bazei din jurnal, event_id le arunca. Deci jurnalul are mereu tot ce e in baza."""
+        if events:
+            append_lines(self.journal_file, events)
+        if rejected:
+            # ascii_only: un respins poate avea text care nu se poate scrie altfel (ex. "\ud800")
+            append_lines(self.rejected_file, rejected, ascii_only=True)
+
+        # Valorile merg separat de SQL (semnele ?), niciodata lipite in text: comenzile atacatorilor
+        # contin intentionat ' si -- (SQL injection). ON CONFLICT DO NOTHING: un lot retrimis nu se dubleaza.
+        with self.conn:   # BEGIN ... COMMIT; la orice exceptie: ROLLBACK
+            self.conn.executemany(
+                "INSERT INTO events (event_id, timestamp, event_type, source_ip, protocol, session_id, data)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
+                [(e["event_id"], utc_text(e["timestamp"]), e["event_type"], e["source_ip"], e["protocol"],
+                  e.get("session_id"), to_json(e)) for e in events])
+            self.conn.executemany(
+                "INSERT INTO alerts (alert_id, event_id, timestamp, source_ip, rule, score, severity, data)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (alert_id) DO NOTHING",
+                [(a["alert_id"], a["event_id"], utc_text(a["timestamp"]), a["source_ip"], a["rule"],
+                  a["score"], a["severity"], to_json(a)) for a in alerts])
 
     def iter_events(self):
-        return iter_jsonl(self.events_file)
+        return (json.loads(data) for (data,) in self.conn.execute("SELECT data FROM events ORDER BY rowid"))
 
     def iter_alerts(self):
-        return iter_jsonl(self.alerts_file)
+        return (json.loads(data) for (data,) in self.conn.execute("SELECT data FROM alerts ORDER BY rowid"))
+
+    def close(self):
+        self.conn.close()
 
 
 class MemoryStorage:
