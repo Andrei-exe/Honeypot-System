@@ -20,6 +20,12 @@ from config import (
     TECHNIQUE_TACTIC,
 )
 
+from services.translate import (
+    translate_family,
+    translate_reason,
+    translate_recommendation,
+)
+
 
 def _contains_any(text, markers):
     if not text:
@@ -81,8 +87,8 @@ def normalize_alert(alert, index=0):
         "severity": severity,
         "severity_rank": SEVERITY_RANK.get(severity, 0),
         "score": int(alert.get("score") or 0),
-        "alert_reason": reason,
-        "recommendation": alert.get("recommendation") or "",
+        "alert_reason": translate_reason(reason),
+        "recommendation": translate_recommendation(alert.get("recommendation") or ""),
         "technique": technique,
         "technique_name": alert.get("technique_name") or "",
         "tactic": tactic,
@@ -207,7 +213,7 @@ def normalize_session(summary, ip_families=None, alerts_by_session=None):
         "downloads": downloads,
         "stages": stages,
         "stage_count": len(stages),
-        "family_labels": family_labels,
+        "family_labels": [translate_family(label) for label in family_labels],
         "is_web_scanner": is_web_scanner,
         "honeytoken_hit": honeytoken_hit,
         "tags": sorted(set(tags)),

@@ -9,6 +9,7 @@ from config import DEFAULT_SESSIONS_LIMIT, TECHNIQUE_TACTIC
 from services.copilot import answer_query
 from services.engine_client import EngineError, engine_client
 from services.exporters import build_iptables_script, build_ufw_script, extract_ips_from_plain_blocklist
+from services.translate import translate_campaign, translate_family, translate_family_record
 from services.normalizer import (
     build_ip_family_map,
     build_timeline_buckets,
@@ -253,7 +254,7 @@ def v1_attackers_index():
                 "honeytoken_hit": False,
                 "geo": None,
                 "last_seen": "",
-                "families": ip_fam_map.get(ip, []),
+                "families": [translate_family(label) for label in ip_fam_map.get(ip, [])],
             }
         return table[ip]
 
@@ -349,7 +350,7 @@ def v1_attacker_detail(ip):
 
     return jsonify(
         profile=profile,
-        families=ip_fam_map.get(ip, []),
+        families=[translate_family(label) for label in ip_fam_map.get(ip, [])],
         user_agents=user_agents,
         credentials_seen=credentials_seen[:50],
         sessions=ip_sessions,
@@ -369,8 +370,8 @@ def v1_campaigns():
     except EngineError as exc:
         return _error_response(exc)
 
-    campaigns = campaigns_raw.get("campaigns") or []
-    families = families_raw.get("families") or []
+    campaigns = [translate_campaign(c) for c in (campaigns_raw.get("campaigns") or [])]
+    families = [translate_family_record(f) for f in (families_raw.get("families") or [])]
     sessions = sessions_raw.get("sessions") or []
 
     return jsonify(
