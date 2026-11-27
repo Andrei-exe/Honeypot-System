@@ -63,6 +63,8 @@ def append_lines(path, items, ascii_only=False):
 
 
 class SqliteStorage:
+    """journal_file / rejected_file = None: nu se scriu (refacerea bazei din jurnal, rebuild_db.py)."""
+
     def __init__(self, db_file, journal_file, rejected_file):
         self.journal_file = journal_file
         self.rejected_file = rejected_file
@@ -79,9 +81,9 @@ class SqliteStorage:
         """Un lot: intai fisierele, la final tranzactia. Daca ceva pica, baza ramane cum era (ROLLBACK),
         agentul primeste 503 si retrimite lotul. In fisiere pot ramane linii in plus (lotul retrimis);
         la refacerea bazei din jurnal, event_id le arunca. Deci jurnalul are mereu tot ce e in baza."""
-        if events:
+        if events and self.journal_file:
             append_lines(self.journal_file, events)
-        if rejected:
+        if rejected and self.rejected_file:
             # ascii_only: un respins poate avea text care nu se poate scrie altfel (ex. "\ud800")
             append_lines(self.rejected_file, rejected, ascii_only=True)
 

