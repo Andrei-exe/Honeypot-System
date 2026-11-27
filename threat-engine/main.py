@@ -9,7 +9,7 @@ import json
 import os
 from reader import read_events, DATA_FILE
 from engine import Engine
-from storage import MemoryStorage
+from storage import SqliteStorage
 from sessions import kill_chain_funnel
 from blocklist import build_blocklist
 from attack_techniques import navigator_layer
@@ -55,12 +55,13 @@ def main():
     print(f"[+] preluat {len(raw_events)} evenimente colectate")
     raw_events.sort(key=timestamp_text)
 
+    # o baza de date doar in RAM (":memory:"), fara jurnal: aceleasi reguli si interogari ca receiver.py.
     # max_sessions=None: aici analizam tot fisierul, nu doar ultimele 2000 de sesiuni
-    engine = Engine(MemoryStorage(), include_internal=args.include_internal,
-                    bf_threshold=args.bf_threshold, max_sessions=None)
+    engine = Engine(SqliteStorage(":memory:", None, None), include_internal=args.include_internal,
+                    bf_threshold=args.bf_threshold, max_sessions=None, cache_seconds=0)
     result = engine.ingest(raw_events)
     alerts = result["new_alerts"]
-    stats = engine.stats
+    stats = engine.stats_dict()
 
     for alert in alerts:
         proto = (alert.get("protocol") or "UNKNOWN").upper()
@@ -90,20 +91,20 @@ def main():
         print(f"evenimente invalide        : {result['rejected']} ({', '.join(result['rejected_reasons'])})")
     if result["duplicates"]:
         print(f"duplicate (acelasi id)     : {result['duplicates']}")
-    print(f"trafic intern exclus       : {result['accepted'] - stats.total_events}")
-    print(f"total amenintari detectate : {stats.total_alerts}")
-    print(f"adrese IP unice de atac    : {len(stats.alerts_by_ip)}")
-    if stats.alerts_by_protocol:
-        distributie = ", ".join(f"{k}: {v}" for k, v in stats.alerts_by_protocol.items())
+    print(f"trafic intern exclus       : {result['accepted'] - stats['total_events']}")
+    print(f"total amenintari detectate : {stats['total_alerts']}")
+    print(f"adrese IP unice de atac    : {stats['unique_attacker_ips']}")
+    if stats["alerts_by_protocol"]:
+        distributie = ", ".join(f"{k}: {v}" for k, v in stats["alerts_by_protocol"].items())
         print(f"spread protocoale          : {distributie}")
-    if stats.alerts_by_severity:
-        sev_dist = ", ".join(f"{k}: {v}" for k, v in stats.alerts_by_severity.items())
+    if stats["alerts_by_severity"]:
+        sev_dist = ", ".join(f"{k}: {v}" for k, v in stats["alerts_by_severity"].items())
         print(f"distributie severitate     : {sev_dist}")
-    if stats.alerts_by_ip:
-        top_ips = ", ".join(f"{ip} ({cnt})" for ip, cnt in stats.alerts_by_ip.most_common(5))
+    if stats["top_ips"]:
+        top_ips = ", ".join(f"{item['ip']} ({item['count']})" for item in stats["top_ips"][:5])
         print(f"top 5 IP-uri atacante      : {top_ips}")
-    if stats.credentials:
-        top_creds = ", ".join(f"{c} ({cnt}x)" for c, cnt in stats.credentials.most_common(5))
+    if stats["top_credentials"]:
+        top_creds = ", ".join(f"{item['credentials']} ({item['count']}x)" for item in stats["top_credentials"][:5])
         print(f"top 5 credentiale incercate: {top_creds}")
     if summaries:
         print(f"\npalnia kill chain ({len(summaries)} sesiuni):")

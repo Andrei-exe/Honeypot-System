@@ -47,6 +47,7 @@ flowchart LR
 - **threat-engine:**
   - Receives the events (`POST /api/events`, protected by a token) and evaluates each one in real time. It flags successful logins, brute force, download attempts, dangerous commands and malicious HTTP paths, with severities from LOW to CRITICAL.
   - Stores events and alerts in a SQLite database (`/data/honeypot.db`, on the `engine-data` volume). Each batch is saved in one transaction, all or nothing; if the database is busy or the disk is full, the agent gets a 503, keeps the batch and sends it again. Every event is also appended to a journal (`/data/received_events.jsonl`), exactly as received, so the database can be rebuilt from it.
+  - Everything the dashboard shows is read from the database: statistics over all events and alerts, the latest 500 alerts, the latest 2000 sessions and the full history of one attacker. Only the last 10 minutes of failed logins (for brute force) are kept in memory, so a restart takes well under a second and memory stays small. Each session's summary keeps its first 50 commands, passwords, usernames and download URLs; its stages and login count cover all of its events.
   - `main.py` runs an offline analysis that produces per-session summaries and a kill-chain funnel.
 - **dashboard:**
   - A live view of the alerts: summary cards, charts, top attacking IPs and an alert table refreshed every 5 seconds.

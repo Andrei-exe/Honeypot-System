@@ -18,6 +18,7 @@
 import hmac
 import os
 import sqlite3
+import sys
 
 from flask import Flask, jsonify, request, Response
 from engine import Engine
@@ -39,7 +40,11 @@ AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
 INCLUDE_INTERNAL = os.environ.get("INCLUDE_INTERNAL", "true").lower() == "true"
 
-engine = Engine(SqliteStorage(DB_FILE, EVENTS_FILE, REJECTED_FILE), include_internal=INCLUDE_INTERNAL)
+try:
+    engine = Engine(SqliteStorage(DB_FILE, EVENTS_FILE, REJECTED_FILE), include_internal=INCLUDE_INTERNAL)
+except RuntimeError as error:   # baza are tabelele unei versiuni vechi: se reface din jurnal
+    print(f"[EROARE] {error}")
+    sys.exit(1)
 
 
 def token_is_valid(header):
@@ -149,8 +154,7 @@ def get_navigator():
 
 
 loaded = engine.load()
-print(f"[*] incarcat {loaded['events']} evenimente si {loaded['alerts']} alerte din baza de date"
-      + (f" ({loaded['skipped']} linii invalide sarite)" if loaded["skipped"] else ""))
+print(f"[*] baza de date: {loaded['events']} evenimente si {loaded['alerts']} alerte")
 
 if __name__ == "__main__":
     if AGENT_TOKEN == "":

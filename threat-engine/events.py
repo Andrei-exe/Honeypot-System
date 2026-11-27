@@ -4,16 +4,15 @@
 #    (rejected_events.jsonl) si nu mai blocheaza tot lotul.
 # 2. Fiecare eveniment are un event_id. Daca agentul trimite unul, il pastram; daca nu, il facem
 #    din continut (aceleasi date -> acelasi id). Un lot retrimis de agent are aceleasi id-uri,
-#    deci il recunoastem si nu-l mai salvam a doua oara. In baza de date: UNIQUE pe event_id.
+#    deci il recunoastem si nu-l mai salvam a doua oara (engine.py intreaba baza: storage.existing_ids).
 
 import hashlib
 import ipaddress
 import json
 import re
-from collections import deque
 from datetime import datetime, timezone
 
-# aceleasi ca in shared/event-schema.json (test_event_schema_matches verifica)
+# aceleasi ca in shared/event-schema.json
 REQUIRED = ["timestamp", "node_id", "event_type", "source_ip", "protocol"]
 EVENT_TYPES = {"session_start", "session_end", "login_attempt", "command_exec",
                "file_download", "http_request", "port_scan"}
@@ -26,10 +25,6 @@ PAYLOAD_TEXT = ["command", "extracted_url", "http_method", "http_path", "http_us
 
 # un event_id trimis de agent: scurt si fara caractere ciudate (ex. 16 hex)
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
-# cate id-uri tinem minte pentru duplicate. Agentul retrimite doar ultimul POST (max 200 de
-# evenimente) sau ce n-a ajuns (max 5000), deci 20000 ajunge cu mult.
-RECENT_IDS = 20000
 
 
 def parse_time(timestamp):
@@ -125,23 +120,3 @@ def validate_event(item):
     if not event.get("event_id"):
         event["event_id"] = content_id(item)
     return event, None
-
-
-class RecentIds:
-    """Ultimele id-uri vazute: un set (cautare rapida) + o coada (ordinea, ca sa le uitam pe cele vechi)."""
-
-    def __init__(self, limit=RECENT_IDS):
-        self.limit = limit
-        self.ids = set()
-        self.order = deque()
-
-    def __contains__(self, event_id):
-        return event_id in self.ids
-
-    def add(self, event_id):
-        if event_id in self.ids:
-            return
-        self.ids.add(event_id)
-        self.order.append(event_id)
-        if len(self.order) > self.limit:
-            self.ids.discard(self.order.popleft())
