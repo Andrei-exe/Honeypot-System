@@ -114,7 +114,9 @@ export class KillChainFunnel {
       return;
     }
 
-    const labelW = 150;
+    // the label column fits the longest stage name in the font the browser really uses
+    const widest = Math.max(0, ...this.stages.map((st) => ctx.measureText(STAGE_LABELS[st.stage] || String(st.stage || "")).width));
+    const labelW = Math.min(Math.max(150, Math.ceil(widest) + 20), Math.floor(w * 0.4));
     const rightW = 110;
     const barMaxW = Math.max(40, w - labelW - rightW);
     const first = Math.max(1, this.stages[0].sessions || 0);
