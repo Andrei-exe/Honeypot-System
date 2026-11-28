@@ -22,6 +22,7 @@ import {
   timeAgo,
 } from "../core/escape.js";
 import { store } from "../core/store.js";
+import { mountReplay, replayMarkup, stopReplay } from "./replay.js";
 
 let maskPasswords = false;
 let attackerRequest = 0;
@@ -225,33 +226,14 @@ function sessionBody(s, tab) {
         .join("");
     }
 
-    const cmds = asList(s.commands);
     return `
-      <div class="term-box">
-        <div class="term-head">
-          <span>${plural(cmds.length, "command", "commands")}</span>
-          ${cmds.length ? `<button class="btn sm" data-copy="${escapeHtml(cmds.join("\n"))}">Copy all</button>` : ""}
-        </div>
-        <div class="term-body">
-          ${s.successful_login ? `<div class="term-line"><span class="term-idx"></span><span class="term-cmd" style="color:var(--sev-critical);">Logged in as ${escapeHtml(s.successful_login)}</span></div>` : ""}
-          ${
-            cmds.length
-              ? cmds
-                  .map((cmd, idx) => {
-                    const flag = classifyCommand(cmd);
-                    return `<div class="term-line ${flag ? "flag-" + flag : ""}"><span class="term-idx">${idx + 1}</span><span class="term-cmd"><span class="term-prompt">#</span>${escapeHtml(cmd)}</span></div>`;
-                  })
-                  .join("")
-              : `<div class="empty-state">No commands were typed in this session.</div>`
-          }
-        </div>
-      </div>
+      ${replayMarkup(s)}
       ${
         asList(s.downloads).length
           ? `<div class="section-title">Files it tried to download</div><pre class="code-block">${escapeHtml(asList(s.downloads).join("\n"))}</pre>`
           : ""
       }
-      <p class="muted-note">Highlighted lines: red = decoy secret, orange = download or Mirai, yellow = crypto-miner checks.</p>
+      <p class="muted-note">The honeypot records what was typed, not what the shell answered, so the grey ↳ lines show what was detected instead. Highlighted commands: red = decoy secret, orange = download or Mirai, yellow = crypto-miner checks.</p>
     `;
   }
 
@@ -467,6 +449,7 @@ export function renderInspector() {
   if (!pane || !resizer) return;
 
   if (!st.inspector.open || !st.inspector.data) {
+    stopReplay();
     pane.classList.add("collapsed");
     resizer.classList.add("collapsed");
     return;
@@ -500,6 +483,16 @@ export function renderInspector() {
     </div>
     <div class="inspector-content">${body}</div>
   `;
+
+  if (kind === "session" && tab === "replay" && data.protocol !== "HTTP") {
+    try {
+      mountReplay(pane, data);
+    } catch (err) {
+      console.error("[replay]", err);
+    }
+  } else {
+    stopReplay();
+  }
 
   pane.querySelector('[data-action="close-inspector"]')?.addEventListener("click", () => store.closeInspector());
 
